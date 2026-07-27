@@ -1,0 +1,11 @@
+# Runtime dependencies for the controller host.
+#
+# These modules execute on the Ansible controller (delegate_to: localhost), not
+# on the managed node. An Intel AMT endpoint is firmware; it cannot run a Python
+# payload. Install these wherever the playbook runs.
+#
+# Deliberately minimal: no lxml (a C extension that complicates controller
+# installs for no benefit here -- the standard library XML parser is sufficient
+# for WS-Man responses, which are small and come from an authenticated endpoint).
+
+requests>=2.25.0

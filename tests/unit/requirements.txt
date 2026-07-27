@@ -1,0 +1,4 @@
+# Unit test dependencies, installed by ansible-test units and by CI.
+requests>=2.25.0
+pytest>=7.0.0
+pytest-mock>=3.10.0

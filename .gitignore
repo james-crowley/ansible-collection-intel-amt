@@ -1,0 +1,37 @@
+# Ansible collection build output
+/dist/
+*.tar.gz
+/tests/output/
+/tests/hardware/output/
+/changelogs/.plugin-cache.yaml
+
+# ansible-galaxy build metadata (generated, not source)
+MANIFEST.json
+FILES.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Local test/lab material. Never commit real credentials, inventories,
+# certificate fingerprints, or boot media.
+/tests/hardware/inventory.yml
+/tests/hardware/*.vault
+*.iso
+*.img
+!tests/**/fixtures/**/*.img
+.vault_password
+
+# Editors / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

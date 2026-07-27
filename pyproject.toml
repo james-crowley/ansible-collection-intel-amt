@@ -1,0 +1,40 @@
+# Tooling configuration only. This collection is distributed via
+# ansible-galaxy, not as a Python package, so there is no [project] table.
+
+[tool.ruff]
+line-length = 160
+target-version = "py311"
+extend-exclude = ["dist", "tests/output", ".venv"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "C4",   # flake8-comprehensions
+    "RUF",  # ruff-specific
+    "S",    # flake8-bandit
+]
+ignore = [
+    # Ansible modules legitimately use broad excepts to convert any failure into
+    # a classified module failure via fail_json.
+    "BLE001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# MD5 is mandated by the RFC 2617 digest scheme that Intel AMT's redirection
+# port implements. It is not a security choice available to us.
+"plugins/module_utils/redirection.py" = ["S324"]
+# Tests use asserts and construct fixture data freely.
+"tests/**" = ["S101", "S105", "S106", "S311"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ansible_collections"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"

@@ -1,0 +1,332 @@
+---
+version: 2.1
+
+# ---------------------------------------------------------------------------
+# Pipeline parameters
+#
+# run-hardware-tests gates the hardware-in-the-loop workflow. Those jobs run on
+# a self-hosted CircleCI machine runner inside the lab network and touch real
+# Intel AMT endpoints (power cycling machines, attaching boot media), so they
+# must never fire on an ordinary push. Trigger deliberately:
+#
+#   curl -X POST https://circleci.com/api/v2/project/<project-slug>/pipeline \
+#     -u "${CIRCLE_TOKEN}:" -H 'Content-Type: application/json' \
+#     -d '{"parameters":{"run-hardware-tests":true}}'
+# ---------------------------------------------------------------------------
+parameters:
+  run-hardware-tests:
+    type: boolean
+    default: false
+
+executors:
+  python:
+    parameters:
+      python-version:
+        type: string
+        default: "3.12"
+    docker:
+      - image: cimg/python:<< parameters.python-version >>
+    working_directory: ~/project
+
+commands:
+  install-ansible:
+    description: Install a specific ansible-core minor series plus test deps.
+    parameters:
+      ansible-core-version:
+        type: string
+    steps:
+      - restore_cache:
+          keys:
+            - v1-pip-<< parameters.ansible-core-version >>-{{ checksum "tests/unit/requirements.txt" }}
+            - v1-pip-<< parameters.ansible-core-version >>-
+      - run:
+          name: Install ansible-core << parameters.ansible-core-version >>
+          command: |
+            python -m pip install --upgrade pip
+            python -m pip install "ansible-core~=<< parameters.ansible-core-version >>.0"
+            python -m pip install -r tests/unit/requirements.txt
+            ansible --version
+      - save_cache:
+          paths:
+            - ~/.cache/pip
+          key: v1-pip-<< parameters.ansible-core-version >>-{{ checksum "tests/unit/requirements.txt" }}
+
+  collect-test-results:
+    description: >-
+      Copy ansible-test JUnit output back out of the staged collection tree.
+      The subdirectory must not be hidden or CircleCI silently ignores it.
+    parameters:
+      label:
+        type: string
+    steps:
+      - run:
+          name: Gather JUnit results
+          when: always
+          command: |
+            mkdir -p ~/project/test-results/<< parameters.label >>
+            if [ -d "${COLLECTION_PATH:-}/tests/output/junit" ]; then
+              cp -a "${COLLECTION_PATH}/tests/output/junit/." \
+                 ~/project/test-results/<< parameters.label >>/ 2>/dev/null || true
+            fi
+      - store_test_results:
+          path: ~/project/test-results
+      - store_artifacts:
+          path: ~/project/test-results
+          destination: test-results
+
+jobs:
+  # -------------------------------------------------------------------------
+  lint:
+    executor:
+      name: python
+      python-version: "3.12"
+    steps:
+      - checkout
+      - install-ansible:
+          ansible-core-version: "2.19"
+      - run:
+          name: Install linters
+          command: python -m pip install ansible-lint yamllint ruff
+      - run:
+          name: yamllint
+          command: yamllint -c .yamllint .
+      - run:
+          name: ruff
+          command: ruff check plugins tests
+      - run:
+          name: ruff format check
+          command: ruff format --check plugins tests
+      - run:
+          name: ansible-lint
+          command: ansible-lint --offline
+
+  # -------------------------------------------------------------------------
+  sanity:
+    parameters:
+      ansible-core-version:
+        type: string
+      python-version:
+        type: string
+    executor:
+      name: python
+      python-version: << parameters.python-version >>
+    steps:
+      - checkout
+      - install-ansible:
+          ansible-core-version: << parameters.ansible-core-version >>
+      - run:
+          name: ansible-test sanity
+          command: |
+            COLLECTION_PATH="$(./scripts/setup-collection-tree.sh)"
+            echo "export COLLECTION_PATH=${COLLECTION_PATH}" >> "$BASH_ENV"
+            cd "${COLLECTION_PATH}"
+            # --venv, not --docker: the CircleCI Docker executor cannot bind-mount
+            # the working directory into a remote-docker container, which is what
+            # `ansible-test --docker` requires. See docs/testing.md.
+            ansible-test sanity --venv --python << parameters.python-version >> \
+              --color -v --junit
+      - collect-test-results:
+          label: sanity-py<< parameters.python-version >>-core<< parameters.ansible-core-version >>
+
+  # -------------------------------------------------------------------------
+  units:
+    parameters:
+      ansible-core-version:
+        type: string
+      python-version:
+        type: string
+    executor:
+      name: python
+      python-version: << parameters.python-version >>
+    steps:
+      - checkout
+      - install-ansible:
+          ansible-core-version: << parameters.ansible-core-version >>
+      - run:
+          name: ansible-test units
+          command: |
+            COLLECTION_PATH="$(./scripts/setup-collection-tree.sh)"
+            echo "export COLLECTION_PATH=${COLLECTION_PATH}" >> "$BASH_ENV"
+            cd "${COLLECTION_PATH}"
+            ansible-test units --venv --python << parameters.python-version >> \
+              --color -v --coverage
+      - run:
+          name: Coverage report
+          when: always
+          command: |
+            cd "${COLLECTION_PATH}"
+            ansible-test coverage report --omit 'tests/*' --color -v || true
+      - collect-test-results:
+          label: units-py<< parameters.python-version >>-core<< parameters.ansible-core-version >>
+
+  # -------------------------------------------------------------------------
+  # Mock integration tests. These run the modules end-to-end against a local
+  # deterministic WS-Man + IDE-R fixture server. No real AMT hardware.
+  integration-mock:
+    executor:
+      name: python
+      python-version: "3.12"
+    steps:
+      - checkout
+      - install-ansible:
+          ansible-core-version: "2.19"
+      - run:
+          name: ansible-test integration (mock endpoints)
+          command: |
+            COLLECTION_PATH="$(./scripts/setup-collection-tree.sh)"
+            echo "export COLLECTION_PATH=${COLLECTION_PATH}" >> "$BASH_ENV"
+            cd "${COLLECTION_PATH}"
+            ansible-test integration --venv --python 3.12 --color -v
+      - collect-test-results:
+          label: integration-mock
+
+  # -------------------------------------------------------------------------
+  build:
+    executor:
+      name: python
+      python-version: "3.12"
+    steps:
+      - checkout
+      - install-ansible:
+          ansible-core-version: "2.19"
+      - run:
+          name: Build collection artifact
+          command: |
+            ansible-galaxy collection build --output-path ./dist -v
+            ls -la ./dist
+      - run:
+          name: Verify the artifact installs cleanly
+          command: |
+            ansible-galaxy collection install ./dist/*.tar.gz -p /tmp/verify-install -v
+            ansible-doc --list \
+              --module-path /tmp/verify-install/ansible_collections/james_crowley/intel_amt/plugins/modules \
+              2>/dev/null || true
+      - store_artifacts:
+          path: ./dist
+          destination: collection
+      - persist_to_workspace:
+          root: .
+          paths:
+            - dist
+
+  # -------------------------------------------------------------------------
+  # Hardware-in-the-loop. Runs on a self-hosted machine runner inside the lab
+  # network. Requires both an explicit pipeline parameter and a human approval.
+  hardware-tests:
+    machine: true
+    resource_class: james-crowley/amt-lab
+    steps:
+      - checkout
+      - run:
+          name: Install ansible-core
+          command: |
+            python3 -m pip install --user --upgrade pip
+            python3 -m pip install --user "ansible-core~=2.19.0"
+            python3 -m pip install --user -r tests/unit/requirements.txt
+      - run:
+          name: Read-only AMT qualification
+          command: |
+            ansible-playbook tests/hardware/qualify_readonly.yml \
+              -i tests/hardware/inventory.yml -v
+      - run:
+          name: Check-mode power and boot plans
+          command: |
+            ansible-playbook tests/hardware/qualify_checkmode.yml \
+              -i tests/hardware/inventory.yml --check -v
+      - store_artifacts:
+          path: tests/hardware/output
+          destination: hardware-evidence
+
+  # -------------------------------------------------------------------------
+  publish:
+    executor:
+      name: python
+      python-version: "3.12"
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - install-ansible:
+          ansible-core-version: "2.19"
+      - run:
+          name: Publish to Ansible Galaxy
+          command: |
+            test -n "${ANSIBLE_GALAXY_API_KEY}" || {
+              echo "ANSIBLE_GALAXY_API_KEY is not set; is the context attached?" >&2
+              exit 1
+            }
+            ansible-galaxy collection publish ./dist/*.tar.gz \
+              --api-key "${ANSIBLE_GALAXY_API_KEY}" -v
+
+workflows:
+  # -------------------------------------------------------------------------
+  # Ordinary CI. Tag filters are present on every job because CircleCI skips
+  # jobs without them on tag pushes, which would strand the publish job.
+  test:
+    when:
+      not: << pipeline.parameters.run-hardware-tests >>
+    jobs:
+      - lint:
+          filters:
+            tags:
+              only: /^v.*/
+      - sanity:
+          requires: [lint]
+          filters:
+            tags:
+              only: /^v.*/
+          matrix:
+            parameters:
+              python-version: ["3.12"]
+              ansible-core-version: ["2.16", "2.17", "2.18", "2.19"]
+      - units:
+          requires: [lint]
+          filters:
+            tags:
+              only: /^v.*/
+          matrix:
+            parameters:
+              python-version: ["3.11", "3.12", "3.13"]
+              ansible-core-version: ["2.16", "2.19"]
+            exclude:
+              # ansible-core 2.16 does not support Python 3.13.
+              - python-version: "3.13"
+                ansible-core-version: "2.16"
+      - integration-mock:
+          requires: [lint]
+          filters:
+            tags:
+              only: /^v.*/
+      - build:
+          requires: [sanity, units, integration-mock]
+          filters:
+            tags:
+              only: /^v.*/
+      - publish-approval:
+          type: approval
+          requires: [build]
+          filters:
+            tags:
+              only: /^v.*/
+            branches:
+              ignore: /.*/
+      - publish:
+          requires: [publish-approval]
+          context: galaxy-publish
+          filters:
+            tags:
+              only: /^v.*/
+            branches:
+              ignore: /.*/
+
+  # -------------------------------------------------------------------------
+  # Opt-in only. Never runs on a normal push.
+  hardware:
+    when: << pipeline.parameters.run-hardware-tests >>
+    jobs:
+      - lint
+      - hardware-approval:
+          type: approval
+          requires: [lint]
+      - hardware-tests:
+          requires: [hardware-approval]
