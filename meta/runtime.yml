@@ -1,0 +1,24 @@
+---
+# ansible-core 2.17 is the floor, and the reason is specific: the sanity-test
+# boilerplate requirement changed incompatibly at 2.17. From 2.17 onward the
+# merged `boilerplate` test requires `from __future__ import annotations` and
+# actively rejects the older `absolute_import, division, print_function` plus
+# `__metaclass__ = type` pair that 2.16 and earlier require. No single form
+# passes sanity on both eras, so supporting 2.16 would mean shipping modules
+# that cannot be sanity-clean. We take 2.17 as the floor instead.
+requires_ansible: '>=2.17.0'
+
+action_groups:
+  # Lets a play set shared connection options once via module_defaults:
+  #
+  #   module_defaults:
+  #     group/james_crowley.intel_amt.intel_amt:
+  #       host: "{{ amt_host }}"
+  #       username: "{{ amt_username }}"
+  #       password: "{{ amt_password }}"
+  intel_amt:
+    - amt_boot
+    - amt_info
+    - amt_media
+    - amt_power
+    - amt_redirection

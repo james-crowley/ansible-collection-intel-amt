@@ -1,0 +1,53 @@
+---
+namespace: james_crowley
+name: intel_amt
+version: 0.1.0
+readme: README.md
+
+authors:
+  - Jim Crowley (https://github.com/james-crowley)
+
+description: >-
+  Out-of-band management of Intel AMT / vPro endpoints from Ansible: capability
+  discovery, power control, one-time boot selection, redirection service state,
+  and native IDE-R virtual media with support for a bootable ISO alongside a
+  writable image, for repeatable unattended bare-metal operating system installs.
+
+license:
+  - GPL-3.0-or-later
+
+tags:
+  - intel
+  - amt
+  - vpro
+  - ider
+  - outofband
+  - baremetal
+  - provisioning
+  - infrastructure
+  - system
+  - tools
+
+dependencies: {}
+
+repository: https://github.com/james-crowley/ansible-collection-intel-amt
+documentation: https://github.com/james-crowley/ansible-collection-intel-amt/tree/main/docs
+homepage: https://github.com/james-crowley/ansible-collection-intel-amt
+issues: https://github.com/james-crowley/ansible-collection-intel-amt/issues
+
+build_ignore:
+  - .circleci
+  - .github
+  - .gitignore
+  - .yamllint
+  - .ruff_cache
+  - .pytest_cache
+  - pyproject.toml
+  - scripts
+  - dist
+  - .venv
+  - '*.tar.gz'
+  - tests/hardware
+  - tests/output
+  - __pycache__
+  - '*.pyc'
