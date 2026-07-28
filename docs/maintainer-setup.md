@@ -152,7 +152,7 @@ What I need, added to the existing `amt-lab-runner` context:
 
 ```bash
 circleci context secret set amt-lab-runner --org gh/james-crowley \
-  --name AMT_HOSTS --value 'LAMBDA_AMT_IP,THETA_AMT_IP'
+  --name AMT_HOSTS --value '<LAB_HOST_1-ip>,<theta-amt-ip>'
 ```
 
 `AMT_HOSTS` (plural) is already supported and takes precedence over `AMT_HOST`.
@@ -164,18 +164,16 @@ circleci context secret set amt-lab-runner --org gh/james-crowley \
 - If Theta's AMT password differs from Lambda's, the same applies to
   `AMT_PASSWORD`.
 
-Theta's fingerprint, from your earlier message, for the record:
-`THETA_TLS_FINGERPRINT`
+Theta's reviewed fingerprint is held in the `amt-lab-runner` context, not
+recorded here — this repository is public.
 
 ---
 
 ## 6. Confirm Lambda's UUID against MEBx — **one minute, unblocks the identity guard**
 
-`amt_info` reports:
-
-```
-LAMBDA_PLATFORM_GUID
-```
+Run the `hardware-observe` job (or stage 1) and read the `uuid` that `amt_info`
+reports for Lambda. The value is not reproduced here, because a platform GUID
+identifies a physical machine and this repository is public.
 
 Open MEBx (or BIOS system information) on Lambda and confirm it matches. This
 matters because the stage-2 identity cross-check compares the firmware-reported
@@ -187,7 +185,7 @@ confirming that reasoning, not just a string.
 Cross-check from a trusted host if you prefer:
 
 ```bash
-openssl s_client -connect LAMBDA_AMT_IP:16993 </dev/null 2>/dev/null \
+openssl s_client -connect <LAB_HOST_1-ip>:16993 </dev/null 2>/dev/null \
   | openssl x509 -noout -fingerprint -sha256
 ```
 

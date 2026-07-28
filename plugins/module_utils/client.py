@@ -147,8 +147,8 @@ def _canonical_uuid(value: str) -> str:
     correctly-recorded expectation and be quietly useless. On real AMT 16.1.30
     firmware the two readings are::
 
-        naive big-endian     LAMBDA_PLATFORM_GUID_BE   version F
-        SMBIOS little-endian LAMBDA_PLATFORM_GUID   version 1
+        naive big-endian     DDCCBBAA-FFEE-F011-8899-001122334455   version F
+        SMBIOS little-endian AABBCCDD-EEFF-11F0-8899-001122334455   version 1
 
     A valid UUID version is 1-8, so the naive reading is demonstrably wrong while
     remaining plausible. The unit tests assert the version nibble for exactly this

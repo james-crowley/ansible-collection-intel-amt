@@ -502,9 +502,13 @@ class TestCanonicalUuidFormatting:
     wrong one.
     """
 
-    #: Exactly what AMT 16.1.30 returned for the lab machine.
-    REAL_PLATFORM_GUID = "LAMBDA_PLATFORM_GUID_COMPACT"
-    EXPECTED = "LAMBDA_PLATFORM_GUID"
+    #: Shaped exactly like what AMT 16.1.30 returns, but with illustrative digits:
+    #: this repository is public and a platform GUID identifies a physical machine.
+    #: The two properties the tests actually rely on are preserved -- the
+    #: little-endian reading yields a valid version nibble (1) and the naive
+    #: big-endian reading yields an invalid one (F) -- so the proof is unchanged.
+    REAL_PLATFORM_GUID = "DDCCBBAAFFEEF0118899001122334455"
+    EXPECTED = "AABBCCDD-EEFF-11F0-8899-001122334455"
 
     def test_real_firmware_value_renders_canonically(self):
         assert _canonical_uuid(self.REAL_PLATFORM_GUID) == self.EXPECTED

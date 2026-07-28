@@ -1,0 +1,4 @@
+---
+minor_changes:
+  - "tests/hardware - support qualifying several machines, each with its own credentials and its own reviewed TLS fingerprint, via a numeric variable suffix (``AMT_HOST_2``, ``AMT_PASSWORD_2``, ``AMT_TLS_FINGERPRINT_2``). Ports stay shared, since AMT always listens on the same ones. Per-machine pins are required rather than optional, because each endpoint presents its own self-signed certificate and a shared fingerprint would surface as a pin mismatch rather than a configuration error."
+  - CI - the hardware-observe job now reports the certificate offered by every configured machine, not just the first, so a second machine's fingerprint can be reviewed before it is pinned.
