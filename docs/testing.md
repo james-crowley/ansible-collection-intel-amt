@@ -94,6 +94,26 @@ and multi-frame-write paths in particular can only be tested this way — they a
 invisible to unit tests of pure functions and impractical to trigger on demand
 against real firmware.
 
+## Scheduled drift detection
+
+A weekly CircleCI schedule (`weekly-drift-detection`, Mondays 11:00 UTC) runs the
+standard `test` workflow against `main`. It exists because some breakage arrives
+without anyone pushing: a new `ansible-core` point release, a PyPI dependency
+change, or a rebuilt `cimg/python` image. A repository with no scheduled run only
+learns about those on the next unrelated commit.
+
+It is safe by construction: `run-hardware-tests` defaults to `false`, so a
+scheduled pipeline can only ever run the `test` workflow and never reaches lab
+hardware.
+
+Scheduled triggers are **not** expressible in `.circleci/config.yml` — they live in
+project settings, so they are easy to forget when reasoning about coverage from the
+repository alone. Inspect with:
+
+```bash
+circleci api "/api/v2/project/gh/james-crowley/ansible-collection-intel-amt/schedule"
+```
+
 ## Hardware-in-the-loop tests
 
 These power-cycle and reimage real machines. Nothing here runs by accident:

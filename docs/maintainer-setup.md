@@ -37,16 +37,32 @@ integration targets, hardware playbooks, docs, README, CI paths, and
 `scripts/setup-collection-tree.sh`), done in one PR and verified by the full test
 suite. Tell me the name and I will do it.
 
-**To claim it:**
+**How claiming actually works** — this is not what I first told you, and the
+correction matters:
 
-1. Sign in at <https://galaxy.ansible.com/> with GitHub.
-2. Galaxy auto-creates a namespace matching your GitHub login on first sign-in.
-   For any *other* name, request it: <https://galaxy.ansible.com/ui/namespaces/>
-   → **Create**, or if that is restricted, open a request at
-   <https://github.com/ansible/galaxy/issues>.
-3. Confirm the name is free first — a namespace query for `james_crowley`
-   currently returns **0 results**, meaning it is unclaimed and someone else could
-   take it.
+- **`james_crowley` needs no claiming.** Galaxy auto-creates a namespace matching
+  your GitHub login the first time you sign in with GitHub, mapping hyphens to
+  underscores (`james-crowley` → `james_crowley`). So it is effectively reserved
+  for you already. My earlier "0 results means someone could take it" was wrong:
+  an empty query just means you have not signed in to Galaxy yet, not that the
+  name is up for grabs.
+- **Any other name is a forum request, not self-service.** There is no "create
+  namespace" button for a name that does not match a GitHub login. You post to the
+  Galaxy namespace request thread on the Ansible forum:
+  <https://forum.ansible.com/t/ansible-galaxy-how-to-request-a-custom-namespace/45689>
+
+  The request needs: the desired namespace, a one-line description (it is shown on
+  Galaxy), a link to the GitHub org if there is one, and the Galaxy usernames to
+  make namespace admins — **each of whom must have signed in to Galaxy at least
+  once first**, so do that before requesting.
+
+**So:**
+
+1. Sign in at <https://galaxy.ansible.com/> with GitHub. This alone secures
+   `james_crowley`.
+2. If you want a different name, open the forum request above. Expect it to take
+   days rather than minutes, so start it early if you want it.
+3. Tell me the final name and I will do the rename in one PR.
 
 ---
 
@@ -179,6 +195,15 @@ Once confirmed, record it as `amt_expected_uuid` in the lab inventory and the
 guard becomes live.
 
 ---
+
+## Already done for you (no action needed)
+
+- **Weekly drift-detection schedule** — created via the CircleCI API as
+  `weekly-drift-detection`, Mondays 11:00 UTC, running the `test` workflow against
+  `main`. This closes a real gap found while auditing against community practice:
+  Geerling runs a weekly cron on every one of his ~100 repos precisely to catch
+  breakage that arrives without a push. Safe by construction, since
+  `run-hardware-tests` defaults to `false`.
 
 ## Summary: what blocks what
 
