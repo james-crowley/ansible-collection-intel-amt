@@ -18,15 +18,41 @@
     amt_output_dir: "{{ playbook_dir }}/output"
 
   tasks:
+    # no_log hides the whole result, including the parts that are deliberately
+    # safe to show. Every message and diagnostic this collection produces has
+    # already been through errors.py's redaction, so the failure detail carries
+    # no credential -- but no_log cannot know that, and a censored failure is
+    # undiagnosable. The rescue below re-surfaces only the redacted fields, which
+    # is the difference between "something went wrong on the lab runner" and an
+    # actionable error class.
     - name: Read AMT capabilities and state
-      james_crowley.intel_amt.amt_info:
-        host: "{{ amt_host }}"
-        username: "{{ amt_username }}"
-        password: "{{ amt_password }}"
-        tls_fingerprint: "{{ amt_tls_fingerprint }}"
-      delegate_to: localhost
-      no_log: true
-      register: amt
+      block:
+        - name: Read AMT capabilities and state
+          james_crowley.intel_amt.amt_info:
+            host: "{{ amt_host }}"
+            username: "{{ amt_username }}"
+            password: "{{ amt_password }}"
+            tls_fingerprint: "{{ amt_tls_fingerprint }}"
+          delegate_to: localhost
+          no_log: true
+          register: amt
+      rescue:
+        - name: Report the redacted failure detail
+          ansible.builtin.debug:
+            msg:
+              error_class: "{{ ansible_failed_result.error_class | default('(none reported)') }}"
+              endpoint: "{{ ansible_failed_result.endpoint | default('(none reported)') }}"
+              operation: "{{ ansible_failed_result.operation | default('(none reported)') }}"
+              indeterminate: "{{ ansible_failed_result.indeterminate | default(false) }}"
+              message: "{{ ansible_failed_result.msg | default('(no message)') }}"
+              diagnostic: "{{ ansible_failed_result.diagnostic | default('(none)') }}"
+
+        - name: Fail with the error class in the summary line
+          ansible.builtin.fail:
+            msg: >-
+              amt_info failed against {{ inventory_hostname }} with
+              error_class={{ ansible_failed_result.error_class | default('unknown') }}.
+              See the redacted detail above.
 
     - name: Require the endpoint to be reachable
       ansible.builtin.assert:
