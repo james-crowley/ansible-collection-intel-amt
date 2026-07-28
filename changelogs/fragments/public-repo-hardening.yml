@@ -1,0 +1,5 @@
+---
+bugfixes:
+  - "CI - the publish job reads ``GALAXY_API_KEY``, matching the name actually stored in the ``galaxy-publish`` context. It previously read ``ANSIBLE_GALAXY_API_KEY`` and would have failed on its first real run."
+minor_changes:
+  - "De-identify the lab from the repository now that it is public. The platform GUID used as a byte-order test vector is replaced with illustrative digits that preserve both properties the tests rely on, and real AMT addresses and reviewed fingerprints are replaced with placeholders in maintainer documentation."

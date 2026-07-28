@@ -612,12 +612,12 @@ jobs:
       - run:
           name: Publish to Ansible Galaxy
           command: |
-            test -n "${ANSIBLE_GALAXY_API_KEY}" || {
-              echo "ANSIBLE_GALAXY_API_KEY is not set; is the context attached?" >&2
+            test -n "${GALAXY_API_KEY}" || {
+              echo "GALAXY_API_KEY is not set; is the galaxy-publish context attached?" >&2
               exit 1
             }
             ansible-galaxy collection publish ./dist/*.tar.gz \
-              --api-key "${ANSIBLE_GALAXY_API_KEY}" -v
+              --api-key "${GALAXY_API_KEY}" -v
 
 workflows:
   # -------------------------------------------------------------------------
