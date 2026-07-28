@@ -91,10 +91,31 @@ class TestAmtBootModule:
                 amt_boot.main()
         result = excinfo.value.kwargs
         assert result["changed"] is True
-        assert result["action"] == "amt_boot"
-        assert result["schema"] == "intel-amt-operation/v1"
+        assert result["operation"]["action"] == "amt_boot"
+        assert result["operation"]["schema"] == "intel-amt-operation/v1"
+        assert result["operation"]["changed"] is True
         assert result["device"] == "pxe"
         fake_client.close.assert_called_once()
+
+    def test_receipt_is_nested_under_operation_not_spread_at_top_level(self):
+        # issue #22: the receipt lives under `operation` on every module, amt_boot included --
+        # never spread at the top level alongside module-specific keys like `device`.
+        _set_module_args(BASE_ARGS)
+        fake_client = _make_fake_client()
+        with patch(
+            "ansible_collections.james_crowley.intel_amt.plugins.modules.amt_boot.WsmanClient.from_connection_options",
+            return_value=fake_client,
+        ):
+            with pytest.raises(AnsibleExitJson) as excinfo:
+                amt_boot.main()
+        result = excinfo.value.kwargs
+        for moved_field in ("schema", "action", "endpoint", "previous", "desired", "observed", "tls_peer_fingerprint"):
+            assert moved_field not in result, f"{moved_field!r} must not be spread at the top level; it belongs under operation"
+        operation = result["operation"]
+        assert operation["previous"] is not None
+        assert operation["desired"] is not None
+        assert operation["observed"] is not None
+        assert operation["error_class"] is None
 
     def test_check_mode_performs_no_mutation(self):
         args = dict(BASE_ARGS, _ansible_check_mode=True)
