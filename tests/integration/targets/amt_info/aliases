@@ -1,0 +1,11 @@
+# Drives the real amt_info module against the local mock WS-Man server
+# (tests/integration/mock_servers/wsman_server.py). No network access, no
+# privilege escalation, and no destructive action against anything -- see
+# docs/testing.md.
+#
+# ansible-test's per-target temp workdir only copies tests/integration/targets/<name>/
+# itself; these needs/file/* aliases pull the (non-target) mock server fixtures into
+# that same temp copy so tasks/main.yml's "{{ role_path }}/../../mock_servers/..."
+# paths resolve.
+needs/file/tests/integration/mock_servers/wsman_server.py
+needs/file/tests/integration/mock_servers/run_wsman_mock.py

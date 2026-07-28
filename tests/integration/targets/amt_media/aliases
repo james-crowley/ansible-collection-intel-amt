@@ -1,0 +1,11 @@
+# Drives the real amt_media module against the local mock IDE-R server. No network
+# access, no privilege escalation, and no destructive action against anything -- see
+# docs/testing.md.
+#
+# Forks a real detached background process (media_session.spawn_session()) and
+# requires os.fork(), so this target only runs on a POSIX controller -- matching what
+# amt_media.py itself requires and documents.
+skip/windows
+needs/file/tests/integration/mock_servers/wsman_server.py
+needs/file/tests/integration/mock_servers/ider_server.py
+needs/file/tests/integration/mock_servers/run_ider_mock.py

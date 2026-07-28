@@ -303,6 +303,40 @@ class TestEnumeratePullPaging:
         root = ET.fromstring(resp.content)  # noqa: S314
         assert root.find(f"{{{NS_S}}}Body/{{{NS_S}}}Fault") is not None
 
+    def test_amt_boot_capabilities_supports_enumerate_not_only_get(self, server):
+        # Regression guard for a real bug this repo's own amt_boot/amt_redirection
+        # integration targets caught: plugins/module_utils/boot.py's
+        # discover_and_validate() and redirection_service.py's get_capabilities() both
+        # reach AMT_BootCapabilities via Enumerate+Pull (it has no natural instance key
+        # for a Get SelectorSet), but this mock only ever answered a bare Get for it.
+        # Every unit test for those two module_utils files mocks WsmanClient.enumerate()
+        # directly, so none of them exercised this server's own Enumerate dispatch table
+        # -- only a real Enumerate request against the running mock surfaced the gap.
+        resp = _post(server, _enumerate_xml(AMT_BOOT_CAPABILITIES))
+        assert resp.status_code == 200
+        root = ET.fromstring(resp.content)  # noqa: S314
+        context = _find_text(root, "EnumerationContext")
+        assert context
+
+        resp = _post(server, _pull_xml(AMT_BOOT_CAPABILITIES, context))
+        assert resp.status_code == 200
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _has_element(root, "EndOfSequence")
+        assert _find_text(root, "IDER") == "true"
+        assert _find_text(root, "ForcePXEBoot") == "true"
+
+    def test_amt_boot_capabilities_get_and_enumerate_report_the_same_fields(self, server):
+        get_resp = _post(server, _get_xml(AMT_BOOT_CAPABILITIES))
+        get_root = ET.fromstring(get_resp.content)  # noqa: S314
+
+        enum_resp = _post(server, _enumerate_xml(AMT_BOOT_CAPABILITIES))
+        context = _find_text(ET.fromstring(enum_resp.content), "EnumerationContext")  # noqa: S314
+        pull_resp = _post(server, _pull_xml(AMT_BOOT_CAPABILITIES, context))
+        pull_root = ET.fromstring(pull_resp.content)  # noqa: S314
+
+        for field in ("IDER", "SOL", "ForcePXEBoot", "ForceHardDriveBoot", "BIOSSetup"):
+            assert _find_text(get_root, field) == _find_text(pull_root, field)
+
 
 class TestStatefulness:
     def test_boot_setting_data_put_is_observed_by_later_get(self, server):

@@ -1,0 +1,182 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Drives the real amt_info module against the local mock WS-Man server, over both
+# plaintext and TLS with a pinned fingerprint. amt_info is read-only, so "idempotence"
+# here just means a second read still reports changed=false, and check mode runs the
+# identical read path.
+
+- name: Create a scratch directory for this target's runtime files
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: amt_info_integration_
+  register: scratch_dir
+  delegate_to: localhost
+
+- name: Set mock-server paths for this run
+  ansible.builtin.set_fact:
+    mock_servers_dir: "{{ role_path }}/../../mock_servers"
+    plain_ready_file: "{{ scratch_dir.path }}/wsman_plain_ready.json"
+    tls_ready_file: "{{ scratch_dir.path }}/wsman_tls_ready.json"
+
+- name: Start the plaintext mock WS-Man server
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ plain_ready_file }} \
+      > {{ scratch_dir.path }}/wsman_plain.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: plain_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Start the TLS mock WS-Man server
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ tls_ready_file }} --use-tls \
+      > {{ scratch_dir.path }}/wsman_tls.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: tls_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Wait for both mock servers to report ready
+  ansible.builtin.wait_for:
+    path: "{{ item }}"
+    state: present
+    timeout: 15
+  loop:
+    - "{{ plain_ready_file }}"
+    - "{{ tls_ready_file }}"
+  delegate_to: localhost
+
+- name: Read mock server connection info and pids
+  ansible.builtin.set_fact:
+    plain_info: "{{ lookup('ansible.builtin.file', plain_ready_file) | from_json }}"
+    tls_info: "{{ lookup('ansible.builtin.file', tls_ready_file) | from_json }}"
+    plain_pid: "{{ plain_start.stdout | trim }}"
+    tls_pid: "{{ tls_start.stdout | trim }}"
+
+- name: Exercise amt_info against both mock servers
+  block:
+    - name: Read facts over plaintext (insecure transport explicitly acknowledged)
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: info_plain
+
+    - name: Assert the plaintext read reports the mock's facts and changed=false
+      ansible.builtin.assert:
+        that:
+          - info_plain.changed == false
+          - info_plain.amt.reachable == true
+          - info_plain.amt.hostname == 'mock-amt-host'
+          - info_plain.amt.power_state.normalized == 'on'
+          - info_plain.amt.capabilities.storage_redirection == true
+          - info_plain.amt.capabilities.sol == true
+          - info_plain.amt.capabilities.boot_once_pxe == true
+
+    - name: Idempotence -- reading again still reports changed=false
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: info_plain_again
+
+    - name: Assert the repeated read is still changed=false
+      ansible.builtin.assert:
+        that:
+          - info_plain_again.changed == false
+
+    - name: Check mode performs an identical read (read-only module, nothing to skip)
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      check_mode: true
+      register: info_check
+
+    - name: Assert check mode matches normal-mode output and changed=false
+      ansible.builtin.assert:
+        that:
+          - info_check.changed == false
+          - info_check.amt.reachable == true
+
+    - name: Read facts over TLS with the mock's fingerprint pinned
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ tls_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: true
+        tls_fingerprint: "{{ tls_info.cert_fingerprint }}"
+      delegate_to: localhost
+      no_log: true
+      register: info_tls
+
+    - name: Assert the TLS read succeeds and reports changed=false
+      ansible.builtin.assert:
+        that:
+          - info_tls.changed == false
+          - info_tls.amt.reachable == true
+          - info_tls.amt.hostname == 'mock-amt-host'
+
+    - name: Fault injection -- wrong password is refused with error_class=authentication
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: definitely-the-wrong-password
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: info_bad_password
+      ignore_errors: true
+
+    - name: Assert the wrong-password call failed with error_class=authentication
+      ansible.builtin.assert:
+        that:
+          - info_bad_password.failed == true
+          - info_bad_password.error_class == 'authentication'
+  always:
+    - name: Stop the plaintext mock WS-Man server
+      ansible.builtin.command: "kill {{ plain_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup; the assertions above are what must pass.
+      changed_when: false
+
+    - name: Stop the TLS mock WS-Man server
+      ansible.builtin.command: "kill {{ tls_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
+      changed_when: false
+
+    - name: Remove the scratch directory
+      ansible.builtin.file:
+        path: "{{ scratch_dir.path }}"
+        state: absent
+      delegate_to: localhost

@@ -60,6 +60,7 @@ class FakeSocket:
         self.sent: list[bytes] = []
         self.closed = False
         self._peer_cert = peer_cert
+        self.timeouts_set: list[float | None] = []
 
     def recv(self, bufsize: int) -> bytes:
         if not self._chunks:
@@ -72,6 +73,9 @@ class FakeSocket:
 
     def close(self) -> None:
         self.closed = True
+
+    def settimeout(self, timeout: float | None) -> None:
+        self.timeouts_set.append(timeout)
 
     def getpeercert(self, binary_form: bool = False):
         return self._peer_cert
@@ -285,3 +289,76 @@ class TestErrorsCarryNoSecrets:
             session.connect()
         assert PASSWORD not in str(excinfo.value)
         assert PASSWORD not in repr(excinfo.value.to_result())
+
+
+class TestSetRecvTimeout:
+    def test_forwards_to_the_underlying_socket(self, monkeypatch):
+        monkeypatch.setattr("ansible_collections.james_crowley.intel_amt.plugins.module_utils.redirection.secrets.token_hex", lambda n: FIXED_CNONCE[: n * 2])
+        sock = FakeSocket(_full_handshake_chunks())
+        session = _session(sock)
+        session.connect()
+        session.set_recv_timeout(2.5)
+        session.set_recv_timeout(None)
+        assert sock.timeouts_set == [2.5, None]
+
+    def test_raises_connection_error_before_connect(self):
+        session = _session(FakeSocket([]))
+        with pytest.raises(ConnectionError_):
+            session.set_recv_timeout(1.0)
+
+    def test_raises_protocol_error_when_socket_has_no_settimeout(self, monkeypatch):
+        monkeypatch.setattr("ansible_collections.james_crowley.intel_amt.plugins.module_utils.redirection.secrets.token_hex", lambda n: FIXED_CNONCE[: n * 2])
+
+        class _NoSettimeoutSocket(FakeSocket):
+            settimeout = None
+
+        sock = _NoSettimeoutSocket(_full_handshake_chunks())
+        session = _session(sock)
+        session.connect()
+        with pytest.raises(ProtocolError):
+            session.set_recv_timeout(1.0)
+
+
+class TestPeerCertificateSha256:
+    def test_returns_none_before_connect(self):
+        session = _session(FakeSocket([]))
+        assert session.peer_certificate_sha256() is None
+
+    def test_returns_none_for_plaintext_socket_without_getpeercert(self, monkeypatch):
+        monkeypatch.setattr("ansible_collections.james_crowley.intel_amt.plugins.module_utils.redirection.secrets.token_hex", lambda n: FIXED_CNONCE[: n * 2])
+
+        class _PlainSocket:
+            def __init__(self, chunks):
+                self._chunks = list(chunks)
+                self.sent = []
+
+            def recv(self, bufsize):
+                if not self._chunks:
+                    return b""
+                return self._chunks.pop(0)[:bufsize]
+
+            def sendall(self, data):
+                self.sent.append(bytes(data))
+
+            def close(self):
+                pass
+
+        sock = _PlainSocket(_full_handshake_chunks())
+        session = RedirectionSession("10.0.0.5", username=USERNAME, password=PASSWORD, use_tls=False, socket_factory=lambda *a: sock)
+        session.connect()
+        assert session.peer_certificate_sha256() is None
+
+    def test_returns_the_sha256_of_the_peer_certificate_when_available(self, monkeypatch):
+        monkeypatch.setattr("ansible_collections.james_crowley.intel_amt.plugins.module_utils.redirection.secrets.token_hex", lambda n: FIXED_CNONCE[: n * 2])
+        cert_der = b"fake-der-bytes-for-fingerprint-test"
+        sock = FakeSocket(_full_handshake_chunks(), peer_cert=cert_der)
+        session = _session(sock)
+        session.connect()
+        assert session.peer_certificate_sha256() == hashlib.sha256(cert_der).hexdigest()
+
+    def test_returns_none_when_getpeercert_returns_empty(self, monkeypatch):
+        monkeypatch.setattr("ansible_collections.james_crowley.intel_amt.plugins.module_utils.redirection.secrets.token_hex", lambda n: FIXED_CNONCE[: n * 2])
+        sock = FakeSocket(_full_handshake_chunks(), peer_cert=b"")
+        session = _session(sock)
+        session.connect()
+        assert session.peer_certificate_sha256() is None
