@@ -3,16 +3,51 @@
 # GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Hardware qualification stage 7 (see README.md): one-time native firmware
-# PXE boot. This must only run after DHCP/boot-service prerequisites are
-# separately proven -- amt_info can confirm the firmware *supports* one-time
-# PXE (AMT_BootCapabilities.ForcePXEBoot), but has no way to confirm a
-# DHCP/TFTP/HTTP boot server actually answers on the target's network. The
-# amt_pxe_prereqs_confirmed gate below exists so that unproven prerequisite is
-# never silently assumed.
+# Hardware qualification stage 7 (see README.md): one-time native firmware PXE boot. This must
+# only run after DHCP/boot-service prerequisites are separately proven -- amt_info can confirm
+# the firmware *supports* one-time PXE (AMT_BootCapabilities.ForcePXEBoot), but has no way to
+# confirm a DHCP/TFTP/HTTP boot server actually answers on the target's network. The
+# amt_pxe_prereqs_confirmed gate below exists so that unproven prerequisite is never silently
+# assumed.
 #
-# Not wired into CircleCI. Run manually, one host at a time, attended, after
-# stages 1-4 have already qualified this machine and its network:
+# WHAT THIS STAGE CAN AND CANNOT PROVE -- read this before trusting a green run:
+#
+#   - "one-time PXE is armed and reads back as armed": PROVEN. amt_boot's own Put+Get sequence
+#     (inside roles/amt_baremetal_install) confirms the mutation actually took effect on
+#     firmware.
+#   - "the reset is issued and the endpoint recovers": PROVEN. amt_power's reset is accepted and
+#     the bounded postcondition probe (roles/amt_baremetal_install/tasks/observe.yml) observes
+#     power_state=on again afterwards.
+#   - "the boot setting does not persist": PARTIALLY proven, and this is worth being exact
+#     about. Intel AMT's one-shot role (CIM_BootService.SetBootConfigRole, Role=1 --
+#     IsNextSingleUse; docs/protocol-notes.md s2.5 step 4) is a WRITE-only operation as this
+#     collection's WS-Man surface implements it: no module here exposes a getter for whether
+#     that role association was actually consumed by the reset. (Confirmed empirically: the
+#     integration mock's AmtState.boot_config_role/boot_order_source -- see
+#     tests/integration/mock_servers/wsman_server.py -- are recorded on Put but never read back
+#     by any Get/enumerate handler either.) What this stage DOES verify, in the reprobe task
+#     below, is that AMT_BootSettingData itself -- the boot settings this collection actually
+#     controls -- reads back unchanged and uncorrupted after the reset, which is a real
+#     regression check even though it stops short of reading the internal one-shot bit. If you
+#     need to be certain the one-shot role itself cleared, the operational proof is: issue a
+#     SECOND, unrelated reset later with no new arm, and confirm over console that it does NOT
+#     attempt PXE again.
+#   - Netboot actually succeeding (the machine reaching an iPXE/DHCP/boot-server exchange) is
+#     OUTSIDE this playbook's authority to verify: it depends on DHCP and a TFTP/HTTP boot
+#     service existing on the target's network, neither of which any module in this collection
+#     can observe. amt_pxe_prereqs_confirmed is an operator attestation, not a technical check.
+#     A red PXE boot on a network with no boot server is not evidence against this collection;
+#     it is evidence the lab network needs a boot server, which is out of scope here.
+#
+# Wired into CircleCI as the hardware-pxe job, the last and most escalated of the four gated
+# hardware jobs (see .circleci/config.yml) -- but still only ever one host at a time, attended.
+#
+# amt_qualify_attended (default true) gates the interactive pause below, for the same reason as
+# every other stage 4-7 playbook: ansible.builtin.pause blocks on stdin, which CircleCI's machine
+# executor cannot supply, and the hardware-pxe-approval job is CI's actual human checkpoint.
+#
+# Run manually, one host at a time, attended, after stages 1-4 have already qualified this
+# machine and its network:
 #
 #   ansible-playbook tests/hardware/qualify_pxe.yml \
 #     -i tests/hardware/inventory.yml -l <single-host> \
@@ -27,6 +62,7 @@
     amt_baremetal_install_confirm_destructive: true
     amt_baremetal_install_boot_provider: pxe
     amt_baremetal_install_wait_for_handoff: false
+    amt_output_dir: "{{ playbook_dir }}/output"
 
   pre_tasks:
     - name: Refuse to run against more than one host at a time
@@ -49,18 +85,152 @@
           and arming this boot selection without one just strands the
           machine at a PXE ROM prompt.
 
+    # Baseline read, before this run's arm. Compared in post_tasks against the reprobe taken
+    # after the reset -- see this file's header for exactly what that comparison does and does
+    # not prove. check_mode: true forces this single task to preview-only regardless of how the
+    # playbook itself was invoked, mirroring qualify_checkmode.yml's "dummy token, never applied"
+    # pattern -- this is a read, not part of the destructive sequence below.
+    - name: Read AMT_BootSettingData before arming, for the post-reset stability check
+      block:
+        - name: Preview current boot settings (read-only; forced check mode)
+          james_crowley.intel_amt.amt_boot:
+            host: "{{ amt_host }}"
+            username: "{{ amt_username }}"
+            password: "{{ amt_password }}"
+            tls_fingerprint: "{{ amt_tls_fingerprint }}"
+            device: pxe
+            action_token: "hardware-qualify-pxe-preview-before"
+          check_mode: true
+          delegate_to: localhost
+          no_log: true
+          register: amt_boot_pxe_probe_before
+      rescue:
+        - name: Report the redacted failure detail
+          ansible.builtin.debug:
+            msg:
+              error_class: "{{ ansible_failed_result.error_class | default('(none reported)') }}"
+              endpoint: "{{ ansible_failed_result.endpoint | default('(none reported)') }}"
+              operation: "{{ ansible_failed_result.operation | default('(none reported)') }}"
+              indeterminate: "{{ ansible_failed_result.indeterminate | default(false) }}"
+              message: "{{ ansible_failed_result.msg | default('(no message)') }}"
+              diagnostic: "{{ ansible_failed_result.diagnostic | default('(none)') }}"
+
+        - name: Fail before touching anything destructive
+          ansible.builtin.fail:
+            msg: >-
+              The baseline AMT_BootSettingData read failed for {{ inventory_hostname }} --
+              refusing to continue to the destructive arm/reset sequence without it. See the
+              redacted detail above.
+
     - name: Pause for the operator to be watching the console before continuing
       ansible.builtin.pause:
         prompt: >-
           About to arm one-time PXE boot and reset {{ inventory_hostname }}.
           Have the console open before continuing
+      when: amt_qualify_attended | default(true) | bool
 
-  roles:
-    - james_crowley.intel_amt.amt_baremetal_install
+  # Wrapping the role invocation in a block/rescue -- rather than the play-level `roles:`
+  # keyword this file used before -- gives this playbook its own rescue, matching every other
+  # stage 4-7 playbook. The role's own tasks/record_failure.yml now surfaces the redacted
+  # error_class/endpoint/operation/indeterminate detail before re-raising (see that file);
+  # this outer rescue is this playbook's last chance to point at manual recovery.
+  tasks:
+    - name: Arm one-time PXE boot and reset
+      block:
+        - name: Run the amt_baremetal_install lifecycle for this target
+          ansible.builtin.include_role:
+            name: james_crowley.intel_amt.amt_baremetal_install
+      rescue:
+        - name: Fail with a pointer to the manual recovery path
+          ansible.builtin.fail:
+            msg: >-
+              qualify_pxe.yml failed for {{ inventory_hostname }}:
+              {{ ansible_failed_result.msg | default('see previous task output') }}.
+              This is the highest-consequence stage in this collection (amt_boot's own
+              DOCUMENTATION says as much) -- a machine left with a wrong boot configuration
+              typically needs physical or KVM recovery. See
+              tests/hardware/README.md#if-a-machine-ends-up-in-a-bad-boot-state.
 
   post_tasks:
-    - name: Remind the operator to visually confirm PXE hand-off
+    - name: Re-read AMT_BootSettingData after the reset and check for drift
+      block:
+        - name: Re-probe boot settings after the reset (read-only; forced check mode)
+          james_crowley.intel_amt.amt_boot:
+            host: "{{ amt_host }}"
+            username: "{{ amt_username }}"
+            password: "{{ amt_password }}"
+            tls_fingerprint: "{{ amt_tls_fingerprint }}"
+            device: pxe
+            action_token: "hardware-qualify-pxe-preview-after"
+          check_mode: true
+          delegate_to: localhost
+          no_log: true
+          register: amt_boot_pxe_probe_after
+
+        # See this file's header for the precise, honest scope of this assertion: it confirms
+        # AMT_BootSettingData is stable across the reset, not that the internal one-shot role
+        # bit was consumed (this collection has no getter for that).
+        - name: Confirm AMT_BootSettingData was not left drifted or corrupted by the reset
+          ansible.builtin.assert:
+            that:
+              - amt_boot_pxe_probe_after.observed.UseIDER == amt_baremetal_install_boot_result.observed.UseIDER
+              - amt_boot_pxe_probe_after.observed.IDERBootDevice == amt_baremetal_install_boot_result.observed.IDERBootDevice
+              - amt_boot_pxe_probe_after.observed.BootMediaIndex == amt_baremetal_install_boot_result.observed.BootMediaIndex
+              - amt_boot_pxe_probe_after.observed.BIOSSetup == amt_baremetal_install_boot_result.observed.BIOSSetup
+            fail_msg: >-
+              AMT_BootSettingData read back differently after the reset than it did right
+              after arming. That is unexpected drift in fields this collection itself
+              controls, independent of whether the one-shot role bit cleared -- investigate
+              before qualifying this machine as done.
+            success_msg: >-
+              AMT_BootSettingData reads back unchanged after the reset -- no drift or
+              corruption in the boot settings this collection controls. This does NOT confirm
+              Intel AMT's internal one-shot role was consumed; see this file's header.
+      rescue:
+        - name: Report the redacted failure detail
+          ansible.builtin.debug:
+            msg:
+              error_class: "{{ ansible_failed_result.error_class | default('(none reported)') }}"
+              endpoint: "{{ ansible_failed_result.endpoint | default('(none reported)') }}"
+              operation: "{{ ansible_failed_result.operation | default('(none reported)') }}"
+              indeterminate: "{{ ansible_failed_result.indeterminate | default(false) }}"
+              message: "{{ ansible_failed_result.msg | default('(no message)') }}"
+              diagnostic: "{{ ansible_failed_result.diagnostic | default('(none)') }}"
+
+        - name: Fail with a pointer to the manual recovery path
+          ansible.builtin.fail:
+            msg: >-
+              The post-reset re-probe failed or found drift for {{ inventory_hostname }}. See
+              the redacted detail above and
+              tests/hardware/README.md#if-a-machine-ends-up-in-a-bad-boot-state.
+
+    - name: Ensure the evidence output directory exists
+      ansible.builtin.file:
+        path: "{{ amt_output_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+
+    - name: Record evidence for this target
+      ansible.builtin.copy:
+        content: >-
+          {{ {'before_arm': amt_boot_pxe_probe_before.observed,
+              'armed': amt_baremetal_install_boot_result.observed,
+              'after_reset': amt_boot_pxe_probe_after.observed,
+              'note': "before_arm/after_reset compare AMT_BootSettingData only -- neither reads the internal one-shot role bit; see this playbook header."}
+             | to_nice_json }}
+        dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_pxe.json"
+        mode: "0600"
+      delegate_to: localhost
+
+    - name: Remind the operator what this stage did and did not prove
       ansible.builtin.debug:
         msg: >-
-          Visually confirm over console that {{ inventory_hostname }}
-          actually entered PXE boot before treating this stage as passed.
+          Reset issued, one-time PXE was armed and read back as armed, and AMT_BootSettingData
+          is stable after the reset (see above). None of that confirms {{ inventory_hostname }}
+          actually reached a PXE exchange -- that depends on DHCP and a TFTP/HTTP boot service
+          existing on this network, which nothing in this collection can verify. Visually
+          confirm over console that the machine entered PXE boot (or, if amt_pxe_prereqs_confirmed
+          was set on the strength of a working boot service, that it actually netbooted) before
+          treating netboot itself as qualified. In CI (amt_qualify_attended=false) this
+          confirmation is the approver's responsibility, made before approving hardware-pxe.
