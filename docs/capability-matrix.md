@@ -8,7 +8,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 This is a plain accounting of confidence levels in this collection, so a reader does
 not have to guess which claims rest on real firmware evidence and which rest on
-reading someone else's source code. Three tiers, and nothing here should be read as
+reading someone else's source code. Four tiers, and nothing here should be read as
 implying a higher tier than it earns:
 
 1. **Verified against an authoritative source** — confirmed against a real firmware
@@ -17,15 +17,26 @@ implying a higher tier than it earns:
    still not the same as "tested on our hardware."
 2. **Unit/mock tested** — exercised by this collection's own test suite against
    deterministic fixtures/fakes, never against real AMT firmware.
-3. **Not verified against real firmware at all** — currently everything's actual
-   end-to-end behaviour against a physical Intel AMT endpoint. No hardware
-   qualification has run as of this writing.
+3. **Verified against real firmware** — as of 2026-07-28, against a lab
+   Intel AMT **16.1.30** endpoint via a self-hosted CircleCI runner, through all
+   seven qualification stages.
+4. **Still unproven** — a short, specific list, kept honest.
 
-If you take one thing from this page: **treat this collection as protocol-complete
-and test-covered, but hardware-unverified**, exactly as `README.md` and
-`docs/testing.md` already say.
+The collection is no longer "hardware-unverified". Hardware qualification found
+**six real defects** that neither the unit tier nor the mock-integration tier
+could have found:
 
----
+| Defect | Why the mocks could not catch it |
+|---|---|
+| `enum.StrEnum` / `datetime.UTC` on a Python 3.10 controller | mocks run on the same Python as the unit tests |
+| `uuid` read from `CIM_ComputerSystem`, which has no such property | the mock served whatever property the code asked for |
+| `PlatformGUID` needing SMBIOS little-endian field order | self-consistent either way without a real machine to compare against |
+| empty `<Source/>` rejected by the firmware's own schema | the mock's XML parser accepted the empty element happily |
+| role always issuing `reset`, which does nothing to a powered-off machine | required actually leaving a machine off, then trying to boot it |
+| role connection defaults resolving to `inventory_hostname` | any mock inventory happens to make that resolvable |
+
+That is the argument for the hardware tier existing, stated concretely rather
+than in principle.
 
 ## Tier 1: Verified against an authoritative source
 
@@ -76,55 +87,62 @@ about this.
 
 ---
 
-## Tier 3: Not verified against real firmware at all
+## Tier 3: Verified against real firmware
 
-**Everything, currently.** No hardware qualification has run. `docs/testing.md`
-documents the two-gate opt-in workflow (`run-hardware-tests` pipeline parameter, then
-a manual approval) and the qualification order a first run must follow, but as of this
-writing that workflow has not executed against a physical Intel AMT endpoint.
+Verified 2026-07-28 against a lab endpoint reporting AMT **16.1.30**, driven from
+a self-hosted CircleCI runner (`crowley/amt-runner`, Python 3.10, ansible-core
+2.17) with TLS pinned to the endpoint's reviewed leaf certificate.
 
-Concretely, this means every one of the following is protocol-complete and
-mock-tested but has never been confirmed against real firmware:
+| Stage | What real firmware confirmed |
+|---|---|
+| 1-2 read-only | `amt_info` over pinned TLS with HTTP Digest. Firmware version from `CIM_SoftwareIdentity`, all four capability flags, `EnabledState 32771` decoded as SOL+IDER, power state `2 -> on`, and the platform UUID |
+| 3 check mode | power and boot plans computed and **nothing mutated** |
+| 4 power | convergent `on` reported `changed: false` when already on; `off` reported `changed: true`; initial state restored afterwards |
+| 5 IDE-R media | the native Python IDE-R engine served a real bootable ISO to real firmware, and the boot was armed and reset issued |
+| 6 writable image | the device was presented **writable** — MODE_SENSE write-protect bit `0x00`, not `0x80` |
+| 7 native PXE | one-time PXE armed and read back as armed, reset issued and recovered, `AMT_BootSettingData` stable afterwards. This also settled issue #13: the prefixed-namespace EPR form **is** accepted by real firmware |
 
-- Every module's actual power/boot/redirection/media behaviour end-to-end.
-- Whether real firmware's `AMT_BootSettingData` actually accepts the `Put` this
-  collection sends (the field delete-list in `docs/protocol-notes.md` §2.5 exists
-  precisely because *some* firmware rejects echoed read-only fields — no mock server
-  can independently confirm this collection got that list right for a given
-  generation).
-- Whether the `hdd`/`cd`/`bios` capability-field mapping in `boot.py` and the `IDER`/
-  `SOL` mapping in `redirection_service.py` — both Tier 1 for the *field names
-  existing in the schema* — hold up as the specific gate this collection uses them
-  for, on a specific firmware.
-- The writable-IDE-R extension (§5 of `docs/protocol-notes.md`) beyond what
-  MeshCentral's read-only reference implements.
+Notably the same firmware **does** enforce its SOAP schema on `ChangeBootOrder` —
+it rejected an empty `<Source/>` with HTTP 400 — which is what makes the stage-7
+EPR result meaningful rather than merely permissive.
 
----
+## Tier 4: Still unproven
+
+A short list, deliberately.
+
+- **A non-zero IDE-R write.** Stage 6 proves the device is accepted, attached and
+  presented writable, and that the session stays healthy. It does **not** prove
+  bytes were written, because nothing at the other end issues a SCSI write: a
+  BIOS sitting at a boot prompt does not spontaneously write to an attached
+  floppy. `bytes_written == 0` is the expected unattended outcome and is reported
+  as such. Proving a real write needs an operating system on the target that
+  writes.
+- **That a PXE exchange actually happened.** Stage 7 proves the arming, the reset
+  and the recovery. Whether the machine reached a DHCP/TFTP exchange depends on
+  boot services this collection cannot observe.
+- **That AMT's internal one-shot role bit was consumed.** No module exposes a read
+  path for it, so stage 7 asserts `AMT_BootSettingData` stability instead. The
+  headline claim that a one-time boot "does not persist" is therefore
+  *inferred*, not directly measured.
+- **A second machine.** Everything above is one endpoint, one firmware version.
+  Theta is available and would prove repeatability; until it runs, treat AMT
+  16.1.30 as the only qualified generation.
+- **Any firmware generation other than 16.1.30**, including the Small Business
+  Mode / no-TLS path, which is inferred from `parmstro`'s reporting rather than
+  observed here.
 
 ## Known open risks
 
 Each of these is a specific, named gap, not a vague hedge.
 
-### #13 — WS-Addressing EPR byte-form ambiguity
+### ~~#13 — WS-Addressing EPR byte-form ambiguity~~ (RESOLVED)
 
-This collection's WS-Man `EndpointReference` builder
-(`plugins/module_utils/wsman.py`, `EndpointReference.build_elements`) emits
-namespace-*prefixed* XML (`<a:Address>`, `<w:ResourceURI>`, …) for the EPRs it embeds
-as method parameters — for example `ChangeBootOrder`'s `Source` parameter in
-`amt_boot`. MeshCmd instead emits the equivalent structure using the *default*
-namespace (unprefixed elements with an `xmlns=` declaration), not prefixed elements.
-
-The two forms are namespace-equivalent and standards-correct XML — any conformant XML
-parser accepts both, because namespace identity is defined by the expanded
-`{namespace}localname` pair, not by which prefix happened to be used to spell it. That
-is exactly why **no mock server can settle this**: a mock server built on a real XML
-parser (as this collection's own mock WS-Man server is) will accept both byte forms
-identically, so a passing mock-integration test proves nothing about whether a
-specific AMT firmware's WS-Man stack does the same. `ChangeBootOrder` is the
-highest-consequence call in this collection — it is the actual boot-order mutation
-`amt_boot` exists to make — so this is the single highest-priority item hardware
-qualification needs to settle first, deliberately ahead of anything else in the
-five-step sequence.
+Closed by stage 7 on 2026-07-28. `ChangeBootOrder` with a real endpoint
+reference naming `Intel(r) AMT: Force PXE Boot` succeeded against AMT 16.1.30,
+so the prefixed-namespace form this collection emits is accepted by real
+firmware. Kept here rather than deleted because the reasoning is worth
+retaining: it could not be settled by testing, since a conformant XML parser
+treats both forms as identical.
 
 ### Reset-during-write has no IDE-R deferral (reset-during-read does)
 
