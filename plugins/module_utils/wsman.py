@@ -438,7 +438,19 @@ class WsmanClient:
                 for child in value.build_elements():
                     param_el.append(child)
             elif value is None:
-                ET.SubElement(parent, f"{{{uri}}}{name}")
+                # Omitted entirely, not emitted empty. Real AMT 16.1.30 rejects
+                # ChangeBootOrder with an empty <Source/> element:
+                #
+                #   HTTP 400 -- "The supplied SOAP violates the corresponding
+                #   XML schema definition."
+                #
+                # Source is typed as an endpoint reference, so it requires
+                # Address and ReferenceParameters children; an empty element is
+                # schema-invalid, whereas an absent one is fine because these
+                # method parameters are optional (minOccurs=0). "Pass a null
+                # Source" in the protocol notes means send no element at all,
+                # which is also what MeshCmd does when it passes null.
+                continue
             else:
                 param_el = ET.SubElement(parent, f"{{{uri}}}{name}")
                 param_el.text = _coerce_param_text(value)
