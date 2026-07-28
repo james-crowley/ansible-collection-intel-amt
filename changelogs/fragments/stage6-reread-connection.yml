@@ -1,0 +1,3 @@
+---
+bugfixes:
+  - "tests/hardware/qualify_writable_image.yml - pass the full connection options when re-reading a media session's byte counters. The call omitted ``tls_fingerprint`` and the redirection port, so it failed with ``error_class=tls_validation`` after the writable-device assertion had already passed."
