@@ -1,0 +1,106 @@
+---
+name: Bug report
+description: Something in this collection behaves incorrectly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Please do not report security problems here — see
+        [SECURITY.md](../blob/main/SECURITY.md) for the private channel.
+        AMT credentials are equivalent to physical access to a machine, so also
+        double-check that nothing you paste below contains a password, a session
+        cookie, or an `Authorization` header.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+
+  - type: input
+    id: error_class
+    attributes:
+      label: error_class
+      description: >-
+        If the module failed, the `error_class` it reported. This is the single
+        most useful field in a bug report, because it says which layer failed.
+        One of connection, tls_validation, authentication, unsupported_capability,
+        invalid_state, timeout, protocol, remote_operation, identity_mismatch.
+      placeholder: protocol
+    validations:
+      required: false
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: Which module or role
+      multiple: true
+      options:
+        - amt_info
+        - amt_power
+        - amt_boot
+        - amt_redirection
+        - amt_media
+        - amt_baremetal_install (role)
+        - other / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: amt_version
+    attributes:
+      label: AMT firmware version
+      description: >-
+        From `amt_info`'s reported `version`, or MEBx. Behaviour genuinely differs
+        across generations, so a report without this is often not actionable. This
+        collection is qualified against 16.1.30 only.
+      placeholder: "16.1.30"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options:
+        - "TLS with tls_fingerprint pinning"
+        - "TLS with ca_path"
+        - "Plaintext (use_tls false + allow_insecure_transport true)"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: ansible-core and Python version on the controller
+      description: >-
+        Output of `ansible --version`. These modules run controller-side, so the
+        controller's Python is what matters, not the target's.
+      placeholder: "ansible-core 2.17.14, Python 3.10.12"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Playbook or task that reproduces it
+      description: Redact credentials. Keep it as small as you can.
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: >-
+        Run with `-vvv` if you can. Note that `no_log: true` will censor the
+        result — if so, the redacted `error_class`/`endpoint`/`operation` fields
+        are what to capture instead.
+      render: shell
+    validations:
+      required: false

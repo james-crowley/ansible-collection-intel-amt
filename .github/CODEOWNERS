@@ -1,0 +1,17 @@
+# Default owner for everything.
+*                                   @james-crowley
+
+# Wire-protocol and security-sensitive areas. These are the places where a
+# plausible-looking change has repeatedly turned out to be wrong against real
+# firmware, so they should never merge unreviewed.
+/docs/protocol-notes.md             @james-crowley
+/plugins/module_utils/ider.py       @james-crowley
+/plugins/module_utils/redirection.py @james-crowley
+/plugins/module_utils/tls.py        @james-crowley
+/plugins/module_utils/errors.py     @james-crowley
+/SECURITY.md                        @james-crowley
+
+# Anything that can power-cycle or reimage real hardware.
+/.circleci/config.yml               @james-crowley
+/tests/hardware/                    @james-crowley
+/roles/amt_baremetal_install/       @james-crowley

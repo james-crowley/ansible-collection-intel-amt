@@ -1,0 +1,13 @@
+---
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/james-crowley/ansible-collection-intel-amt/security/advisories/new
+    about: >-
+      Report privately, never as a public issue. AMT credentials are equivalent to
+      physical access to a machine.
+  - name: Intel AMT firmware issue
+    url: https://www.intel.com/content/www/us/en/security-center/default.html
+    about: >-
+      Bugs in AMT firmware itself belong with Intel, not here. This collection
+      only speaks to it.
