@@ -1,0 +1,3 @@
+---
+bugfixes:
+  - CI - pin ansible-core to 2.17 in the hardware qualification job. The lab runner image ships Python 3.10 and ansible-core 2.19 requires 3.11+ on the controller, so the job would have failed at dependency installation. 2.17 is also the collection's declared floor, so hardware qualification now exercises the oldest version the collection claims to support.
