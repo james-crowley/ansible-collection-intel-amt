@@ -26,6 +26,7 @@ from ansible.module_utils import basic
 from ansible.module_utils.common.text.converters import to_bytes
 
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils import media_session
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import TlsValidationError
 from ansible_collections.james_crowley.intel_amt.plugins.modules import amt_media
 
 BASE_ARGS = {
@@ -354,3 +355,105 @@ def _dead_pid() -> int:
     proc = subprocess.Popen([sys.executable, "-c", "pass"])  # fixed argv, no shell
     proc.wait()
     return proc.pid
+
+
+class TestRedirectionTrustPolicy:
+    """The redirection plane must make the same fail-closed trust promise as the
+    WS-Man plane.
+
+    Two holes were closed here. ca_path was accepted and ignored, so an operator
+    setting it would believe the media session was chain-validated when nothing
+    checked it. And use_tls with no pin gave encrypted-but-unauthenticated TLS,
+    which an on-path attacker can terminate to serve its own boot media -- worse
+    than the plaintext path, which at least announces itself.
+    """
+
+    def test_ca_path_is_rejected_not_ignored(self):
+        params = {"host": "10.0.0.5", "port": 16995, "use_tls": True, "tls_fingerprint": "ab" * 32, "ca_path": "/etc/ssl/certs/ca.pem"}
+        with pytest.raises(TlsValidationError, match="ca_path is not supported"):
+            amt_media.enforce_redirection_trust_policy(params)
+
+    def test_tls_without_a_pin_is_refused(self):
+        params = {"host": "10.0.0.5", "port": 16995, "use_tls": True, "tls_fingerprint": None, "ca_path": None}
+        with pytest.raises(TlsValidationError, match="requires tls_fingerprint"):
+            amt_media.enforce_redirection_trust_policy(params)
+
+    def test_tls_with_a_pin_is_accepted(self):
+        params = {"host": "10.0.0.5", "port": 16995, "use_tls": True, "tls_fingerprint": "ab" * 32, "ca_path": None}
+        amt_media.enforce_redirection_trust_policy(params)  # must not raise
+
+    def test_acknowledged_plaintext_needs_no_pin(self):
+        # An endpoint that cannot do TLS at all is still reachable, but only via
+        # the explicit acknowledgement, which enforce_transport_policy checks.
+        params = {"host": "10.0.0.5", "port": 16994, "use_tls": False, "tls_fingerprint": None, "ca_path": None}
+        amt_media.enforce_redirection_trust_policy(params)  # must not raise
+
+    def test_error_is_classified_as_tls_validation(self):
+        params = {"host": "10.0.0.5", "port": 16995, "use_tls": True, "tls_fingerprint": None, "ca_path": None}
+        try:
+            amt_media.enforce_redirection_trust_policy(params)
+        except TlsValidationError as exc:
+            assert exc.to_result()["error_class"] == "tls_validation"
+        else:
+            raise AssertionError("expected TlsValidationError")
+
+
+class TestTrustPolicyIsScopedToAttach:
+    """Detach must never be blocked by transport or trust configuration.
+
+    Detach opens no connection: it reads the state file and signals the recorded
+    pid. An earlier revision of this gate ran for both states, which meant a
+    tightened trust policy could make a running session unstoppable, leaving an
+    orphaned daemon holding media open on a live machine. The integration target
+    caught that, not the unit tests -- hence these.
+    """
+
+    def _detach_args(self, runtime_dir, session_id, **overrides):
+        args = {
+            "host": "10.0.0.5",
+            "username": "admin",
+            "password": "test-password-not-real",
+            "state": "detached",
+            "session_id": session_id,
+            "runtime_dir": runtime_dir,
+            "use_tls": True,
+        }
+        args.update(overrides)
+        return args
+
+    def test_detach_succeeds_under_tls_without_a_fingerprint(self, runtime_dir):
+        session_id = "sess-detach-no-pin"
+        media_session._write_state_atomic(runtime_dir, session_id, {"session_id": session_id, "state": "stopped", "pid": None})
+        _set_module_args(self._detach_args(runtime_dir, session_id))
+        with pytest.raises(AnsibleExitJson) as excinfo:
+            amt_media.main()
+        assert excinfo.value.kwargs["session_id"] == session_id
+
+    def test_detach_succeeds_even_with_ca_path_set(self, runtime_dir):
+        session_id = "sess-detach-ca"
+        media_session._write_state_atomic(runtime_dir, session_id, {"session_id": session_id, "state": "stopped", "pid": None})
+        _set_module_args(self._detach_args(runtime_dir, session_id, ca_path="/etc/ssl/certs/ca.pem"))
+        with pytest.raises(AnsibleExitJson):
+            amt_media.main()
+
+    def test_attach_still_refuses_tls_without_a_pin(self, runtime_dir, floppy_image):
+        _set_module_args(_attach_args(runtime_dir=runtime_dir, floppy_image=floppy_image, use_tls=True, allow_insecure_transport=False))
+        with pytest.raises(AnsibleFailJson) as excinfo:
+            amt_media.main()
+        assert excinfo.value.kwargs["error_class"] == "tls_validation"
+        assert "tls_fingerprint" in excinfo.value.kwargs["msg"]
+
+    def test_attach_refuses_ca_path(self, runtime_dir, floppy_image):
+        _set_module_args(
+            _attach_args(
+                runtime_dir=runtime_dir,
+                floppy_image=floppy_image,
+                use_tls=True,
+                tls_fingerprint="ab" * 32,
+                ca_path="/etc/ssl/certs/ca.pem",
+            )
+        )
+        with pytest.raises(AnsibleFailJson) as excinfo:
+            amt_media.main()
+        assert excinfo.value.kwargs["error_class"] == "tls_validation"
+        assert "ca_path" in excinfo.value.kwargs["msg"]

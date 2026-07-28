@@ -179,7 +179,23 @@ def _write_state_atomic(runtime_dir: str | os.PathLike[str], session_id: str, da
     path = state_file_path(runtime_dir, session_id)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp_path.write_text(json.dumps(data), encoding="utf-8")
+
+    # Create the temp file 0600 explicitly rather than letting the umask decide,
+    # which typically yields 0644. The 0700 parent directory does protect it in
+    # the common case, but that is the *only* thing doing so, and
+    # mkdir(exist_ok=True, mode=...) does not tighten a directory that already
+    # exists -- so a runtime_dir pointed at a pre-existing, laxer directory would
+    # leave these files readable to other local users. The contents are not
+    # secret (no credential ever reaches this file, see SessionConfig) but they
+    # do record endpoint addresses and media paths, and file mode is the wrong
+    # thing to leave to chance on a security boundary.
+    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
     os.replace(tmp_path, path)
 
 

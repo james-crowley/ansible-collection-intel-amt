@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import threading
@@ -262,3 +263,41 @@ class TestJsonSerializability:
         assert "password" not in raw.lower()
         assert "test-password-not-real" not in raw
         assert json.loads(raw) == state
+
+
+class TestStateFilePermissions:
+    """The state file must not be readable by other local users.
+
+    It carries no credential -- SessionConfig deliberately excludes them -- but it
+    does record endpoint addresses, media paths and a pid. The 0700 parent
+    directory is the only thing that protected it while the file itself was
+    created at the umask default (typically 0644), and
+    mkdir(exist_ok=True, mode=...) does not tighten an already-existing
+    directory, so a runtime_dir pointed at a laxer pre-existing path would have
+    exposed it.
+    """
+
+    def test_state_file_is_owner_only(self, tmp_path):
+        media_session._write_state_atomic(tmp_path, "sess-perm", {"session_id": "sess-perm", "state": "attached"})
+        mode = stat.S_IMODE(media_session.state_file_path(tmp_path, "sess-perm").stat().st_mode)
+        assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+
+    def test_state_file_is_owner_only_even_in_a_lax_pre_existing_directory(self, tmp_path):
+        lax = tmp_path / "shared"
+        lax.mkdir(mode=0o777)
+        media_session._write_state_atomic(lax, "sess-lax", {"session_id": "sess-lax", "state": "attached"})
+        mode = stat.S_IMODE(media_session.state_file_path(lax, "sess-lax").stat().st_mode)
+        assert not mode & stat.S_IROTH, "state file is world-readable"
+        assert not mode & stat.S_IRGRP, "state file is group-readable"
+
+    def test_no_temp_file_is_left_behind(self, tmp_path):
+        media_session._write_state_atomic(tmp_path, "sess-tmp", {"state": "attached"})
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_credentials_never_reach_the_state_file(self, tmp_path):
+        # Belt and braces: SessionConfig excludes credentials structurally, but
+        # assert on the written bytes too, since this file is world-visible in
+        # the sense that it outlives the module invocation.
+        secret = "Sup3rSecret!"
+        media_session._write_state_atomic(tmp_path, "sess-cred", {"session_id": "sess-cred", "state": "attached", "host": "10.0.0.5"})
+        assert secret not in media_session.state_file_path(tmp_path, "sess-cred").read_text()

@@ -62,8 +62,12 @@ options:
     description:
       - >-
         Whether to use TLS for the redirection connection. Left at the default of V(true), the
-        module connects to port 16995 and, when O(tls_fingerprint) is set, pins the peer leaf
-        certificate before any protocol byte is sent.
+        module connects to port 16995 and pins the peer leaf certificate before any protocol byte
+        is sent.
+      - >-
+        O(tls_fingerprint) is B(required) when this is V(true). TLS without a pin would be
+        encrypted but unauthenticated, letting an on-path attacker terminate the session and serve
+        its own boot media, so it is refused rather than silently allowed.
       - >-
         Setting this to V(false) is only honoured when O(allow_insecure_transport=true) is also
         set, exactly as for the WS-Man modules in this collection.
@@ -80,19 +84,19 @@ options:
   validate_certs:
     description:
       - >-
-        Accepted for parity with the shared connection options, but not currently implemented for
-        this module's redirection transport: chain/hostname verification is always attempted when
-        O(use_tls=true) and no O(tls_fingerprint) is given. Passing this option has no effect.
-        O(tls_fingerprint) pinning is the practical and recommended trust mode for AMT redirection
-        endpoints, whose certificates are typically self-signed.
+        Accepted for parity with the shared connection options, but has no effect on this module.
+        The redirection plane implements exactly one trust mode, exact SHA-256 leaf pinning via
+        O(tls_fingerprint), which this module B(requires) whenever O(use_tls=true). There is
+        therefore no chain-validation behaviour for this option to turn on or off.
     type: bool
     default: true
   ca_path:
     description:
       - >-
-        Accepted for parity with the shared connection options, but not currently implemented for
-        this module's redirection transport. Passing this option has no effect; use
-        O(tls_fingerprint) instead.
+        B(Rejected) by this module. The redirection plane is a raw TLS socket with no CA-chain
+        trust path, so this option cannot be honoured, and silently ignoring it would leave an
+        operator believing the media session is chain-validated when nothing is checking. Passing
+        it fails with RV(ignore:error_class) V(tls_validation). Use O(tls_fingerprint) instead.
     type: path
   timeout:
     description:
@@ -341,7 +345,7 @@ error_class:
 from ansible.module_utils.basic import AnsibleModule
 
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils import ider, media_session
-from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import AmtError, ErrorClass, InvalidStateError
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import AmtError, ErrorClass, InvalidStateError, TlsValidationError
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.models import OperationReceipt
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.redirection import (
     REDIRECTION_PORT_PLAIN,
@@ -423,6 +427,43 @@ def build_media_specs(params: dict) -> tuple[media_session.MediaSpec, ...]:
     if floppy:
         specs.append(media_session.MediaSpec(path=floppy, device_code=ider.DEVICE_FLOPPY, writable=floppy_writable))
     return tuple(specs)
+
+
+def enforce_redirection_trust_policy(params: dict) -> None:
+    """Fail closed on a trust configuration this plane cannot honour.
+
+    The redirection plane implements exactly one trust mode: SHA-256 leaf
+    pinning. It has no CA-chain path, because there is no HTTP layer here to
+    hang one off -- it is a raw TLS socket carrying a proprietary framing.
+
+    Accepting ``ca_path`` and silently ignoring it would be the worst outcome:
+    an operator who sets it reasonably believes the media session is
+    chain-validated when nothing is checking. Documenting "has no effect" is
+    not enough, because documentation does not stop a misconfiguration from
+    shipping.
+
+    Likewise, TLS with no pin is encrypted but *unauthenticated* -- an on-path
+    attacker can terminate it. That is materially worse than the plaintext path,
+    which at least announces itself, and it contradicts this collection's rule
+    that a trust decision is always explicit.
+    """
+    if params.get("ca_path"):
+        raise TlsValidationError(
+            "ca_path is not supported by amt_media. The IDE-R redirection plane is a raw TLS "
+            "socket with no CA-chain trust path; its only trust mode is exact SHA-256 leaf "
+            "pinning. Set tls_fingerprint instead.",
+            endpoint=f"{params.get('host')}:{params.get('port')}",
+        )
+
+    if params.get("use_tls") and not params.get("tls_fingerprint"):
+        raise TlsValidationError(
+            "amt_media requires tls_fingerprint when use_tls is true. Without a pin the "
+            "redirection session would be encrypted but unauthenticated, so an on-path "
+            "attacker could terminate it and serve its own boot media. Supply the reviewed "
+            "SHA-256 leaf fingerprint, or set use_tls=false with allow_insecure_transport=true "
+            "for an endpoint that cannot do TLS at all.",
+            endpoint=f"{params.get('host')}:{params.get('port')}",
+        )
 
 
 def build_session_config(params: dict, *, session_id: str, port: int, specs: tuple[media_session.MediaSpec, ...]) -> media_session.SessionConfig:
@@ -595,11 +636,18 @@ def main() -> None:
     params = module.params
 
     try:
-        enforce_transport_policy(use_tls=params["use_tls"], allow_insecure_transport=params["allow_insecure_transport"])
         port = resolve_redirection_port(port=params["port"], use_tls=params["use_tls"])
         endpoint = f"{params['host']}:{port}"
 
         if params["state"] == "attached":
+            # Transport and trust policy are only meaningful when we are about to
+            # open a redirection session. Detach opens no connection at all: it
+            # reads the state file and signals the recorded pid. Gating it on a
+            # trust decision would make a session unstoppable by the very
+            # configuration change that should let an operator shut it down --
+            # and would leave an orphaned daemon holding media open.
+            enforce_transport_policy(use_tls=params["use_tls"], allow_insecure_transport=params["allow_insecure_transport"])
+            enforce_redirection_trust_policy(params)
             result = _attach(module, params, endpoint=endpoint, port=port)
         else:
             result = _detach(module, params, endpoint=endpoint)
