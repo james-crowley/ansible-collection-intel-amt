@@ -28,6 +28,11 @@ ignore = [
 # MD5 is mandated by the RFC 2617 digest scheme that Intel AMT's redirection
 # port implements. It is not a security choice available to us.
 "plugins/module_utils/redirection.py" = ["S324"]
+# requirements.txt is deliberately stdlib-only for XML (no lxml/defusedxml,
+# a C-extension dependency with no benefit here): WS-Man responses are small
+# and come from an endpoint already authenticated via HTTP Digest before any
+# XML is parsed.
+"plugins/module_utils/wsman.py" = ["S314"]
 # Tests use asserts and construct fixture data freely.
 "tests/**" = ["S101", "S105", "S106", "S311"]
 

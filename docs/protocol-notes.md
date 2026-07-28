@@ -244,7 +244,34 @@ This is the sequence MeshCmd uses and it is load-bearing. Order matters.
 **Discovery before mutation.** Enumerate `CIM_BootSourceSetting` and confirm exactly
 one instance matches the requested target before doing any of this. Fail with
 `unsupported_capability` if absent or ambiguous. Enumerate `AMT_BootCapabilities`
-to confirm `IDER` / `ForcedPXE` support rather than assuming.
+to confirm support rather than assuming.
+
+`AMT_BootCapabilities` field names, verified against a real firmware response
+fixture in `device-management-toolkit/go-wsman-messages`
+(`pkg/wsman/wsmantesting/responses/amt/boot/capabilities/get.xml`):
+
+| Target / feature | Capability field |
+|---|---|
+| `pxe` | `ForcePXEBoot` |
+| `hdd` | `ForceHardDriveBoot` |
+| `cd` | `ForceCDorDVDBoot` |
+| `bios` | `BIOSSetup` |
+| IDE-R (`ider_floppy`, `ider_cdrom`) | `IDER` |
+| Serial-over-LAN | `SOL` |
+
+The same instance also carries `BIOSPause`, `BIOSReflash`, `BIOSSecureBoot`,
+`ConfigurationDataReset`, `ForceDiagnosticBoot`, `ForceHardDriveSafeModeBoot`,
+`ForcedProgressEvents`, `KeyboardLock`, `PowerButtonLock`, `ResetButtonLock`,
+`SleepButtonLock`, `SecureErase`, `UserPasswordBypass`, and the three
+`Verbosity*` flags. Treat a missing field as "not supported" rather than
+defaulting to true — a wrong field name then fails closed (the module refuses)
+instead of attempting an unsupported boot.
+
+**The `bios` target takes the same step-5 path as IDE-R**: `ChangeBootOrder` is
+called with a null `Source`, because `bios` has no `CIM_BootSourceSetting`
+instance. `BIOSSetup=true` in step 3 is what selects it. This matches MeshCmd,
+whose boot-source map contains only `pxe`, `hdd`, and `cd` and which passes a
+null parameter for anything outside that map.
 
 ### 2.6 Redirection service state
 
