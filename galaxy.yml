@@ -38,6 +38,11 @@ issues: https://github.com/james-crowley/ansible-collection-intel-amt/issues
 build_ignore:
   - .circleci
   - .github
+  # Repository tooling, not collection content. Shipping these to Galaxy
+  # would put maintainer-only config in every consumer's install.
+  - renovate.json
+  - CODE_OF_CONDUCT.md
+  - SECURITY.md
   - .gitignore
   - .yamllint
   - .ruff_cache
