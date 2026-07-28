@@ -392,11 +392,25 @@ jobs:
             # the workspace is actually writable before anything relies on it.
             touch .writable-probe && rm -f .writable-probe && echo "workspace: writable"
       - run:
-          name: Observe TLS certificates offered by the AMT endpoint
+          name: Observe TLS certificates offered by every configured AMT endpoint
           command: |
             test -n "${AMT_HOST:-}" || { echo "AMT_HOST is not set in the context." >&2; exit 1; }
-            python3 tests/hardware/observe-tls-fingerprint.py \
-              "${AMT_HOST}" "${AMT_PORT:-16993}" "${AMT_REDIRECTION_PORT:-16995}"
+            # Every machine is observed, not just the first. Each AMT endpoint
+            # presents its own self-signed certificate, so each needs its own
+            # reviewed pin -- a single shared fingerprint cannot work across two
+            # machines and would surface as a confusing pin mismatch rather than a
+            # clear configuration error.
+            status=0
+            n=1
+            host="${AMT_HOST}"
+            while [ -n "${host}" ]; do
+              echo "================ machine ${n} ================"
+              python3 tests/hardware/observe-tls-fingerprint.py \
+                "${host}" "${AMT_PORT:-16993}" "${AMT_REDIRECTION_PORT:-16995}" || status=1
+              n=$((n + 1))
+              eval "host=\${AMT_HOST_${n}:-}"
+            done
+            exit "${status}"
 
   # -------------------------------------------------------------------------
   # Hardware-in-the-loop. Runs on a self-hosted machine runner sitting inside the
