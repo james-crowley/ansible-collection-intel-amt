@@ -2,21 +2,127 @@ ancestor: null
 releases:
   0.1.0:
     changes:
+      breaking_changes:
+      - 'amt_boot, amt_redirection, amt_media - the ``intel-amt-operation/v1`` receipt
+        (``schema``, ``action``, ``endpoint``, ``previous``, ``desired``, ``observed``,
+        ``tls_peer_fingerprint``, and the success-path ``error_class``) is now nested
+        under an ``operation`` key on every module, matching the shape ``amt_power``
+        already used. It was previously spread directly at the top level of these
+        three modules'' results, which meant a caller could not write one helper that
+        reads ``error_class``/``tls_peer_fingerprint`` from any module in the collection
+        -- exactly the defect tracked as issue #22. Module-specific return values
+        (for example ``amt_boot``''s ``device``/``boot_config_selector``/``boot_source_selector``,
+        ``amt_redirection``''s ``supported``/``enabled``/``transport_reachable``,
+        and ``amt_media``''s ``session_id``/``session_state``/``devices``/``bytes_read``/``bytes_written``)
+        are unaffected and remain at the top level. A failed module''s result is unaffected
+        by this change: ``error_class`` still surfaces at the top level of ``fail_json``,
+        since that is what Ansible itself surfaces and what rescue blocks read via
+        ``ansible_failed_result.error_class``.'
+      - amt_info - now returns a non-secret ``intel-amt-operation/v1`` receipt under
+        an ``operation`` key, for parity with the other four modules. It is read-only
+        (``operation.action`` is always ``get_facts``, ``operation.changed`` is always
+        ``false``), and ``operation.previous``/``operation.desired``/``operation.observed``
+        are always ``null`` -- a read has no prior, intended, or separately-observed
+        state to report beyond what the existing ``amt`` return key already carries.
       bugfixes:
+      - CI - pin ansible-core to 2.17 in the hardware qualification job. The lab runner
+        image ships Python 3.10 and ansible-core 2.19 requires 3.11+ on the controller,
+        so the job would have failed at dependency installation. 2.17 is also the
+        collection's declared floor, so hardware qualification now exercises the oldest
+        version the collection claims to support.
+      - CI - the publish job reads ``GALAXY_API_KEY``, matching the name actually
+        stored in the ``galaxy-publish`` context. It previously read ``ANSIBLE_GALAXY_API_KEY``
+        and would have failed on its first real run.
       - Collection staging derives its build root from the repository path, so concurrent
         checkouts on one host no longer clobber each other's staged tree (https://github.com/james-crowley/ansible-collection-intel-amt/pull/14).
+      - Exclude repository tooling from the built collection artifact. ``renovate.json``
+        was being shipped to consumers; ``CODE_OF_CONDUCT.md`` and ``SECURITY.md``
+        are now excluded too.
       - Mock WS-Man fixture server - answer ``Enumerate`` for ``AMT_BootCapabilities``,
         not only ``Get``. Unit tests mock enumeration directly, so this was invisible
         until a real integration target sent a real ``Enumerate`` (https://github.com/james-crowley/ansible-collection-intel-amt/pull/20).
+      - Omit WS-Man method parameters whose value is ``None`` instead of emitting
+        an empty element. Real AMT 16.1.30 rejects ``CIM_BootConfigSetting.ChangeBootOrder``
+        carrying an empty ``<Source/>`` with HTTP 400 and "The supplied SOAP violates
+        the corresponding XML schema definition", because ``Source`` is typed as an
+        endpoint reference and so requires child elements. This blocked IDE-R and
+        BIOS boot entirely against real firmware.
       - 'README - fix the unattended-install example playbook referencing C(media.operation.session_id),
         which does not exist: M(james_crowley.intel_amt.amt_media) returns RV(session_id)
         at the top level of its result, not nested under an C(operation) key (that
         nesting is specific to M(james_crowley.intel_amt.amt_power)). Corrected to
         C(media.session_id) in both the boot-arming and detach tasks (https://github.com/james-crowley/ansible-collection-intel-amt/issues/10).'
+      - Support Python 3.10 on the controller, which the collection already claimed
+        by declaring ``requires_ansible '>=2.17.0'`` (ansible-core 2.17 runs on 3.10)
+        but did not actually honour. ``client.py`` imported ``enum.StrEnum`` and ``media_session.py``
+        used ``datetime.UTC``, both Python 3.11+, so every module that imports the
+        client raised ImportError on 3.10 before any error handling could classify
+        it.
+      - '``PowerAction`` keeps ``StrEnum`` semantics via an explicit ``__str__``.
+        A plain ``(str, Enum)`` renders as ``PowerAction.ON`` under ``str()`` and
+        f-string interpolation rather than ``on``, which would have silently changed
+        the shape of messages and receipt fields.'
+      - amt_baremetal_install - ``amt_baremetal_install_host`` no longer defaults
+        to ``inventory_hostname``. AMT answers on a separate management address from
+        the operating system's hostname, so that default silently pointed at the wrong
+        endpoint or an unresolvable name; it now resolves from ``amt_host`` and otherwise
+        stays unset so validation fails loudly.
+      - amt_baremetal_install - choose the power transition from the observed power
+        state instead of always issuing ``reset``. A master bus reset does nothing
+        to a machine that is already off, so installing an operating system onto a
+        powered-off machine -- arguably the common bare-metal case -- attached the
+        media, armed the one-shot boot, and then reported success having booted nothing.
+      - amt_baremetal_install - connection variables now fall back to the conventional
+        ``amt_*`` inventory variables (``amt_host``, ``amt_password``, ``amt_tls_fingerprint``
+        and friends) that this collection's README, docs and example inventory all
+        use, so a conventional inventory drives the role with no per-variable mapping.
+      - amt_info - read the system UUID from ``CIM_ComputerSystemPackage.PlatformGUID``.
+        It was read as ``UUID`` from ``CIM_ComputerSystem``, which has no such property,
+        so it was null on every endpoint and silently disabled the identity cross-check
+        that guards against acting on the wrong machine (https://github.com/james-crowley/ansible-collection-intel-amt/issues/30).
+      - amt_info - render the system UUID in the canonical dashed form, reversing
+        the first three SMBIOS fields. ``PlatformGUID`` arrives as 32 undashed hex
+        characters with those fields little-endian, so the naive reading produces
+        a plausible-looking UUID that does not match what MEBx displays -- which would
+        make the identity cross-check fail against a correctly recorded expectation
+        (https://github.com/james-crowley/ansible-collection-intel-amt/issues/32).
       - amt_info - report the AMT firmware version from ``CIM_SoftwareIdentity`` (the
         instance whose ``InstanceID`` is ``AMT``, read from ``VersionString``). It
         was previously read from ``AMT_GeneralSettings.Version`` and ``AMT_SetupAndConfigurationService.VersionsSupported``,
         neither of which exists, so the reported version was always null (https://github.com/james-crowley/ansible-collection-intel-amt/issues/18).
+      - amt_info - stop reading ``CIM_ComputerSystem`` during facts gathering. It
+        existed only to source the UUID and contributed nothing else, so removing
+        it also saves a WS-Man round trip per call.
+      - 'amt_power - correct the documentation example, which used ``state: on``.
+        YAML parses an unquoted ``on`` as the boolean ``true`` rather than the string
+        ``"on"``, so anyone copying the example would have passed the wrong type and
+        failed argument validation.'
+      - tests/hardware/qualify_power.yml - restore the power state the stage started
+        from. It previously left the target powered off, and the next stage issues
+        a reset, which does nothing to an off machine.
+      - tests/hardware/qualify_power.yml - restore the starting power state using
+        ``previous_state``, the key ``amt_power`` actually returns. It referenced
+        a non-existent ``power_state`` key, so the guard always evaluated to ``unknown``,
+        the restore silently skipped on every run, and the stage reported that it
+        had left the machine as-is. An assertion now fails loudly if the starting
+        state cannot be read.
+      - 'tests/hardware/qualify_readonly.yml - surface the redacted failure detail
+        when amt_info fails. The task carries ``no_log: true`` to keep task arguments
+        (including the password) out of the log, but that also censored the module''s
+        own error, which errors.py has already redacted and which is therefore safe
+        to show. A censored failure is undiagnosable, so a rescue now reports ``error_class``,
+        ``endpoint``, ``operation``, ``indeterminate`` and the redacted message.'
+      - tests/hardware/qualify_writable_image.yml - pass the full connection options
+        when re-reading a media session's byte counters. The call omitted ``tls_fingerprint``
+        and the redirection port, so it failed with ``error_class=tls_validation``
+        after the writable-device assertion had already passed.
+      - tests/hardware/render-inventory.sh - emit credentials as ``lookup('ansible.builtin.env',
+        ...)`` expressions instead of literal values, so the AMT password and TLS
+        fingerprint never touch disk. Also accept ``AMT_HOST``, ``AMT_PORT`` and ``AMT_REDIRECTION_PORT``,
+        matching the variables the lab context provides.
+      - tests/hardware/render-inventory.sh - emit the ``amt_targets`` group the qualification
+        playbooks actually target. It previously emitted ``amt_lab``, so every play
+        would have matched zero hosts and reported success having done nothing.
       - tests/integration/mock_servers/wsman_server.py - AMT_BootCapabilities now
         answers Enumerate as well as Get. amt_boot's discover_and_validate() and redirection_service.py's
         get_capabilities() both reach it via Enumerate+Pull (it has no natural instance
@@ -37,9 +143,25 @@ releases:
         IDE-R deferral gap, Small Business Mode's hardware-verified lack of TLS, and
         C(amt_media)'s C(validate_certs)/C(ca_path) divergence from the WS-Man modules)
         (https://github.com/james-crowley/ansible-collection-intel-amt/issues/10).
+      - Add CODE_OF_CONDUCT.md referencing the Ansible Community Code of Conduct,
+        and .github/CODEOWNERS marking the wire-protocol and hardware-touching paths.
+      - Add GitHub issue forms for bug reports and feature requests. The bug form
+        asks for the fields that actually make a report actionable -- ``error_class``,
+        AMT firmware version, and transport mode -- since behaviour genuinely differs
+        across firmware generations.
+      - Add SECURITY.md with a private reporting channel, and a plain explanation
+        of why this collection warrants unusual care -- AMT credentials are equivalent
+        to physical access, and writable IDE-R hands a remote BIOS raw block access
+        to a local file.
       - Add ``AmtClient``, the typed facts/power management API that ``amt_info``
         and ``amt_power`` adapt to, built on the existing ``WsmanClient`` transport
         (https://github.com/james-crowley/ansible-collection-intel-amt/issues/2, https://github.com/james-crowley/ansible-collection-intel-amt/issues/3).
+      - Add a pull request template whose checklist items each correspond to a class
+        of bug that has really occurred in this collection, including running sanity
+        against the oldest supported ansible-core rather than only the newest.
+      - 'Add docs/maintainer-setup.md documenting every one-time human step: claiming
+        a Galaxy namespace, creating the restricted publish context, installing Renovate,
+        and the public-versus-private trade-off.'
       - Add integration test targets for amt_info, amt_power, amt_boot, amt_redirection,
         and amt_media, driving the real modules against the mock WS-Man and IDE-R
         fixture servers over both plaintext and TLS with a pinned fingerprint, including
@@ -51,6 +173,9 @@ releases:
         each covering options, return values, examples, idempotence/check-mode behaviour,
         error classes, and known limitations, verified against the argument specs
         and rendered C(ansible-doc) output rather than written from memory (https://github.com/james-crowley/ansible-collection-intel-amt/issues/10).
+      - 'Add renovate.json covering the dependency surfaces Renovate can actually
+        see: pip requirements, ``cimg/python`` CI images, and the single ``ansible-core``
+        pin used by the hardware job.'
       - Add the ``amt_info`` module -- read-only capability and state discovery. Capabilities
         (``power``, ``boot_once_pxe``, ``sol``, ``storage_redirection``) and redirection-service
         status are discovered from live firmware responses; a firmware that omits
@@ -61,6 +186,55 @@ releases:
         is polled a bounded, injectable number of times afterwards and reports what
         was actually observed, since ``ReturnValue == 0`` means accepted, not complete
         (https://github.com/james-crowley/ansible-collection-intel-amt/issues/3).
+      - CI - a weekly scheduled pipeline now runs the standard test workflow against
+        main, to catch breakage that arrives without a push such as a new ansible-core
+        point release, a PyPI dependency change, or a rebuilt CI image. It cannot
+        reach lab hardware, because the hardware workflow requires a pipeline parameter
+        that defaults to false.
+      - CI - add Python 3.10 to the unit-test matrix, paired with ansible-core 2.17.
+        The matrix previously started at 3.11 and was therefore blind to 3.11-only
+        APIs on a version of Python the collection claims to support.
+      - CI - add a ``hardware-observe`` job that reports the SHA-256 leaf-certificate
+        fingerprint each AMT port offers. It sends no credentials and mutates nothing,
+        so it is safe to run before an endpoint's identity is established, and it
+        produces the reviewed pin the credentialed stages require.
+      - CI - hardware-in-the-loop jobs target the ``crowley/amt-runner`` self-hosted
+        resource class and run under the ``amt-lab-runner`` context, which is restricted
+        to this project alone so no other project in the organisation can borrow the
+        lab credentials. Four independent controls now stand in front of the runner
+        - the ``run-hardware-tests`` pipeline parameter, a manual approval, the project-restricted
+        context, and a main-branch filter.
+      - CI - lab inventory is rendered on the runner from context environment variables
+        by ``tests/hardware/render-inventory.sh`` and removed afterwards, so endpoint
+        addresses, credentials and reviewed TLS fingerprints never enter the repository.
+      - CI - the hardware job builds and installs the collection from the checkout
+        before running playbooks, so qualification runs against the code under test
+        rather than a published release.
+      - CI - the hardware job installs ansible-core into a workspace virtualenv rather
+        than with ``pip install --user``, because the lab runner is rootless with
+        a read-only root filesystem.
+      - CI - the hardware-observe job now reports the certificate offered by every
+        configured machine, not just the first, so a second machine's fingerprint
+        can be reviewed before it is pinned.
+      - 'CI - wire hardware qualification stages 4-7 (``qualify_power``, ``qualify_media_attach``,
+        ``qualify_writable_image``, ``qualify_pxe``) into the ``hardware`` workflow
+        as four new jobs (``hardware-power``, ``hardware-media``, ``hardware-writable``,
+        ``hardware-pxe``), each escalating past the last and each behind its own independent
+        ``type: approval`` job, so a human confirms every escalation separately rather
+        than one approval covering everything from a power-cycle through arming a
+        native PXE boot. All four keep the ``amt-lab-runner`` context and the main-branch
+        filter. Stage 7''s ``amt_pxe_prereqs_confirmed`` attestation is wired to a
+        new ``pxe-prereqs-confirmed`` pipeline parameter (default ``false``), not
+        hardcoded ``true``, so it has to be a fresh decision at trigger time.'
+      - De-identify the lab from the repository now that it is public. The platform
+        GUID used as a byte-order test vector is replaced with illustrative digits
+        that preserve both properties the tests rely on, and real AMT addresses and
+        reviewed fingerprints are replaced with placeholders in maintainer documentation.
+      - Documentation now records that the collection is hardware-qualified against
+        a single Intel AMT 16.1.30 endpoint through all seven qualification stages,
+        and states specifically what remains unproven -- a non-zero IDE-R write, whether
+        a PXE exchange occurred, AMT's internal one-shot role bit, a second machine,
+        and any other firmware generation.
       - Extend ``AmtFacts`` with ``reported_hostname``, ``capabilities``, and ``redirection``
         fields (all firmware-observed, defaulted for backward compatibility) and add
         the new ``AmtCapabilities`` dataclass, so facts-gathering has a typed home
@@ -105,6 +279,9 @@ releases:
         enablement, and TCP reachability as three separate signals, and optionally
         mutates enablement via ``AMT_RedirectionService.RequestStateChange``; read-only
         by default and never attaches or streams media (https://github.com/james-crowley/ansible-collection-intel-amt/pull/13).
+      - docs/capability-matrix.md gains a fourth tier for firmware-verified claims
+        and tabulates the six defects hardware qualification found that neither the
+        unit nor the mock tier could have caught.
       - plugins/module_utils/boot.py - data-driven allow/deny-list Put-body construction
         for ``AMT_BootSettingData``, deleting the fields newer firmware rejects when
         echoed back and zeroing ``UefiBootNumberOfParams`` when present (https://github.com/james-crowley/ansible-collection-intel-amt/pull/13).
@@ -119,6 +296,76 @@ releases:
       - plugins/module_utils/redirection_service.py - WS-Man view of redirection-service
         capability/enablement plus an injectable TCP reachability probe, kept separate
         from the stateful IDE-R/SOL session transport (https://github.com/james-crowley/ansible-collection-intel-amt/pull/13).
+      - 'roles/amt_baremetal_install - new reusable role that drives a complete unattended
+        bare-metal install lifecycle (validate -> probe -> attach media -> arm one-time
+        boot -> reset -> observe -> wait for hand-off -> detach) on top of amt_info,
+        amt_power, amt_boot, amt_redirection, and amt_media. Asserts the play targets
+        exactly one host (delegate_to: localhost does not stop inventory fan-out),
+        requires an explicit confirm_destructive=true before doing anything destructive,
+        runs preflight capability checks via amt_info before any mutation, persists
+        resumability state per target so an interrupted run never blindly re-arms
+        one-time boot or re-issues a reset of uncertain outcome, and always detaches
+        media via block/rescue/always even on failure. Supports both an ider_cdrom
+        (IDE-R virtual media) and a native pxe boot provider, mutually exclusive by
+        construction (https://github.com/james-crowley/ansible-collection-intel-amt/issues/9).'
+      - tests/hardware - add the eight-stage hardware qualification playbooks (qualify_readonly,
+        qualify_checkmode, qualify_power, qualify_media_attach, qualify_writable_image,
+        qualify_pxe, qualify_idempotent_reprobe), an inventory.yml.example with obviously
+        fake values, and a README documenting the gating, staged ordering rationale,
+        and the manual KVM/MEBx recovery path to keep reachable before running the
+        media-attach stage for the first time. qualify_readonly.yml and qualify_checkmode.yml
+        are the two filenames the CircleCI hardware workflow already references (https://github.com/james-crowley/ansible-collection-intel-amt/issues/11).
+      - tests/hardware - every stage 4-7 playbook (``qualify_power``, ``qualify_media_attach``,
+        ``qualify_writable_image``, ``qualify_pxe``) now has the same block/rescue
+        pattern ``qualify_readonly.yml`` already used, surfacing ``error_class``/``endpoint``/``operation``/
+        ``indeterminate`` on failure instead of a ``no_log``-censored, undiagnosable
+        one. ``roles/amt_baremetal_install``'s own rescue (used by stages 5 and 7)
+        does the same before re-raising, so a firmware failure inside the role is
+        diagnosable too. A new ``amt_qualify_attended`` variable (default ``true``)
+        gates every interactive ``ansible.builtin.pause`` in these playbooks, so they
+        can run unattended in CI -- where ``pause`` would otherwise block forever
+        on stdin the machine executor cannot supply -- with the corresponding approval
+        job acting as the human checkpoint instead.
+      - tests/hardware - support qualifying several machines, each with its own credentials
+        and its own reviewed TLS fingerprint, via a numeric variable suffix (``AMT_HOST_2``,
+        ``AMT_PASSWORD_2``, ``AMT_TLS_FINGERPRINT_2``). Ports stay shared, since AMT
+        always listens on the same ones. Per-machine pins are required rather than
+        optional, because each endpoint presents its own self-signed certificate and
+        a shared fingerprint would surface as a pin mismatch rather than a configuration
+        error.
+      - tests/hardware/make-test-media.sh - new script that provisions the small bootable
+        ISO (iPXE's own ``ipxe.iso``) and zero-filled writable raw image stages 5
+        and 6 need, entirely inside the workspace. Idempotent and safe to re-run;
+        fails loudly rather than producing a placeholder file if the download fails
+        or a size check does not land on a multiple of 512 bytes.
+      - tests/hardware/qualify_pxe.yml - assert that ``AMT_BootSettingData`` reads
+        back unchanged after the one-time PXE boot's reset, in addition to confirming
+        the arm reads back armed and the reset is issued and recovered. Documented
+        plainly, in both the playbook and ``tests/hardware/README.md``, that this
+        does not read Intel AMT's internal one-shot (``IsNextSingleUse``) role bit
+        -- no module in this collection exposes a getter for it -- and that netboot
+        succeeding is outside this playbook's authority to verify, since it depends
+        on DHCP/boot-service infrastructure this collection cannot observe.
+      - 'tests/hardware/qualify_writable_image.yml - weaken the "bytes actually landed
+        on disk" assertion. A BIOS sitting at a boot prompt does not spontaneously
+        write to an attached floppy, so ``bytes_written=0`` (nothing booted on the
+        target to issue a write) is now reported as a legitimate, expected outcome
+        rather than a failure. What is still asserted every run: the image is accepted
+        and attached, and the device is presented to the guest as writable (the MODE_SENSE
+        write-protect bit is ``0x00``, not ``0x80``). A non-zero ``bytes_written``
+        is still cross-checked against the on-disk checksum, since that combination
+        disagreeing would be a real bug.'
+      release_summary: "First release. Manages Intel AMT / vPro endpoints from Ansible:
+        capability\ndiscovery, power control, one-time boot selection, redirection-service
+        state,\nand native IDE-R virtual media \u2014 a bootable ISO and a writable
+        image served to a\nmachine's firmware without shelling out to MeshCmd or Node.js.\n\nQualified
+        against two physical machines running Intel AMT 16.1.30, through all\nseven
+        hardware stages: read-only facts, check-mode plans, power on/off, IDE-R\nmedia
+        attach and boot, a writable image, native one-time PXE, and an idempotent\nre-probe.\n\nSee
+        ``docs/capability-matrix.md`` for what is verified against real firmware,\nwhat
+        is only covered by mock fixtures, and what remains unproven. That\ndistinction
+        is maintained deliberately, and the \"still unproven\" list is short\nand
+        specific rather than absent.\n"
       security_fixes:
       - IDE-R write payloads are bounded against the transfer length declared by the
         WRITE CDB, and MediaImage refuses any write that would extend the backing
@@ -149,6 +396,27 @@ releases:
     - 6-ider-engine.yml
     - 7-amt-media-integration.yml
     - 7-amt-media.yml
+    - 9-11-baremetal-role.yml
+    - canonical-uuid.yml
+    - ci-runner-lockdown.yml
+    - community-files.yml
+    - hardware-error-visibility.yml
+    - hardware-qualified-docs.yml
+    - hardware-runner-python310.yml
+    - hardware-runner-wiring.yml
+    - hardware-stages-4-7-ci.yml
+    - multi-machine-qualification.yml
+    - normalise-return-shape.yml
+    - omit-null-method-params.yml
+    - public-repo-hardening.yml
+    - python310-compatibility.yml
+    - release-summary.yml
+    - role-connection-defaults.yml
+    - role-power-on-when-off.yml
+    - scheduled-drift-detection.yml
+    - stage4-restore-key.yml
+    - stage6-reread-connection.yml
+    - system-uuid-identity-guard.yml
     modules:
     - description: Arm a one\-time boot device selection on an Intel AMT endpoint
       name: amt_boot
