@@ -131,9 +131,41 @@ probes:
   elements: dict
   returned: when a request was sent
 operation:
-  description: The C(intel-amt-operation/v1) receipt for this action.
+  description: >-
+    The C(intel-amt-operation/v1) receipt for this action, in the same nested shape every module
+    in this collection returns it under.
   type: dict
   returned: always
+  contains:
+    schema:
+      description: Always V(intel-amt-operation/v1).
+      type: str
+    action:
+      description: V(amt_power.<state>), e.g. V(amt_power.on).
+      type: str
+    endpoint:
+      description: The C(host:port) this operation was performed against.
+      type: str
+    changed:
+      description: Mirrors the top-level C(changed) value Ansible always returns.
+      type: bool
+    previous:
+      description: Same shape as RV(previous_state).
+      type: dict
+    desired:
+      description: Same value as RV(desired_state).
+      type: str
+    observed:
+      description: The last postcondition probe taken, same shape as RV(previous_state), or V(null).
+      type: dict
+    tls_peer_fingerprint:
+      description: >-
+        SHA-256 fingerprint of the TLS leaf certificate observed during this operation, or V(null)
+        over plaintext.
+      type: str
+    error_class:
+      description: A stable machine-readable failure class. V(null) on success.
+      type: str
 """
 
 from ansible.module_utils.basic import AnsibleModule, missing_required_lib

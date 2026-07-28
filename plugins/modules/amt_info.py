@@ -137,6 +137,45 @@ amt:
         sol_enabled:
           description: Whether Serial-over-LAN is currently enabled (not merely supported).
           type: bool
+operation:
+  description: >-
+    The non-secret C(intel-amt-operation/v1) receipt for this read, in the same nested shape
+    every other module in this collection returns it under. RV(operation.previous) and
+    RV(operation.desired) are always V(null): a read has no prior state and no intended change to
+    report. See RV(amt) for what was actually observed -- it is not duplicated under
+    RV(operation.observed).
+  type: dict
+  returned: always
+  contains:
+    schema:
+      description: Always V(intel-amt-operation/v1).
+      type: str
+    action:
+      description: Always V(get_facts).
+      type: str
+    endpoint:
+      description: The C(host:port) this read was performed against.
+      type: str
+    changed:
+      description: Always V(false).
+      type: bool
+    previous:
+      description: Always V(null) -- a read-only module has no prior state to report.
+      type: str
+    desired:
+      description: Always V(null) -- a read-only module has no intended state to report.
+      type: str
+    observed:
+      description: Always V(null). See RV(amt) instead, which carries the actual observed facts.
+      type: str
+    tls_peer_fingerprint:
+      description: >-
+        SHA-256 fingerprint of the TLS leaf certificate observed during this read, or V(null) over
+        plaintext.
+      type: str
+    error_class:
+      description: A stable machine-readable failure class. V(null) on success.
+      type: str
 """
 
 import dataclasses
@@ -145,6 +184,7 @@ from ansible.module_utils.basic import AnsibleModule, missing_required_lib
 
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.client import AmtClient
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import AmtError
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.models import OperationReceipt
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.wsman import HAS_REQUESTS, REQUESTS_IMPORT_ERROR, WsmanClient
 
 
@@ -220,7 +260,14 @@ def main() -> None:
         module.fail_json(**err.to_result())
         return
 
-    module.exit_json(changed=False, amt=amt)
+    peer_cert = wsman.last_peer_certificate
+    receipt = OperationReceipt(
+        action="get_facts",
+        endpoint=wsman.endpoint,
+        changed=False,
+        tls_peer_fingerprint=peer_cert.sha256_fingerprint if peer_cert else None,
+    )
+    module.exit_json(changed=False, amt=amt, operation=receipt.to_dict())
 
 
 if __name__ == "__main__":

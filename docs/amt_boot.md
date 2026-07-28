@@ -74,23 +74,31 @@ enable the redirection service. Pair with `amt_redirection` (`state: ider`) and
 
 ## Return values
 
-`amt_boot` spreads the `intel-amt-operation/v1` receipt directly at the top level
-(unlike `amt_power`, which nests it under `operation` — see
-[Capability matrix](capability-matrix.md)).
+`amt_boot` nests its `intel-amt-operation/v1` receipt under an `operation` key, the
+same shape every module in this collection returns it under (see
+[Capability matrix](capability-matrix.md) — this was previously inconsistent across
+modules and was normalised in issue #22).
 
 | Field | Type | Returned | Description |
 |---|---|---|---|
-| `schema` | `str` | always | Always `intel-amt-operation/v1`. |
-| `action` | `str` | always | Always `amt_boot`. |
-| `endpoint` | `str` | always | `host:port` this operation ran against. |
 | `changed` | `bool` | always | Always `true` on success — arming is not idempotent against prior state; every successful call re-clears and re-sets the boot order. |
-| `previous` | `dict` | always | `AMT_BootSettingData` properties as read before mutation. |
-| `desired` | `dict` | always | `AMT_BootSettingData` properties attempted (or, in check mode, that would be attempted) via `Put`. |
-| `observed` | `dict` | always | `AMT_BootSettingData` read back after the sequence completed. Equal to `previous` in check mode. |
 | `device` | `str` | always | The `device` value that was armed. |
 | `boot_config_selector` | `dict` | always | The `CIM_BootConfigSetting` selector used in steps 2, 4, and 5. |
 | `boot_source_selector` | `dict` or `null` | always | The `CIM_BootSourceSetting` selector named in step 5, or `null` for `bios`/`ider_floppy`/`ider_cdrom`. |
-| `error_class` | `str` | on failure | Stable machine-readable failure class. |
+| `operation.schema` | `str` | always | Always `intel-amt-operation/v1`. |
+| `operation.action` | `str` | always | Always `amt_boot`. |
+| `operation.endpoint` | `str` | always | `host:port` this operation ran against. |
+| `operation.changed` | `bool` | always | Mirrors the top-level `changed`. |
+| `operation.previous` | `dict` | always | `AMT_BootSettingData` properties as read before mutation. |
+| `operation.desired` | `dict` | always | `AMT_BootSettingData` properties attempted (or, in check mode, that would be attempted) via `Put`. |
+| `operation.observed` | `dict` | always | `AMT_BootSettingData` read back after the sequence completed. Equal to `previous` in check mode. |
+| `operation.tls_peer_fingerprint` | `str` or `null` | always | SHA-256 fingerprint of the TLS leaf certificate observed, or `null` over plaintext. |
+| `operation.error_class` | `str` or `null` | always | `null` on success; a stable machine-readable failure class on failure. |
+
+Note `error_class` also appears at the **top level** of a failed module's result — that
+is what Ansible's `fail_json` surfaces and what rescue blocks read
+(`ansible_failed_result.error_class`); it is unrelated to `operation.error_class`, which
+is always `null` on the successful-exit path documented above.
 
 ## Examples
 

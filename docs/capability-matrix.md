@@ -186,18 +186,42 @@ hang chain validation off in the first place.
 
 ---
 
-## Return-shape inconsistency across modules
+## Return-shape inconsistency across modules (RESOLVED)
 
-Not a firmware-verification gap, but worth recording here because it affects how a
-playbook consumes results: `amt_power` nests its `intel-amt-operation/v1` receipt
-under an `operation` key (`result_from_receipt()` in `amt_power.py`), while
-`amt_boot`, `amt_redirection`, and `amt_media` all spread the receipt's fields
-directly at the top level of the module result (`module.exit_json(**receipt.to_dict())`).
-`amt_info` does not use the receipt shape at all — it returns a single `amt` dict.
-Consult each module's own return-values table
+Closed by issue #22, the last item before 1.0. **Before** this was fixed, the five
+modules disagreed on where the operation receipt lived: `amt_power` nested its
+`intel-amt-operation/v1` receipt under an `operation` key, `amt_boot`/`amt_redirection`/
+`amt_media` all spread the receipt's fields directly at the top level of the module
+result, and `amt_info` used neither shape (it returned a bare `amt` dict with no
+receipt at all). That inconsistency was real, not cosmetic: a caller could not write
+one helper that reads `error_class` or `tls_peer_fingerprint` from any module in the
+collection, and it had already caused a concrete bug (issue #21's README example
+referencing `media.operation.session_id`, which never existed).
+
+**Now**, every module returns the receipt nested under an `operation` key —
+`amt_power`'s pre-existing shape was the target, and `amt_boot`, `amt_redirection`, and
+`amt_media` were changed to match it. `amt_info` gained a receipt for the first time:
+read-only, `action: get_facts`, `changed: false` always, and `previous`/`desired`/
+`observed` left `null` (a read has no prior/intended/re-observed state distinct from
+its own `amt` return key to report — nothing was invented to fill those fields).
+Module-specific return values (`amt_power`'s `previous_state`/`desired_state`,
+`amt_boot`'s `device`/`boot_config_selector`/`boot_source_selector`,
+`amt_redirection`'s `supported`/`enabled`/`transport_reachable`, `amt_media`'s
+`session_id`/`session_state`/`devices`/`bytes_read`/`bytes_written`, `amt_info`'s `amt`)
+stay exactly where they were — this was a fix to the receipt's location, not a
+relocation of everything else.
+
+This is a **breaking change** for anyone reading `amt_boot`/`amt_redirection`/
+`amt_media`'s receipt fields (`schema`, `action`, `endpoint`, `previous`, `desired`,
+`observed`, `tls_peer_fingerprint`) at the top level — they now live under `operation`.
+It does **not** change the shape of a *failed* module's result: `error_class` (and
+`endpoint`/`operation`-as-a-string/`indeterminate`/`diagnostic`) still surface at the
+top level of `fail_json`, per `errors.py`'s `to_result()`, because that is what Ansible
+itself surfaces and what the hardware playbooks' rescue blocks read
+(`ansible_failed_result.error_class`). Consult each module's own return-values table
 ([`amt_info`](amt_info.md), [`amt_power`](amt_power.md), [`amt_boot`](amt_boot.md),
-[`amt_redirection`](amt_redirection.md), [`amt_media`](amt_media.md)) rather than
-assuming one shape across all five.
+[`amt_redirection`](amt_redirection.md), [`amt_media`](amt_media.md)) for the exact,
+now-consistent shape.
 
 ---
 

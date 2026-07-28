@@ -47,11 +47,12 @@ Verified against `argument_spec()` in `plugins/modules/amt_power.py` and the ren
 
 ## Return values
 
-Unlike `amt_boot`/`amt_redirection`/`amt_media`, `amt_power` nests its
-`intel-amt-operation/v1` receipt under an `operation` key rather than spreading its
-fields at the top level — this is a real, deliberate inconsistency across the
-collection's return shapes (see [Capability matrix](capability-matrix.md) for the
-per-module summary).
+`amt_power` nests its `intel-amt-operation/v1` receipt under an `operation` key — the
+same shape every module in this collection returns it under. `amt_boot`,
+`amt_redirection`, and `amt_media` used to spread the receipt's fields at the top level
+instead; that inconsistency was normalised in issue #22, and `amt_power`'s shape below
+was the template the other four modules were changed to match (see
+[Capability matrix](capability-matrix.md) for the full history).
 
 | Field | Type | Returned | Description |
 |---|---|---|---|
@@ -60,7 +61,15 @@ per-module summary).
 | `desired_state` | `str` | when a transition was requested or planned | Absent for `state=query`. |
 | `return_value` | `int` | when a request was sent | AMT's `ReturnValue` from `RequestPowerStateChange`. Always `0` here — a non-zero value raises `remote_operation` instead. |
 | `probes` | `list` of dict | when a request was sent | Each entry shaped like `previous_state`. Empty if no request was sent, or if every probe itself failed. |
-| `operation` | `dict` | always | The full `intel-amt-operation/v1` receipt (`schema`, `action`, `endpoint`, `changed`, `previous`, `desired`, `observed`, `tls_peer_fingerprint`, `error_class`). |
+| `operation.schema` | `str` | always | Always `intel-amt-operation/v1`. |
+| `operation.action` | `str` | always | `amt_power.<state>`, e.g. `amt_power.on`. |
+| `operation.endpoint` | `str` | always | `host:port` this operation was performed against. |
+| `operation.changed` | `bool` | always | Mirrors the top-level `changed`. |
+| `operation.previous` | `dict` | always | Same shape as `previous_state`. |
+| `operation.desired` | `str` or `null` | always | Same value as `desired_state`. |
+| `operation.observed` | `dict` or `null` | always | The last postcondition probe taken, same shape as `previous_state`, or `null`. |
+| `operation.tls_peer_fingerprint` | `str` or `null` | always | SHA-256 fingerprint of the TLS leaf certificate observed, or `null` over plaintext. |
+| `operation.error_class` | `str` or `null` | always | `null` on success; a stable machine-readable failure class on failure. |
 
 ## Examples
 
