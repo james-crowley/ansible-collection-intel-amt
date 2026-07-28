@@ -139,12 +139,27 @@ class TestFactsToResult:
         assert amt["capabilities"] == {"power": False, "boot_once_pxe": False, "sol": False, "storage_redirection": False}
 
 
+def _fake_wsman(*, tls_peer_fingerprint: str | None = None) -> Mock:
+    """A stand-in for the real WsmanClient main() holds directly (not just via AmtClient).
+
+    ``last_peer_certificate`` and ``endpoint`` must be set explicitly rather than left as
+    auto-generated ``Mock`` attributes: ``main()`` now reads
+    ``wsman.last_peer_certificate.sha256_fingerprint`` to build the operation receipt's
+    ``tls_peer_fingerprint``, and an un-configured ``Mock()`` there would be truthy and
+    JSON-unserializable, breaking every credential-safety assertion that calls ``json.dumps``.
+    """
+    wsman = Mock()
+    wsman.endpoint = "10.0.0.5:16993"
+    wsman.last_peer_certificate = Mock(sha256_fingerprint=tls_peer_fingerprint) if tls_peer_fingerprint else None
+    return wsman
+
+
 class TestMainReadOnly:
     def test_successful_read_reports_changed_false(self, monkeypatch):
         _set_module_args(BASE_ARGS)
         fake_client = Mock()
         fake_client.get_facts.return_value = _full_facts()
-        monkeypatch.setattr(amt_info, "build_wsman_client", lambda params: Mock())
+        monkeypatch.setattr(amt_info, "build_wsman_client", lambda params: _fake_wsman())
         monkeypatch.setattr(amt_info, "AmtClient", lambda wsman: fake_client)
 
         with pytest.raises(AnsibleExitJson) as excinfo:
@@ -160,7 +175,7 @@ class TestMainReadOnly:
         _set_module_args(args)
         fake_client = Mock()
         fake_client.get_facts.return_value = _full_facts()
-        monkeypatch.setattr(amt_info, "build_wsman_client", lambda params: Mock())
+        monkeypatch.setattr(amt_info, "build_wsman_client", lambda params: _fake_wsman())
         monkeypatch.setattr(amt_info, "AmtClient", lambda wsman: fake_client)
 
         with pytest.raises(AnsibleExitJson) as excinfo:
@@ -177,7 +192,7 @@ class TestMainReadOnly:
         fake_client.get_facts.side_effect = AuthenticationError(
             f"rejected password={PASSWORD}", endpoint="10.0.0.5:16993", operation="get_facts", secrets=PASSWORD
         )
-        monkeypatch.setattr(amt_info, "build_wsman_client", lambda params: Mock())
+        monkeypatch.setattr(amt_info, "build_wsman_client", lambda params: _fake_wsman())
         monkeypatch.setattr(amt_info, "AmtClient", lambda wsman: fake_client)
 
         with pytest.raises(AnsibleFailJson) as excinfo:
@@ -191,10 +206,36 @@ class TestMainReadOnly:
         _set_module_args(BASE_ARGS)
         fake_client = Mock()
         fake_client.get_facts.return_value = _full_facts()
-        monkeypatch.setattr(amt_info, "build_wsman_client", lambda params: Mock())
+        monkeypatch.setattr(amt_info, "build_wsman_client", lambda params: _fake_wsman())
         monkeypatch.setattr(amt_info, "AmtClient", lambda wsman: fake_client)
 
         with pytest.raises(AnsibleExitJson) as excinfo:
             amt_info.main()
 
         assert PASSWORD not in json.dumps(excinfo.value.args[0])
+
+    def test_gains_a_non_secret_operation_receipt(self, monkeypatch):
+        # issue #22: amt_info previously had neither shape at all. It now gets the same
+        # `operation` receipt every other module returns, with action=get_facts and
+        # previous/desired/observed left null since a read has no prior/intended/re-observed
+        # state distinct from RV(amt) to report.
+        _set_module_args(BASE_ARGS)
+        fake_client = Mock()
+        fake_client.get_facts.return_value = _full_facts()
+        monkeypatch.setattr(amt_info, "build_wsman_client", lambda params: _fake_wsman(tls_peer_fingerprint="bb" * 32))
+        monkeypatch.setattr(amt_info, "AmtClient", lambda wsman: fake_client)
+
+        with pytest.raises(AnsibleExitJson) as excinfo:
+            amt_info.main()
+
+        result = excinfo.value.args[0]
+        operation = result["operation"]
+        assert operation["schema"] == "intel-amt-operation/v1"
+        assert operation["action"] == "get_facts"
+        assert operation["endpoint"] == "10.0.0.5:16993"
+        assert operation["changed"] is False
+        assert operation["previous"] is None
+        assert operation["desired"] is None
+        assert operation["observed"] is None
+        assert operation["tls_peer_fingerprint"] == "bb" * 32
+        assert operation["error_class"] is None
