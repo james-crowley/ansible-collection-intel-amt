@@ -245,6 +245,56 @@ jobs:
   #
   # CircleCI additionally refuses to run self-hosted runner jobs for forked-PR
   # builds, which matters if this repository is ever made public.
+  # A deliberately harmless first job: prove the runner works, and learn the TLS
+  # fingerprint the credentialed stages need in order to pin anything.
+  #
+  # Sends NO credentials and touches no state. It completes a TLS handshake to
+  # read the certificate each AMT port offers. That is safe to run against an
+  # endpoint whose identity is not yet established, which is exactly the position
+  # we are in before a pin exists. Requires the context only for AMT_HOST.
+  hardware-observe:
+    machine: true
+    resource_class: crowley/amt-runner
+    steps:
+      - checkout
+      - run:
+          name: Runner environment
+          command: |
+            echo "host:    $(hostname)"
+            echo "python:  $(python3 --version)"
+            echo "workdir: $(pwd)"
+            # The runner is rootless with a read-only root filesystem, so confirm
+            # the workspace is actually writable before anything relies on it.
+            touch .writable-probe && rm -f .writable-probe && echo "workspace: writable"
+      - run:
+          name: Observe TLS certificates offered by the AMT endpoint
+          command: |
+            test -n "${AMT_HOST:-}" || { echo "AMT_HOST is not set in the context." >&2; exit 1; }
+            python3 tests/hardware/observe-tls-fingerprint.py \
+              "${AMT_HOST}" "${AMT_PORT:-16993}" "${AMT_REDIRECTION_PORT:-16995}"
+
+  # -------------------------------------------------------------------------
+  # Hardware-in-the-loop. Runs on a self-hosted machine runner sitting inside the
+  # lab network, with access to real AMT endpoints. Five independent controls
+  # stand in front of it, because a job here can power-cycle and reimage physical
+  # machines and reaches into a private network:
+  #
+  #   1. the `run-hardware-tests` pipeline parameter, false by default, so an
+  #      ordinary push cannot reach this workflow at all;
+  #   2. a manual approval job, so a human confirms before anything is touched;
+  #   3. the `amt-lab-runner` context, restricted to this project only, so no
+  #      other project in the org can borrow the lab credentials;
+  #   4. a branch filter, so only main can target the runner;
+  #   5. AMT_TLS_FINGERPRINT must be present, so we never speak to an AMT
+  #      endpoint over TLS we cannot authenticate.
+  #
+  # CircleCI additionally refuses to run self-hosted runner jobs for forked-PR
+  # builds, which matters if this repository is ever made public.
+  #
+  # This job is READ-ONLY and check-mode only. It never mutates power or boot
+  # state. The destructive stages (attended power cycling, media attach, writable
+  # image, native PXE) are separate playbooks under tests/hardware/ and are run
+  # deliberately by a human, not wired into CI.
   hardware-tests:
     machine: true
     resource_class: crowley/amt-runner
@@ -254,21 +304,23 @@ jobs:
       # from the repository -- tests/hardware/inventory.yml is gitignored and only
       # an .example is committed. The context must supply:
       #
-      #   AMT_HOSTS            comma-separated AMT endpoint addresses
+      #   AMT_HOST             AMT endpoint address (AMT_HOSTS for several)
       #   AMT_USERNAME         AMT account (usually "admin")
       #   AMT_PASSWORD         AMT password
-      #   AMT_TLS_FINGERPRINT  reviewed SHA-256 leaf fingerprint, or empty when
-      #                        the endpoint is Small Business Mode and has no TLS
-      #   AMT_ALLOW_INSECURE   "true" only for endpoints that cannot do TLS
+      #   AMT_TLS_FINGERPRINT  reviewed SHA-256 leaf fingerprint, from the
+      #                        hardware-observe job above
+      #   AMT_PORT             optional; WS-Man port, else derived (16993/16992)
+      #   AMT_REDIRECTION_PORT optional; IDE-R port, else derived (16995/16994)
+      #   AMT_ALLOW_INSECURE   "true" only for firmware with no TLS at all
       #
-      # Env vars are used rather than a committed vault because the runner host
-      # is the trust boundary here, and a vault password would itself need to
-      # come from the context anyway.
+      # Env vars rather than a committed vault: the runner host is the trust
+      # boundary here, and a vault password would have to come from the context
+      # anyway.
       - run:
           name: Verify the lab credentials were injected
           command: |
             missing=""
-            for var in AMT_HOSTS AMT_USERNAME AMT_PASSWORD; do
+            for var in AMT_HOST AMT_USERNAME AMT_PASSWORD; do
               eval "val=\${$var:-}"
               [ -n "$val" ] || missing="$missing $var"
             done
@@ -278,36 +330,65 @@ jobs:
               echo "  circleci context store-secret amt-lab-runner --org gh/james-crowley <NAME>" >&2
               exit 1
             fi
-            echo "Lab credentials present for $(echo "$AMT_HOSTS" | tr ',' '\n' | wc -l) endpoint(s)."
+            if [ -z "${AMT_TLS_FINGERPRINT:-}" ] && [ "${AMT_ALLOW_INSECURE:-false}" != "true" ]; then
+              echo "AMT_TLS_FINGERPRINT is not set." >&2
+              echo "Run the hardware-observe job, review the fingerprint it prints, then store it." >&2
+              echo "This refusal is deliberate: pinning is the only trust mode AMT's" >&2
+              echo "self-signed, bare-IP certificate supports, and unauthenticated TLS would" >&2
+              echo "let an on-path device impersonate the endpoint." >&2
+              exit 1
+            fi
+            echo "Credentials present for $(echo "${AMT_HOSTS:-$AMT_HOST}" | tr ',' '\n' | wc -l) endpoint(s)."
       - run:
-          name: Install ansible-core
+          name: Install ansible-core into a workspace virtualenv
           command: |
-            python3 -m pip install --user --upgrade pip
-            python3 -m pip install --user "ansible-core~=2.19.0"
-            python3 -m pip install --user -r tests/unit/requirements.txt
+            # A venv in the workspace, not `pip install --user`: this runner is
+            # rootless with a read-only root filesystem, so the workspace is the
+            # only reliably writable location.
+            python3 -m venv .venv
+            . .venv/bin/activate
+            python -m pip install --upgrade pip
+            python -m pip install "ansible-core~=2.19.0" -r requirements.txt
+            ansible --version
+      - run:
+          name: Install the collection from this checkout
+          command: |
+            . .venv/bin/activate
+            ansible-galaxy collection build --output-path ./dist --force
+            ansible-galaxy collection install ./dist/*.tar.gz --force
       - run:
           name: Render the lab inventory from the context
           command: |
             ./tests/hardware/render-inventory.sh > tests/hardware/inventory.yml
-            # Never cat the file: it holds the AMT password.
-            echo "Inventory rendered ($(wc -l < tests/hardware/inventory.yml) lines)."
+            # Safe to display: the renderer emits env lookups, not secret values,
+            # so the password and fingerprint never touch disk. Printing it makes
+            # a host/group mismatch obvious instead of silently matching 0 hosts.
+            cat tests/hardware/inventory.yml
       - run:
-          name: Read-only AMT qualification
+          name: "Stage 1: read-only AMT qualification"
           command: |
+            . .venv/bin/activate
             ansible-playbook tests/hardware/qualify_readonly.yml \
               -i tests/hardware/inventory.yml -v
       - run:
-          name: Check-mode power and boot plans
+          name: "Stage 3: check-mode power and boot plans (no mutation)"
           command: |
+            . .venv/bin/activate
             ansible-playbook tests/hardware/qualify_checkmode.yml \
               -i tests/hardware/inventory.yml --check -v
+      - run:
+          name: "Stage 8: idempotent re-probe"
+          command: |
+            . .venv/bin/activate
+            ansible-playbook tests/hardware/qualify_idempotent_reprobe.yml \
+              -i tests/hardware/inventory.yml -v
+      - store_artifacts:
+          path: tests/hardware/output
+          destination: hardware-evidence
       - run:
           name: Remove the rendered inventory
           when: always
           command: rm -f tests/hardware/inventory.yml
-      - store_artifacts:
-          path: tests/hardware/output
-          destination: hardware-evidence
 
   # -------------------------------------------------------------------------
   publish:
@@ -403,12 +484,26 @@ workflows:
           filters:
             branches:
               only: main
-      - hardware-approval:
-          type: approval
+
+      # Deliberately NOT behind the approval gate. It sends no credentials,
+      # mutates nothing, and only reads the certificate each AMT port offers --
+      # so it is both safe to run freely and the thing you need first, since it
+      # produces the fingerprint everything else pins. It still needs the
+      # restricted context for AMT_HOST, and still only runs on main.
+      - hardware-observe:
           requires: [lint]
+          context: amt-lab-runner
           filters:
             branches:
               only: main
+
+      - hardware-approval:
+          type: approval
+          requires: [hardware-observe]
+          filters:
+            branches:
+              only: main
+
       - hardware-tests:
           requires: [hardware-approval]
           # Restricted to this project only, so no other project in the org can
