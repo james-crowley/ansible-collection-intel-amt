@@ -177,7 +177,6 @@ class AmtClient:
         """
         general = self._get_optional("AMT_GeneralSettings")
         setup = self._get_optional("AMT_SetupAndConfigurationService")
-        computer_system = self._get_optional("CIM_ComputerSystem")
         power_assoc = self._get_optional("CIM_AssociatedPowerManagementService")
         boot_caps = self._get_optional("AMT_BootCapabilities")
         redirection = self._get_optional("AMT_RedirectionService")
@@ -204,7 +203,7 @@ class AmtClient:
 
         return AmtFacts(
             version=version,
-            uuid=(computer_system or {}).get("UUID"),
+            uuid=self._get_system_uuid(),
             control_mode=(setup or {}).get("ProvisioningMode"),
             provisioning_state=(setup or {}).get("ProvisioningState"),
             power_state=power_state,
@@ -260,6 +259,40 @@ class AmtClient:
                 version = instance.get("VersionString")
                 return str(version) if version is not None else None
         return None
+
+    def _get_system_uuid(self) -> str | None:
+        """Read the platform's system UUID, for binding an endpoint to an identity.
+
+        Read from ``CIM_ComputerSystemPackage.PlatformGUID``. An earlier
+        implementation read ``UUID`` from ``CIM_ComputerSystem``, which has no such
+        property -- verified against the class definitions in
+        ``device-management-toolkit/go-wsman-messages`` -- so it returned ``None``
+        on every endpoint. That was not a firmware quirk; it silently disabled the
+        identity cross-check that exists to stop a reset landing on the wrong
+        machine.
+
+        ``AMT_SetupAndConfigurationService.GetUuid()`` is the other real source and
+        is deliberately NOT used here. It returns the value base64-encoded, and the
+        SMBIOS Type 1 UUID carries its first three fields little-endian, so a naive
+        decode yields a plausible-looking GUID that does not match what an operator
+        reads in MEBx. A cross-check that compares against a wrong-but-convincing
+        value is worse than no cross-check, because it fails on a correctly
+        recorded expectation. If PlatformGUID turns out to be absent on some
+        firmware, add GetUuid then -- and verify it against the UUID physically
+        visible on the machine, not merely against itself.
+
+        Returns ``None`` when the class or property is absent, consistent with the
+        rest of facts gathering: a missing optional class degrades one fact rather
+        than failing the whole read.
+        """
+        package = self._get_optional("CIM_ComputerSystemPackage")
+        if not package:
+            return None
+        value = package.get("PlatformGUID")
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
 
     # -- Power ------------------------------------------------------------------
 
