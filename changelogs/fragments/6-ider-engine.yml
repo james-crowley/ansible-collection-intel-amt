@@ -1,0 +1,9 @@
+---
+minor_changes:
+  - Native Python IDE-R engine, removing the need to shell out to MeshCmd/Node.js for virtual media. Implements the redirection-plane handshake, RFC 2617 digest over the binary framing, the IDE-R state machine, and SCSI target emulation (https://github.com/james-crowley/ansible-collection-intel-amt/pull/14).
+  - Writable virtual media on the floppy/USB-R device slot, which the upstream reference implementation does not support. The CD/DVD slot remains read-only by design, so a bootable ISO and a writable image can be attached in the same session (https://github.com/james-crowley/ansible-collection-intel-amt/pull/14).
+security_fixes:
+  - IDE-R write payloads are bounded against the transfer length declared by the WRITE CDB, and MediaImage refuses any write that would extend the backing file. Previously a host could declare a small write, pass the bounds check, then stream unbounded DATA_FROM_HOST frames at an advancing offset and grow a local file (https://github.com/james-crowley/ansible-collection-intel-amt/pull/14).
+  - The redirection session refuses to downgrade to cleartext or cnonce-less digest authentication, and verifies a pinned TLS leaf certificate before transmitting any bytes (https://github.com/james-crowley/ansible-collection-intel-amt/pull/14).
+bugfixes:
+  - Collection staging derives its build root from the repository path, so concurrent checkouts on one host no longer clobber each other's staged tree (https://github.com/james-crowley/ansible-collection-intel-amt/pull/14).

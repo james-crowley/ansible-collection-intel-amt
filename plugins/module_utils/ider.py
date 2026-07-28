@@ -276,6 +276,15 @@ class MediaImage:
             # write-protected SCSI sense; reaching here is an internal bug,
             # not a remote input the host controls.
             raise ProtocolError("internal error: write attempted against a read-only media image")
+        # Defence in depth: never grow the backing file, whatever the caller
+        # asks for. The IDE-R SCSI layer bounds-checks the declared transfer
+        # length and the arriving frames, but this is a remote-driven write
+        # path, so the primitive that actually touches the filesystem enforces
+        # the invariant too rather than trusting a single upstream guard.
+        if offset < 0 or offset + len(data) > self.size:
+            raise ProtocolError(
+                f"refusing out-of-bounds write: offset {offset} + {len(data)} bytes exceeds image size {self.size}",
+            )
         self._fh.seek(offset)
         self._fh.write(data)
         self._fh.flush()
@@ -868,6 +877,26 @@ class IderEngine:
             # generic illegal-request sense rather than crashing; there is no
             # device context to attribute this to.
             self._send_command_end_response(False, 0x05, DEVICE_FLOPPY, 0x20, 0x00)
+            return
+
+        # Bound the payload against what the WRITE CDB actually asked for.
+        # _scsi_write_request validated the *declared* length against the image
+        # size, but the bytes arrive separately and in arbitrarily many frames.
+        # Without this check a host could declare a one-sector write (passing
+        # the bounds check) and then stream frames indefinitely, each written at
+        # an advancing offset, walking past the end of the image and extending
+        # the backing file. Refuse the overrun rather than truncating it: the
+        # host has violated its own declared transfer length, so the session has
+        # lost sync and the pending write must not be trusted to complete.
+        remaining = pending.expected_length - pending.received
+        if len(data) > remaining:
+            self._pending_write = None
+            # Sense form (error=False), not the error form: the error shape
+            # discards sense/asc/asq on the wire, and this is a new code path
+            # with no reference precedent -- the Apache-2.0 implementation this
+            # engine derives from does not implement writes at all -- so telling
+            # the host the actual reason (illegal LBA) is strictly better.
+            self._send_command_end_response(False, 0x05, pending.device, 0x21, 0x00)
             return
 
         pending.image.write(pending.byte_offset + pending.received, data)

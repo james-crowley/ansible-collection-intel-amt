@@ -184,12 +184,28 @@ class RedirectionSession:
             finally:
                 self._sock = None
 
+    @property
+    def _connected_socket(self) -> SocketLike:
+        """The live socket, or a classified error if the session is not connected.
+
+        Replaces bare ``assert`` statements: ansible-test's no-assert sanity
+        rule rejects them in production code, and rightly so -- ``python -O``
+        strips them, which would turn a clear invariant violation into an
+        AttributeError on None much further from the cause.
+        """
+        if self._sock is None:
+            raise ConnectionError_(
+                f"redirection session to {self.endpoint} is not connected; connect() must be called first",
+                endpoint=self.endpoint,
+                secrets=self._password,
+            )
+        return self._sock
+
     def send(self, data: bytes) -> None:
         self._send(data)
 
     def recv(self, bufsize: int = _RECV_CHUNK) -> bytes:
-        assert self._sock is not None, "recv() called before connect()"  # noqa: S101
-        return self._sock.recv(bufsize)
+        return self._connected_socket.recv(bufsize)
 
     # -- socket plumbing -------------------------------------------------
 
@@ -219,8 +235,8 @@ class RedirectionSession:
             raise TlsValidationError(f"TLS handshake with {host}:{port} failed: {exc}", endpoint=f"{host}:{port}", secrets=self._password) from exc
 
     def _verify_tls_pin(self) -> None:
-        assert self._sock is not None  # noqa: S101
-        getpeercert = getattr(self._sock, "getpeercert", None)
+        sock = self._connected_socket
+        getpeercert = getattr(sock, "getpeercert", None)
         if getpeercert is None:
             raise TlsValidationError(
                 "TLS certificate pin was configured but the connected socket does not expose a peer certificate",
@@ -239,19 +255,19 @@ class RedirectionSession:
             )
 
     def _send(self, data: bytes) -> None:
-        assert self._sock is not None, "_send() called before connect()"  # noqa: S101
+        sock = self._connected_socket
         try:
-            self._sock.sendall(data)
+            sock.sendall(data)
         except TimeoutError as exc:
             raise TimeoutError_(f"sending to {self.endpoint} timed out", endpoint=self.endpoint, secrets=self._password, indeterminate=True) from exc
         except OSError as exc:
             raise ConnectionError_(f"failed sending to {self.endpoint}: {exc}", endpoint=self.endpoint, secrets=self._password) from exc
 
     def _fill(self, min_bytes: int) -> None:
-        assert self._sock is not None, "_fill() called before connect()"  # noqa: S101
+        sock = self._connected_socket
         while len(self._buf) < min_bytes:
             try:
-                chunk = self._sock.recv(_RECV_CHUNK)
+                chunk = sock.recv(_RECV_CHUNK)
             except TimeoutError as exc:
                 raise TimeoutError_(f"timed out waiting for data from {self.endpoint}", endpoint=self.endpoint, secrets=self._password) from exc
             except OSError as exc:

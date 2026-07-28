@@ -133,7 +133,7 @@ class TestDigestComputation:
         cnonce, pos = read_field(fields, pos)
         snc, pos = read_field(fields, pos)
         digest, pos = read_field(fields, pos)
-        qop, _ = read_field(fields, pos)
+        qop, _unused = read_field(fields, pos)
 
         assert user == USERNAME
         assert realm == REALM

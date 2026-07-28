@@ -143,7 +143,7 @@ class TestFraming:
         open_and_toggle(engine, sent)
         engine.feed(keepalive_ping(seq=0))
         assert len(sent) == 1
-        cmdid, _, body = unpack_frame(sent[0])
+        cmdid, _unused, body = unpack_frame(sent[0])
         assert cmdid == ider.CMD_KEEPALIVE_PONG
         assert body == b""
 
@@ -202,7 +202,7 @@ class TestOpenSessionValidation:
         assert engine.session_open is True
         assert engine.session_info.readbfr == 4096
         assert engine.session_info.writebfr == 2048
-        cmdid, _, body = unpack_frame(sent[0])
+        cmdid, _unused, body = unpack_frame(sent[0])
         assert cmdid == ider.CMD_DISABLE_ENABLE_FEATURES
         assert body[0] == 3  # REGS_TOGGLE
         assert struct.unpack_from("<I", body, 1)[0] == ider.START_MODE_ON_REBOOT
@@ -231,7 +231,7 @@ class TestScsiReplyShapes:
     def test_test_unit_ready_no_medium(self, sent, engine):
         open_and_toggle(engine, sent)
         engine.feed(command_written(0x00, cdb6(TEST_UNIT_READY, 0, 0)))
-        cmdid, _, body = unpack_frame(sent[-1])
+        cmdid, _unused, body = unpack_frame(sent[-1])
         assert cmdid == ider.CMD_COMMAND_END_RESPONSE
         assert body == bytes(12) + bytes([0xC5, 0x00, 0x03, 0x00, 0x00, 0x00, DEVICE_FLOPPY, 0x50, 0x00, 0x00, 0x00])
 
@@ -248,12 +248,12 @@ class TestScsiReplyShapes:
         engine.attach_device(image)
         engine.feed(command_written(0x00, cdb6(TEST_UNIT_READY, 0, 0)))
         assert image.media_change_reported is True
-        _, _, body1 = unpack_frame(sent[-1])
+        _unused, _unused, body1 = unpack_frame(sent[-1])
         expected_error_form = bytes(12) + bytes([0xC5, 0x00, 0x03, 0x00, 0x00, 0x00, DEVICE_FLOPPY, 0x50, 0x00, 0x00, 0x00])
         assert body1 == expected_error_form
         sent.clear()
         engine.feed(command_written(0x00, cdb6(TEST_UNIT_READY, 0, 0), seq=1))
-        _cmdid, _, body2 = unpack_frame(sent[-1])
+        _cmdid, _unused, body2 = unpack_frame(sent[-1])
         assert body2 == expected_error_form
 
     def test_read_capacity(self, sent, engine, tmp_path):
@@ -261,7 +261,7 @@ class TestScsiReplyShapes:
         engine.attach_device(make_image(tmp_path, "f.img", 512 * 10))
         cdb = bytes([READ_CAPACITY]) + bytes(11)
         engine.feed(command_written(0x00, cdb))
-        cmdid, _, body = unpack_frame(sent[-1])
+        cmdid, _unused, body = unpack_frame(sent[-1])
         assert cmdid == ider.CMD_DATA_TO_HOST
         payload = body[26:34]
         assert struct.unpack(">I", payload[0:4])[0] == 9  # 10 blocks - 1
@@ -271,7 +271,7 @@ class TestScsiReplyShapes:
         open_and_toggle(engine, sent)
         engine.attach_device(make_image(tmp_path, "f.img", 512, writable=False))
         engine.feed(command_written(0x00, bytes([MODE_SENSE_6, 0x00, 0x3F, 0x00]) + bytes(8)))
-        _, _, body = unpack_frame(sent[-1])
+        _unused, _unused, body = unpack_frame(sent[-1])
         data = body[26:]
         assert data == bytes([0, 0x00, 0x80, 0])
 
@@ -279,7 +279,7 @@ class TestScsiReplyShapes:
         open_and_toggle(engine, sent)
         engine.attach_device(make_image(tmp_path, "f.img", 512, writable=True))
         engine.feed(command_written(0x00, bytes([MODE_SENSE_6, 0x00, 0x3F, 0x00]) + bytes(8)))
-        _, _, body = unpack_frame(sent[-1])
+        _unused, _unused, body = unpack_frame(sent[-1])
         data = body[26:]
         assert data == bytes([0, 0x00, 0x00, 0])
 
@@ -287,7 +287,7 @@ class TestScsiReplyShapes:
         open_and_toggle(engine, sent)
         engine.attach_device(make_image(tmp_path, "f.img", 512))
         engine.feed(command_written(0x00, bytes([0xEE]) + bytes(11)))
-        cmdid, _, body = unpack_frame(sent[-1])
+        cmdid, _unused, body = unpack_frame(sent[-1])
         assert cmdid == ider.CMD_COMMAND_END_RESPONSE
         assert body == bytes(12) + bytes([0x87, 0x50, 0x03, 0x00, 0x00, 0x00, DEVICE_FLOPPY, 0x51, 0x05, 0x20, 0x00])
 
@@ -296,7 +296,7 @@ class TestScsiReplyShapes:
         engine.attach_device(make_image(tmp_path, "f.img", 512))
         cdb = bytes([GET_EVENT_STATUS, 0x01, 0x00, 0x00, 0x10]) + bytes(7)
         engine.feed(command_written(0x00, cdb))
-        _, _, body = unpack_frame(sent[-1])
+        _unused, _unused, body = unpack_frame(sent[-1])
         assert body[26:] == bytes([0x00, 0x02, 0x80, 0x00])
 
     def test_get_configuration_buflen_zero(self, sent, engine, tmp_path):
@@ -304,7 +304,7 @@ class TestScsiReplyShapes:
         engine.attach_device(make_image(tmp_path, "c.iso", 2048, device_code=DEVICE_CDROM))
         cdb = bytes([GET_CONFIGURATION, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]) + bytes(3)
         engine.feed(command_written(0x10, cdb))
-        _, _, body = unpack_frame(sent[-1])
+        _unused, _unused, body = unpack_frame(sent[-1])
         assert struct.unpack(">II", body[26:34]) == (0x003C, 0x0008)
 
     def test_get_configuration_current_profile_list(self, sent, engine, tmp_path):
@@ -313,7 +313,7 @@ class TestScsiReplyShapes:
         # RT=2 (current), starting feature 0 -> only the profile list matches.
         cdb = bytes([GET_CONFIGURATION, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20]) + bytes(3)
         engine.feed(command_written(0x10, cdb))
-        _, _, body = unpack_frame(sent[-1])
+        _unused, _unused, body = unpack_frame(sent[-1])
         payload = body[26:]
         length = struct.unpack(">I", payload[4:8])[0]
         assert length == len(ider._CD_CONFIG_PROFILE_LIST) + 4
@@ -331,10 +331,10 @@ class TestChunkedReads:
         engine.feed(command_written(0x00, cdb10(READ_10, 0, 4)))
 
         frames = [unpack_frame(f) for f in sent]
-        assert all(cmdid == ider.CMD_DATA_TO_HOST for cmdid, _, _ in frames)
+        assert all(cmdid == ider.CMD_DATA_TO_HOST for cmdid, _unused, _unused in frames)
         assert len(frames) == 4  # 2048 bytes / 512-byte readbfr
         reassembled = b""
-        for i, (_, _, body) in enumerate(frames):
+        for i, (_unused, _unused, body) in enumerate(frames):
             chunk_len = struct.unpack_from("<H", body, 1)[0]
             payload = body[26:]
             assert len(payload) == chunk_len == 512
@@ -349,7 +349,7 @@ class TestChunkedReads:
         engine.attach_device(image)
         engine.feed(command_written(0x00, cdb10(READ_10, 0, 1)))
         assert len(sent) == 1
-        _, _, body = unpack_frame(sent[0])
+        _unused, _unused, body = unpack_frame(sent[0])
         assert body[12] == 0x85
         assert body[26:] == b"\xab" * 512
 
@@ -358,7 +358,7 @@ class TestChunkedReads:
         image = make_image(tmp_path, "f.img", 512)
         engine.attach_device(image)
         engine.feed(command_written(0x00, cdb10(READ_10, 0, 2)))  # only 1 block exists
-        cmdid, _, body = unpack_frame(sent[-1])
+        cmdid, _unused, body = unpack_frame(sent[-1])
         assert cmdid == ider.CMD_COMMAND_END_RESPONSE
         assert body[12] == 0xC5  # error-form: bounds failure sense is not transmitted, matching the read path
 
@@ -370,7 +370,7 @@ class TestWritePath:
         engine.attach_device(image)
 
         engine.feed(command_written(0x00, cdb10(WRITE_10, 1, 2)))  # write 2 sectors starting at LBA 1
-        cmdid, _, body = unpack_frame(sent[-1])
+        cmdid, _unused, body = unpack_frame(sent[-1])
         assert cmdid == ider.CMD_GET_DATA_FROM_HOST
         chunk = struct.unpack_from("<H", body, 1)[0]
         assert chunk == 1024
@@ -381,7 +381,7 @@ class TestWritePath:
         engine.feed(data_from_host(payload[:300], seq=1))
         assert sent == []  # not complete yet, no ack
         engine.feed(data_from_host(payload[300:], seq=2))
-        cmdid, _, ack_body = unpack_frame(sent[-1])
+        cmdid, _unused, ack_body = unpack_frame(sent[-1])
         assert cmdid == ider.CMD_COMMAND_END_RESPONSE
         assert ack_body == bytes(12) + bytes([0x87, 0x00, 0x03, 0x00, 0x00, 0x00, DEVICE_FLOPPY, 0x51, 0x00, 0x00, 0x00])
 
@@ -396,7 +396,7 @@ class TestWritePath:
         original = image.path.read_bytes()
         engine.attach_device(image)
         engine.feed(command_written(0x00, cdb10(WRITE_10, 0, 1)))
-        cmdid, _, body = unpack_frame(sent[-1])
+        cmdid, _unused, body = unpack_frame(sent[-1])
         assert cmdid == ider.CMD_COMMAND_END_RESPONSE
         assert body == bytes(12) + bytes([0x87, 0x70, 0x03, 0x00, 0x00, 0x00, DEVICE_FLOPPY, 0x51, 0x07, 0x27, 0x00])
         assert image.path.read_bytes() == original
@@ -407,7 +407,7 @@ class TestWritePath:
         original = image.path.read_bytes()
         engine.attach_device(image)
         engine.feed(command_written(0x00, cdb10(WRITE_10, 0, 2)))  # 2 sectors, only 1 exists
-        cmdid, _, body = unpack_frame(sent[-1])
+        cmdid, _unused, body = unpack_frame(sent[-1])
         assert cmdid == ider.CMD_COMMAND_END_RESPONSE
         assert body[12] == 0xC5  # error-form
         assert image.path.read_bytes() == original
@@ -418,7 +418,7 @@ class TestWritePath:
         image = make_image(tmp_path, "c.iso", 2048, device_code=DEVICE_CDROM)
         engine.attach_device(image)
         engine.feed(command_written(0x10, cdb10(WRITE_10, 0, 1)))
-        cmdid, _, body = unpack_frame(sent[-1])
+        cmdid, _unused, body = unpack_frame(sent[-1])
         assert cmdid == ider.CMD_COMMAND_END_RESPONSE
         assert body[18] == DEVICE_CDROM
         assert body[12] == 0xC5  # no-medium/unsupported error form, not a write-protect sense
@@ -522,7 +522,7 @@ class TestMutableConstantTrap:
         writable_sent: list[bytes] = []
         writable_engine._send_bytes = writable_sent.append
         writable_engine.feed(command_written(0x00, bytes([MODE_SENSE_10, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40]) + bytes(3), seq=1))
-        _, _, writable_body = unpack_frame(writable_sent[-1])
+        _unused, _unused, writable_body = unpack_frame(writable_sent[-1])
         assert writable_body[26 + 3] & 0x80 == 0x00  # writable: bit cleared
 
         read_only_engine = IderEngine(send=[].append)
@@ -533,7 +533,7 @@ class TestMutableConstantTrap:
         read_only_sent: list[bytes] = []
         read_only_engine._send_bytes = read_only_sent.append
         read_only_engine.feed(command_written(0x00, bytes([MODE_SENSE_10, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40]) + bytes(3), seq=1))
-        _, _, read_only_body = unpack_frame(read_only_sent[-1])
+        _unused, _unused, read_only_body = unpack_frame(read_only_sent[-1])
         # If the writable session had mutated the shared constant in place,
         # this would incorrectly read back as writable (0x00) too.
         assert read_only_body[26 + 3] & 0x80 == 0x80
@@ -542,3 +542,71 @@ class TestMutableConstantTrap:
         pristine = bytes(ider._MS_FLOPPY_DISK_PAGE)
         ider._mode_sense_10_page(ider._MS_FLOPPY_DISK_PAGE, writable=True)
         assert ider._MS_FLOPPY_DISK_PAGE == pristine
+
+
+class TestWriteOverrunCannotExtendTheBackingFile:
+    """Regression tests for a genuine out-of-bounds write found in review.
+
+    _scsi_write_request validates the *declared* transfer length against the
+    image size, but the payload arrives separately in arbitrarily many 0x53
+    frames. Before the fix, each frame was written at an advancing offset with
+    no check against the declared length, so a host could declare a one-sector
+    write (passing the bounds check) and then stream frames indefinitely,
+    walking past the end of the image and growing the local file.
+
+    This is remote-driven: the peer is firmware we authenticated to, but the
+    transport may be plaintext (Small Business Mode has no TLS), so a
+    well-behaved peer cannot be assumed.
+    """
+
+    def test_frames_exceeding_declared_length_are_refused(self, sent, engine, tmp_path):
+        open_and_toggle(engine, sent)
+        image = make_image(tmp_path, "f.img", 512 * 2, writable=True)
+        size_before = image.path.stat().st_size
+        engine.attach_device(image)
+
+        # Declare a single-sector write at LBA 0 -- entirely in bounds.
+        engine.feed(command_written(0x00, cdb10(WRITE_10, 0, 1)))
+        sent.clear()
+
+        # Send a partial first frame, so the write is still pending, then a
+        # second frame far larger than the 212 bytes still outstanding. A first
+        # frame of the full 512 would legitimately complete the write and clear
+        # the pending state, so the overrun has to arrive mid-transfer.
+        engine.feed(data_from_host(b"A" * 300, seq=1))
+        assert sent == [], "a partial frame must not be acknowledged"
+        engine.feed(data_from_host(b"B" * 4096, seq=2))
+
+        cmdid, _unused, body = unpack_frame(sent[-1])
+        assert cmdid == ider.CMD_COMMAND_END_RESPONSE
+        # Illegal LBA / out-of-range sense, not a success ack.
+        assert body[-2] == 0x21
+
+        assert image.path.stat().st_size == size_before, "backing file was extended by an over-long write"
+
+    def test_pending_write_is_abandoned_after_an_overrun(self, sent, engine, tmp_path):
+        open_and_toggle(engine, sent)
+        image = make_image(tmp_path, "f.img", 512 * 2, writable=True)
+        engine.attach_device(image)
+        engine.feed(command_written(0x00, cdb10(WRITE_10, 0, 1)))
+        engine.feed(data_from_host(b"A" * 9999, seq=1))
+        sent.clear()
+        # A further unsolicited frame must be treated as unexpected, proving the
+        # pending write was cleared rather than left half-applied.
+        engine.feed(data_from_host(b"C" * 16, seq=2))
+        cmdid, _unused, body = unpack_frame(sent[-1])
+        assert cmdid == ider.CMD_COMMAND_END_RESPONSE
+        assert body[-2] == 0x20  # invalid command / unsolicited payload
+
+    def test_media_image_write_primitive_refuses_to_grow_the_file(self, tmp_path):
+        # Defence in depth: the primitive that touches the filesystem enforces
+        # the invariant independently of the SCSI layer above it.
+        image = make_image(tmp_path, "f.img", 512, writable=True)
+        size_before = image.path.stat().st_size
+        with pytest.raises(ProtocolError, match="out-of-bounds"):
+            image.write(0, b"X" * 1024)
+        with pytest.raises(ProtocolError, match="out-of-bounds"):
+            image.write(512, b"X")
+        with pytest.raises(ProtocolError, match="out-of-bounds"):
+            image.write(-1, b"X")
+        assert image.path.stat().st_size == size_before
