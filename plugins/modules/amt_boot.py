@@ -115,38 +115,12 @@ EXAMPLES = r"""
 """
 
 RETURN = r"""
-schema:
-  description: Always V(intel-amt-operation/v1).
-  type: str
-  returned: always
-action:
-  description: Always V(amt_boot).
-  type: str
-  returned: always
-endpoint:
-  description: The C(host:port) this operation was performed against.
-  type: str
-  returned: always
 changed:
   description: >-
     Whether the boot selection was (or, in check mode, would be) armed. Always V(true) on success,
     since arming is not idempotent against prior state -- every successful call re-clears and
     re-sets the boot order.
   type: bool
-  returned: always
-previous:
-  description: The C(AMT_BootSettingData) properties as read before any mutation.
-  type: dict
-  returned: always
-desired:
-  description: The C(AMT_BootSettingData) properties this module attempted (or, in check mode, would attempt) to Put.
-  type: dict
-  returned: always
-observed:
-  description: >-
-    The C(AMT_BootSettingData) properties read back after the sequence completed. Equal to
-    C(previous) in check mode, since nothing was mutated.
-  type: dict
   returned: always
 device:
   description: The O(device) value that was armed.
@@ -162,10 +136,44 @@ boot_source_selector:
     pass a null Source (V(bios), V(ider_floppy), V(ider_cdrom)).
   type: dict
   returned: always
-error_class:
-  description: A stable machine-readable failure class. Only present on failure.
-  type: str
-  returned: on failure
+operation:
+  description: >-
+    The C(intel-amt-operation/v1) receipt for this action, in the same nested shape every module
+    in this collection returns it under.
+  type: dict
+  returned: always
+  contains:
+    schema:
+      description: Always V(intel-amt-operation/v1).
+      type: str
+    action:
+      description: Always V(amt_boot).
+      type: str
+    endpoint:
+      description: The C(host:port) this operation was performed against.
+      type: str
+    changed:
+      description: Mirrors the top-level RV(changed).
+      type: bool
+    previous:
+      description: The C(AMT_BootSettingData) properties as read before any mutation.
+      type: dict
+    desired:
+      description: The C(AMT_BootSettingData) properties this module attempted (or, in check mode, would attempt) to Put.
+      type: dict
+    observed:
+      description: >-
+        The C(AMT_BootSettingData) properties read back after the sequence completed. Equal to
+        C(previous) in check mode, since nothing was mutated.
+      type: dict
+    tls_peer_fingerprint:
+      description: >-
+        SHA-256 fingerprint of the TLS leaf certificate observed during this operation, or V(null)
+        over plaintext.
+      type: str
+    error_class:
+      description: A stable machine-readable failure class. V(null) on success.
+      type: str
 """
 
 from ansible.module_utils.basic import AnsibleModule, missing_required_lib
@@ -244,13 +252,14 @@ def main() -> None:
         desired=result.put_properties,
         observed=result.observed,
         tls_peer_fingerprint=(client.last_peer_certificate.sha256_fingerprint if client.last_peer_certificate else None),
-        extra={
-            "device": result.plan.target,
-            "boot_config_selector": result.boot_config_selector,
-            "boot_source_selector": result.boot_source_selector,
-        },
     )
-    module.exit_json(**receipt.to_dict())
+    module.exit_json(
+        changed=True,
+        device=result.plan.target,
+        boot_config_selector=result.boot_config_selector,
+        boot_source_selector=result.boot_source_selector,
+        operation=receipt.to_dict(),
+    )
 
 
 if __name__ == "__main__":

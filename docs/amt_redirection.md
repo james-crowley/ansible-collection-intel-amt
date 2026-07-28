@@ -57,25 +57,35 @@ rendered `ansible-doc` output.
 
 ## Return values
 
-`amt_redirection` spreads the `intel-amt-operation/v1` receipt directly at the top
-level.
+`amt_redirection` nests its `intel-amt-operation/v1` receipt under an `operation` key,
+the same shape every module in this collection returns it under (see
+[Capability matrix](capability-matrix.md) — this was previously inconsistent across
+modules and was normalised in issue #22).
 
 | Field | Type | Returned | Description |
 |---|---|---|---|
-| `schema` | `str` | always | Always `intel-amt-operation/v1`. |
-| `action` | `str` | always | Always `amt_redirection`. |
-| `endpoint` | `str` | always | `host:port`. |
 | `changed` | `bool` | always | `true` only when `state` was given, differed from the observed state, and (outside check mode) `RequestStateChange` was invoked. Always `false` when `state` is absent. |
 | `supported.ider` / `supported.sol` | `bool` | always | What `AMT_BootCapabilities` advertises. |
 | `enabled.enabled_state` | `int` | always | Raw `AMT_RedirectionService.EnabledState` (32768/32769/32770/32771). |
 | `enabled.listener_enabled` | `bool` | always | `AMT_RedirectionService.ListenerEnabled`. |
 | `enabled.ider_enabled` / `.sol_enabled` | `bool` | always | Derived from `enabled_state`. |
 | `transport_reachable` | `dict` | always | Keyed by port number (`16994`, `16995`); whether a bare TCP connect succeeded. No redirection-protocol handshake is attempted. |
-| `error_class` | `str` | on failure | Stable machine-readable failure class. |
+| `operation.schema` | `str` | always | Always `intel-amt-operation/v1`. |
+| `operation.action` | `str` | always | Always `amt_redirection`. |
+| `operation.endpoint` | `str` | always | `host:port`. |
+| `operation.changed` | `bool` | always | Mirrors the top-level `changed`. |
+| `operation.previous` | `str` or `null` | always | The redirection-service state name observed before any action. |
+| `operation.desired` | `str` or `null` | always | The `state` requested, or `null` when `state` is absent. |
+| `operation.observed` | `dict` | always | Same shape as the top-level `enabled`. |
+| `operation.tls_peer_fingerprint` | `str` or `null` | always | SHA-256 fingerprint of the TLS leaf certificate observed, or `null` over plaintext. |
+| `operation.error_class` | `str` or `null` | always | `null` on success; a stable machine-readable failure class on failure. |
 
-Note this module does **not** return an `observed`/`previous`/`desired` triple the way
-`amt_boot` does in its documented `RETURN` block — the actual return fields are
-`supported`, `enabled`, and `transport_reachable`, which is what the code produces.
+Note `supported`, `enabled`, and `transport_reachable` are this module's own
+module-specific return values, not part of the shared `operation` receipt — they stay
+at the top level exactly as before. `error_class` also appears at the **top level** of
+a failed module's result (what `fail_json`/rescue blocks read), independent of
+`operation.error_class`, which is always `null` on the successful-exit path documented
+above.
 
 ## Examples
 

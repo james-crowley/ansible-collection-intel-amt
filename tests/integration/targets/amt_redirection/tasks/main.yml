@@ -75,6 +75,16 @@
           - redir_inspect.transport_reachable['16994'] == false
           - redir_inspect.transport_reachable['16995'] == false
 
+    - name: Assert the receipt is nested under operation, per collection issue 22
+      ansible.builtin.assert:
+        that:
+          - redir_inspect.operation.schema == 'intel-amt-operation/v1'
+          - redir_inspect.operation.action == 'amt_redirection'
+          - redir_inspect.operation.changed == false
+          - redir_inspect.operation.error_class is none
+          - "'schema' not in redir_inspect"
+          - "'action' not in redir_inspect"
+
     - name: Idempotence -- inspecting again still reports changed=false
       james_crowley.intel_amt.amt_redirection:
         host: 127.0.0.1
@@ -147,6 +157,9 @@
           - redir_enable.changed == true
           - redir_enable.enabled.ider_enabled == true
           - redir_enable.enabled.enabled_state == 32769
+          - redir_enable.operation.changed == true
+          - redir_enable.operation.desired == 'ider'
+          - redir_enable.operation.observed == redir_enable.enabled
 
     - name: Idempotence -- requesting IDE-R again reports changed=false
       james_crowley.intel_amt.amt_redirection:

@@ -104,6 +104,16 @@
           - media_attach.devices.cdrom.writable == false
           - media_attach.devices.floppy.writable == true
 
+    - name: Assert the receipt is nested under operation, per collection issue 22
+      ansible.builtin.assert:
+        that:
+          - media_attach.operation.schema == 'intel-amt-operation/v1'
+          - media_attach.operation.action == 'amt_media.attach'
+          - media_attach.operation.changed == true
+          - media_attach.operation.error_class is none
+          - "'schema' not in media_attach"
+          - "'tls_peer_fingerprint' not in media_attach"
+
     - name: Idempotence -- re-attaching the same session_id reports changed=false
       james_crowley.intel_amt.amt_media:
         host: 127.0.0.1
