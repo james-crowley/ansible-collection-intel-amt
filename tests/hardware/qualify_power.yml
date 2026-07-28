@@ -110,17 +110,35 @@
             username: "{{ amt_username }}"
             password: "{{ amt_password }}"
             tls_fingerprint: "{{ amt_tls_fingerprint }}"
-            state: "{{ amt_before.power_state.normalized }}"
+            state: "{{ amt_before.previous_state.normalized }}"
           delegate_to: localhost
           no_log: true
           register: amt_restored
-          when: amt_before.power_state.normalized | default('unknown') in ['on', 'off']
+          when: amt_before.previous_state.normalized | default('unknown') in ['on', 'off']
+
+        # Fails rather than reporting "left as-is" if the start state could not be
+        # read. This task previously referenced amt_power's non-existent
+        # `power_state` key instead of `previous_state`, so the guard above always
+        # evaluated to 'unknown', the restore silently skipped on every run, and
+        # the message cheerfully said so. Jinja's undefined-chaining plus a
+        # default() turned a typo into a no-op, which is precisely how a
+        # restore-state step stops restoring anything without anyone noticing.
+        - name: Require the start state to have been readable
+          ansible.builtin.assert:
+            that:
+              - amt_before.previous_state is defined
+              - amt_before.previous_state.normalized is defined
+            fail_msg: >-
+              Could not read the starting power state from amt_power's return, so
+              this stage cannot restore it. Check that amt_power still returns
+              previous_state.normalized -- if that key was renamed, this task and
+              the restore above both need updating.
 
         - name: Report the restored state
           ansible.builtin.debug:
             msg: >-
-              Started in state '{{ amt_before.power_state.normalized | default('unknown') }}';
-              {{ 'restored to it' if amt_restored is not skipped else 'left as-is (start state was not on/off)' }}.
+              Started in state '{{ amt_before.previous_state.normalized }}';
+              {{ 'restored to it' if amt_restored is not skipped else 'no restore needed (start state was neither on nor off)' }}.
               amt_power is convergent, so this is a no-op when the machine is
               already in the target state.
 
