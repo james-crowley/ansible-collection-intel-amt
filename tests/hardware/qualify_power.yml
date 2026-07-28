@@ -99,6 +99,31 @@
             prompt: "Confirm the machine actually powered off, then press enter"
           when: amt_qualify_attended | default(true) | bool
 
+        # Leave the machine as it was found. A qualification stage that changes
+        # the power state and walks away is a trap for whatever runs next: this
+        # stage previously left the target off, and the very next stage issues a
+        # master bus reset, which does nothing to a machine that is already off.
+        # Restoring state here is also just good manners toward a shared lab.
+        - name: Restore the power state this stage started from
+          james_crowley.intel_amt.amt_power:
+            host: "{{ amt_host }}"
+            username: "{{ amt_username }}"
+            password: "{{ amt_password }}"
+            tls_fingerprint: "{{ amt_tls_fingerprint }}"
+            state: "{{ amt_before.power_state.normalized }}"
+          delegate_to: localhost
+          no_log: true
+          register: amt_restored
+          when: amt_before.power_state.normalized | default('unknown') in ['on', 'off']
+
+        - name: Report the restored state
+          ansible.builtin.debug:
+            msg: >-
+              Started in state '{{ amt_before.power_state.normalized | default('unknown') }}';
+              {{ 'restored to it' if amt_restored is not skipped else 'left as-is (start state was not on/off)' }}.
+              amt_power is convergent, so this is a no-op when the machine is
+              already in the target state.
+
         - name: Ensure the evidence output directory exists
           ansible.builtin.file:
             path: "{{ amt_output_dir }}"
@@ -108,7 +133,7 @@
 
         - name: Record evidence for this target
           ansible.builtin.copy:
-            content: "{{ {'before': amt_before, 'on': amt_on, 'off': amt_off} | to_nice_json }}\n"
+            content: "{{ {'before': amt_before, 'on': amt_on, 'off': amt_off, 'restored': amt_restored} | to_nice_json }}\n"
             dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_power.json"
             mode: "0600"
           delegate_to: localhost
