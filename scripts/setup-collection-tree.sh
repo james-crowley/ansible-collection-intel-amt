@@ -19,7 +19,19 @@ NAMESPACE="james_crowley"
 NAME="intel_amt"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_ROOT="${COLLECTION_BUILD_ROOT:-${TMPDIR:-/tmp}/ansible-collection-build}"
+
+# The build root is derived from the repository location, not a fixed path.
+# Two checkouts of this repo staged concurrently on one host (parallel CI jobs,
+# or several worktrees) would otherwise share one directory and clobber each
+# other mid-run, which surfaces as sanity failures naming files that do not
+# exist in the branch under test -- a genuinely baffling symptom. Override with
+# COLLECTION_BUILD_ROOT when a specific location is needed.
+if [ -n "${COLLECTION_BUILD_ROOT:-}" ]; then
+    BUILD_ROOT="${COLLECTION_BUILD_ROOT}"
+else
+    REPO_TAG="$(printf '%s' "${REPO_ROOT}" | cksum | cut -d' ' -f1)"
+    BUILD_ROOT="${TMPDIR:-/tmp}/ansible-collection-build-${REPO_TAG}"
+fi
 COLLECTION_PATH="${BUILD_ROOT}/ansible_collections/${NAMESPACE}/${NAME}"
 
 rm -rf "${BUILD_ROOT}"
