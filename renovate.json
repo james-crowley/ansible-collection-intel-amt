@@ -1,0 +1,124 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits"
+  ],
+  "timezone": "America/New_York",
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "prConcurrentLimit": 3,
+  "labels": [
+    "dependencies"
+  ],
+  "commitMessagePrefix": "chore(deps):",
+  "enabledManagers": [
+    "pip_requirements",
+    "circleci",
+    "custom.regex"
+  ],
+  "pip_requirements": {
+    "fileMatch": [
+      "^requirements\\.txt$",
+      "^tests/unit/requirements\\.txt$",
+      "^tests/integration/requirements\\.txt$"
+    ]
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "The single ansible-core pin used by the hardware job, which must stay compatible with the lab runner's Python 3.10. This is the only ansible-core version Renovate can meaningfully manage here: the sanity and unit matrices are comma-separated LISTS of supported versions, not single pins, so there is no 'current version' for Renovate to bump. Widening or narrowing that support matrix is a deliberate policy decision -- the Dependency Dashboard will still surface new ansible-core releases for a human to act on.",
+      "fileMatch": [
+        "^\\.circleci/config\\.yml$"
+      ],
+      "matchStrings": [
+        "ansible-core~=(?<currentValue>\\d+\\.\\d+)\\.0"
+      ],
+      "depNameTemplate": "ansible-core",
+      "datasourceTemplate": "pypi",
+      "versioningTemplate": "pep440"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "ansible-core is the collection's compatibility contract, not an ordinary dependency. meta/runtime.yml declares a floor, the sanity/unit matrices enumerate versions, and the hardware job is constrained by the lab runner's Python. A bump here is a deliberate support-policy decision, so it gets its own PR and never automerges.",
+      "matchPackageNames": [
+        "ansible-core"
+      ],
+      "automerge": false,
+      "separateMajorMinor": true,
+      "separateMinorPatch": true,
+      "labels": [
+        "dependencies",
+        "ansible-core",
+        "needs-decision"
+      ],
+      "addLabels": [
+        "priority:high"
+      ],
+      "prBodyNotes": [
+        ":warning: Raising or dropping an ansible-core version is a support-policy change. Before merging, check: `meta/runtime.yml` requires_ansible floor; the sanity and unit matrices in `.circleci/config.yml`; whether `tests/sanity/ignore-*.txt` files need adding or removing; and whether the module boilerplate requirement changed (it changed incompatibly at 2.17). The hardware job is separately constrained by the lab runner's Python version."
+      ]
+    },
+    {
+      "description": "cimg/python images in the CI matrix. Safe to group, but a new Python minor still needs a matrix entry to actually be tested, so review rather than automerge.",
+      "matchManagers": [
+        "circleci"
+      ],
+      "matchPackageNames": [
+        "cimg/python"
+      ],
+      "groupName": "cimg/python",
+      "automerge": false,
+      "labels": [
+        "dependencies",
+        "ci"
+      ]
+    },
+    {
+      "description": "Runtime dependency. Deliberately just requests -- see requirements.txt for why lxml is avoided. Patch and minor bumps are low risk and the unit suite covers the transport thoroughly.",
+      "matchFileNames": [
+        "requirements.txt"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "automerge": false,
+      "groupName": "runtime dependencies"
+    },
+    {
+      "description": "Test-only dependencies. Grouped and automerged on green CI, since a regression here can only break the test run, and the run is what gates it.",
+      "matchFileNames": [
+        "tests/unit/requirements.txt",
+        "tests/integration/requirements.txt"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "test dependencies",
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true
+    }
+  ],
+  "ignorePaths": [
+    "changelogs/**",
+    "tests/output/**",
+    "dist/**"
+  ],
+  "vulnerabilityAlerts": {
+    "labels": [
+      "security",
+      "priority:high"
+    ],
+    "schedule": [
+      "at any time"
+    ],
+    "automerge": false
+  },
+  "osvVulnerabilityAlerts": true
+}
