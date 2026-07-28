@@ -8,7 +8,17 @@
 # runs -- the ansible.builtin.pause prompts below exist specifically to force
 # that, rather than trusting AMT's own report of what happened.
 #
-# Not wired into CircleCI. Run manually, one host at a time:
+# Wired into CircleCI as the hardware-power job, behind its own approval gate
+# (see .circleci/config.yml) -- but still only ever one host at a time.
+#
+# amt_qualify_attended (default true) gates every pause below. CI sets it
+# false: ansible.builtin.pause blocks on stdin, which the CircleCI machine
+# executor cannot supply, and the hardware-power-approval job is CI's actual
+# human checkpoint -- the approver is expected to already be watching the
+# console before clicking approve, exactly as these pauses ask an attended
+# operator to do by hand.
+#
+# Run manually, one host at a time:
 #
 #   ansible-playbook tests/hardware/qualify_power.yml \
 #     -i tests/hardware/inventory.yml -l <single-host>
@@ -30,65 +40,96 @@
           This stage power-cycles real hardware and must be attended one
           machine at a time. Re-run with -l <single-host>.
 
-    - name: Query current power state
-      james_crowley.intel_amt.amt_power:
-        host: "{{ amt_host }}"
-        username: "{{ amt_username }}"
-        password: "{{ amt_password }}"
-        tls_fingerprint: "{{ amt_tls_fingerprint }}"
-        state: query
-      delegate_to: localhost
-      no_log: true
-      register: amt_before
+    # block/rescue mirrors qualify_readonly.yml's pattern: no_log hides the whole result of
+    # each mutating call, including the parts that are deliberately safe to show, so the
+    # rescue below re-surfaces only the redacted fields errors.py already sanitised. Without
+    # this, a real power-management failure on the lab runner is reduced to "the play failed"
+    # with no way to tell an actual firmware fault from a network blip.
+    - name: Run the attended power on/off sequence
+      block:
+        - name: Query current power state
+          james_crowley.intel_amt.amt_power:
+            host: "{{ amt_host }}"
+            username: "{{ amt_username }}"
+            password: "{{ amt_password }}"
+            tls_fingerprint: "{{ amt_tls_fingerprint }}"
+            state: query
+          delegate_to: localhost
+          no_log: true
+          register: amt_before
 
-    - name: Pause for the operator to confirm they are watching this machine
-      ansible.builtin.pause:
-        prompt: >-
-          About to power-cycle {{ inventory_hostname }} ({{ amt_host }}),
-          currently {{ amt_before.previous_state.normalized }}. Confirm you
-          are watching this machine (console/KVM) and press enter to
-          continue, or Ctrl-C then A to abort
+        - name: Pause for the operator to confirm they are watching this machine
+          ansible.builtin.pause:
+            prompt: >-
+              About to power-cycle {{ inventory_hostname }} ({{ amt_host }}),
+              currently {{ amt_before.previous_state.normalized }}. Confirm you
+              are watching this machine (console/KVM) and press enter to
+              continue, or Ctrl-C then A to abort
+          when: amt_qualify_attended | default(true) | bool
 
-    - name: Power on
-      james_crowley.intel_amt.amt_power:
-        host: "{{ amt_host }}"
-        username: "{{ amt_username }}"
-        password: "{{ amt_password }}"
-        tls_fingerprint: "{{ amt_tls_fingerprint }}"
-        state: "on"
-      delegate_to: localhost
-      no_log: true
-      register: amt_on
+        - name: Power on
+          james_crowley.intel_amt.amt_power:
+            host: "{{ amt_host }}"
+            username: "{{ amt_username }}"
+            password: "{{ amt_password }}"
+            tls_fingerprint: "{{ amt_tls_fingerprint }}"
+            state: "on"
+          delegate_to: localhost
+          no_log: true
+          register: amt_on
 
-    - name: Pause for the operator to visually confirm power-on
-      ansible.builtin.pause:
-        prompt: "Confirm the machine actually powered on, then press enter"
+        - name: Pause for the operator to visually confirm power-on
+          ansible.builtin.pause:
+            prompt: "Confirm the machine actually powered on, then press enter"
+          when: amt_qualify_attended | default(true) | bool
 
-    - name: Power off
-      james_crowley.intel_amt.amt_power:
-        host: "{{ amt_host }}"
-        username: "{{ amt_username }}"
-        password: "{{ amt_password }}"
-        tls_fingerprint: "{{ amt_tls_fingerprint }}"
-        state: "off"
-      delegate_to: localhost
-      no_log: true
-      register: amt_off
+        - name: Power off
+          james_crowley.intel_amt.amt_power:
+            host: "{{ amt_host }}"
+            username: "{{ amt_username }}"
+            password: "{{ amt_password }}"
+            tls_fingerprint: "{{ amt_tls_fingerprint }}"
+            state: "off"
+          delegate_to: localhost
+          no_log: true
+          register: amt_off
 
-    - name: Pause for the operator to visually confirm power-off
-      ansible.builtin.pause:
-        prompt: "Confirm the machine actually powered off, then press enter"
+        - name: Pause for the operator to visually confirm power-off
+          ansible.builtin.pause:
+            prompt: "Confirm the machine actually powered off, then press enter"
+          when: amt_qualify_attended | default(true) | bool
 
-    - name: Ensure the evidence output directory exists
-      ansible.builtin.file:
-        path: "{{ amt_output_dir }}"
-        state: directory
-        mode: "0700"
-      delegate_to: localhost
+        - name: Ensure the evidence output directory exists
+          ansible.builtin.file:
+            path: "{{ amt_output_dir }}"
+            state: directory
+            mode: "0700"
+          delegate_to: localhost
 
-    - name: Record evidence for this target
-      ansible.builtin.copy:
-        content: "{{ {'before': amt_before, 'on': amt_on, 'off': amt_off} | to_nice_json }}\n"
-        dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_power.json"
-        mode: "0600"
-      delegate_to: localhost
+        - name: Record evidence for this target
+          ansible.builtin.copy:
+            content: "{{ {'before': amt_before, 'on': amt_on, 'off': amt_off} | to_nice_json }}\n"
+            dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_power.json"
+            mode: "0600"
+          delegate_to: localhost
+      rescue:
+        - name: Report the redacted failure detail
+          ansible.builtin.debug:
+            msg:
+              error_class: "{{ ansible_failed_result.error_class | default('(none reported)') }}"
+              endpoint: "{{ ansible_failed_result.endpoint | default('(none reported)') }}"
+              operation: "{{ ansible_failed_result.operation | default('(none reported)') }}"
+              indeterminate: "{{ ansible_failed_result.indeterminate | default(false) }}"
+              message: "{{ ansible_failed_result.msg | default('(no message)') }}"
+              diagnostic: "{{ ansible_failed_result.diagnostic | default('(none)') }}"
+
+        - name: Fail with the error class in the summary line and the manual recovery path
+          ansible.builtin.fail:
+            msg: >-
+              amt_power failed against {{ inventory_hostname }} with
+              error_class={{ ansible_failed_result.error_class | default('unknown') }},
+              indeterminate={{ ansible_failed_result.indeterminate | default(false) }}.
+              See the redacted detail above. If indeterminate is true, the power request may
+              have been sent and its outcome is unknown -- verify the machine's actual state
+              over KVM/console before retrying. Manual recovery path:
+              tests/hardware/README.md#if-a-machine-ends-up-in-a-bad-boot-state

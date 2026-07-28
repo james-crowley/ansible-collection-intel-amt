@@ -13,31 +13,69 @@ collection's three testing tiers.
 
 ## Gating
 
-Two independent gates, neither of which fires on an ordinary push:
+Every hardware job sits behind at least two independent gates, neither of
+which fires on an ordinary push:
 
 1. **Pipeline parameter.** The `hardware` CircleCI workflow only exists when
    the pipeline is triggered with `run-hardware-tests=true`
    (`.circleci/config.yml`). A normal push cannot reach it.
-2. **Manual approval.** Even then, a human must approve the
-   `hardware-approval` job in the CircleCI UI before `hardware-tests` runs.
+2. **Manual approval.** Even then, a human must approve a `type: approval`
+   job in the CircleCI UI before the corresponding hardware job runs.
 
-`hardware-tests` itself runs on a self-hosted machine runner inside the lab
-network (`resource_class: james-crowley/amt-lab`), and currently invokes only
-two of the eight stages below:
+`hardware-tests` runs on a self-hosted machine runner inside the lab network
+(`resource_class: crowley/amt-runner`), behind `hardware-approval`, and
+invokes the three **non-mutating** stages below:
 
 ```yaml
 - run:
-    name: Read-only AMT qualification
+    name: "Stage 1: read-only AMT qualification"
     command: ansible-playbook tests/hardware/qualify_readonly.yml -i tests/hardware/inventory.yml -v
 - run:
-    name: Check-mode power and boot plans
+    name: "Stage 3: check-mode power and boot plans (no mutation)"
     command: ansible-playbook tests/hardware/qualify_checkmode.yml -i tests/hardware/inventory.yml --check -v
+- run:
+    name: "Stage 8: idempotent re-probe"
+    command: ansible-playbook tests/hardware/qualify_idempotent_reprobe.yml -i tests/hardware/inventory.yml -v
 ```
 
-Stages 4-8 are **not** wired into CI. They power-cycle and attach media to
-real machines, and this repository's position is that those stay
-human-attended, run explicitly from a terminal on (or with access to) the lab
-network, not from an unattended pipeline job.
+Stages 4-7 -- the mutating ones -- are wired into CI too, as four separate
+jobs (`hardware-power`, `hardware-media`, `hardware-writable`, `hardware-pxe`),
+each **escalating past the last and each behind its own separate approval
+job** (`hardware-power-approval`, `hardware-media-approval`,
+`hardware-writable-approval`, `hardware-pxe-approval`). One approval does not
+cover all four: a human confirms every escalation independently, from
+"power-cycle" through "arm a native PXE boot," rather than one click
+green-lighting everything. Each of these jobs runs the corresponding
+playbook with `-e amt_qualify_attended=false`, which skips the playbook's own
+interactive `ansible.builtin.pause` prompts -- those block on stdin, which the
+CircleCI machine executor cannot supply, so the approval job itself is CI's
+human checkpoint. **The approver is expected to already have the KVM/console
+open before clicking approve**, exactly as an attended manual run asks a human
+to do by hand. Stage 7's job additionally reads the `pxe-prereqs-confirmed`
+pipeline parameter (default `false`) into `amt_pxe_prereqs_confirmed`, so that
+attestation has to be set deliberately on the pipeline trigger, not assumed.
+
+Stages 5 and 6 need small local media files that must never be committed
+(`.gitignore` blocks `*.iso`/`*.img`); their jobs run
+[`make-test-media.sh`](make-test-media.sh) first to provision a small
+genuinely-bootable ISO (iPXE's own `ipxe.iso`) and a zero-filled writable
+image, entirely inside the workspace. Run it yourself for a manual run too:
+
+```bash
+./tests/hardware/make-test-media.sh
+# prints AMT_TEST_ISO_PATH= / AMT_TEST_IMAGE_PATH= for tests/hardware/render-inventory.sh
+# to pick up, or pass them directly with -e amt_test_iso_path=... / -e amt_test_image_path=...
+```
+
+None of this weakens what stages 4-7 running unattended in CI can actually
+prove -- see each job's own comment in `.circleci/config.yml` and each
+playbook's own header comment for the exact, honest scope of what a green run
+does and does not establish. In particular: stage 6 (`hardware-writable`)
+will always observe `bytes_written=0` when run unattended, because nothing is
+booted on the target to issue a write -- that is documented as a legitimate
+outcome, not a failure. Stage 7 (`hardware-pxe`) cannot verify netboot itself
+succeeds, since that depends on DHCP/boot-service infrastructure this
+collection has no way to observe.
 
 ## Inventory and credentials
 
@@ -68,8 +106,8 @@ ahead on the assumption stage N was cosmetic:
 | 3 | `qualify_checkmode.yml` (`--check`) | No | Module check-mode paths that unit/mock tests cannot fully exercise against real firmware quirks |
 | 4 | `qualify_power.yml` | Yes | Real `RequestPowerStateChange` behaviour, attended |
 | 5 | `qualify_media_attach.yml` | Yes | IDE-R attach and boot hand-off against real firmware |
-| 6 | `qualify_writable_image.yml` | Yes | The writable floppy/USB-R path actually lands bytes on disk |
-| 7 | `qualify_pxe.yml` | Yes | Native one-time PXE boot, only once DHCP/boot-service prerequisites are proven separately |
+| 6 | `qualify_writable_image.yml` | Yes | The device is accepted, attached, and presented writable; a non-zero `bytes_written` (needs something booted on the target to write) is cross-checked against the on-disk checksum. `bytes_written=0` is expected without that and is **not** a failure -- see the playbook header |
+| 7 | `qualify_pxe.yml` | Yes | One-time PXE arms and reads back armed; the reset is issued and the endpoint recovers; `AMT_BootSettingData` is not left drifted by the reset. Does **not** verify netboot itself succeeds (depends on DHCP/boot-service infrastructure) or read back AMT's internal one-shot role bit -- see the playbook header |
 | 8 | `qualify_idempotent_reprobe.yml` | No | No session or state was left quietly drifting after everything above |
 
 **Stage 2 is the one that matters most and is easiest to skip.** It is not
@@ -89,10 +127,16 @@ action landing where a preview was expected.
 Stages 4 through 7 are progressively more disruptive and are marked
 "attended" in their own file headers: a human should be watching the machine
 (console or KVM) while each one runs, not just watching the Ansible output.
-Stage 7 additionally requires `-e amt_pxe_prereqs_confirmed=true`, because
-nothing in this collection can verify a PXE/DHCP boot service actually exists
-on the target's network -- that has to be proven independently first, or
-stage 7 just strands the machine at a PXE ROM prompt.
+For a manual run this means answering the `ansible.builtin.pause` prompts;
+in CI it means the approver watching the console before approving that
+stage's job (see Gating above -- `amt_qualify_attended=false` skips the
+prompts themselves in CI, but the human checkpoint they exist for is still
+there, just moved to the approval). Stage 7 additionally requires
+`-e amt_pxe_prereqs_confirmed=true` (or, in CI, the `pxe-prereqs-confirmed`
+pipeline parameter set `true`), because nothing in this collection can verify
+a PXE/DHCP boot service actually exists on the target's network -- that has
+to be proven independently first, or stage 7 just strands the machine at a
+PXE ROM prompt.
 
 ## Qualify one machine first
 

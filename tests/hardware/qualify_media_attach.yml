@@ -9,11 +9,24 @@
 # runs for the first time on a given machine, make sure the manual recovery
 # path below is actually reachable (KVM console open, MEBx access confirmed).
 #
-# Not wired into CircleCI. Run manually, one host at a time, attended:
+# Wired into CircleCI as the hardware-media job, behind its own approval gate
+# (see .circleci/config.yml) -- but still only ever one host at a time.
+#
+# Run manually, one host at a time, attended:
 #
 #   ansible-playbook tests/hardware/qualify_media_attach.yml \
 #     -i tests/hardware/inventory.yml -l <single-host> \
 #     -e amt_test_iso_path=/path/to/small-test.iso
+#
+# tests/hardware/make-test-media.sh produces a small genuinely-bootable ISO
+# (iPXE's own ipxe.iso) if you do not already have one you trust.
+#
+# amt_qualify_attended (default true) gates every interactive pause in this
+# file. CI sets it false: ansible.builtin.pause blocks on stdin, which the
+# CircleCI machine executor cannot supply, and the hardware-media-approval job
+# is CI's actual human checkpoint -- the approver is expected to already have
+# the KVM console open before clicking approve, exactly as the pause below
+# asks an attended operator to do by hand.
 
 - name: "Hardware qualification stage 5: IDE-R attach with a small test ISO; confirm boot hand-off"
   hosts: amt_targets
@@ -38,7 +51,8 @@
         that:
           - amt_test_iso_path is defined and amt_test_iso_path | length > 0
         fail_msg: >-
-          Set amt_test_iso_path (e.g. -e amt_test_iso_path=/path/to/small-test.iso)
+          Set amt_test_iso_path (e.g. -e amt_test_iso_path=/path/to/small-test.iso,
+          or run tests/hardware/make-test-media.sh and pass its AMT_TEST_ISO_PATH)
           to a small ISO you can visually confirm booting over KVM/console.
           Never commit the ISO itself -- see the repository .gitignore.
 
@@ -49,9 +63,32 @@
           {{ inventory_hostname }}. Have the KVM console (e.g. MeshCentral)
           open and watching before continuing. If this goes wrong, the
           manual recovery path is in this directory's README.md
+      when: amt_qualify_attended | default(true) | bool
 
-  roles:
-    - james_crowley.intel_amt.amt_baremetal_install
+  # Wrapping the role invocation in a block/rescue -- rather than the play-level `roles:`
+  # keyword this file used before -- is what lets this playbook surface a diagnosable failure
+  # of its own: the role's tasks/record_failure.yml now reports the redacted error_class/
+  # endpoint/operation/indeterminate detail (mirroring qualify_readonly.yml's rescue pattern),
+  # but its own rescue always re-raises via a single ansible.builtin.fail so the role never
+  # "swallows a failure to keep going" (see the role's tasks/main.yml). This outer rescue is
+  # this playbook's own chance to point at the manual recovery path before failing the play.
+  tasks:
+    - name: Run the amt_baremetal_install lifecycle for this target
+      block:
+        - name: Attach installer media over IDE-R and boot from it
+          ansible.builtin.include_role:
+            name: james_crowley.intel_amt.amt_baremetal_install
+      rescue:
+        - name: Fail with a pointer to the manual recovery path
+          ansible.builtin.fail:
+            msg: >-
+              qualify_media_attach.yml failed for {{ inventory_hostname }}:
+              {{ ansible_failed_result.msg | default('see previous task output') }}.
+              The role's own rescue already recorded resumption state and (redacted)
+              diagnostic detail above. Media is detached in the role's own always block
+              regardless of this failure. If the machine is left in a bad boot state, see
+              tests/hardware/README.md#if-a-machine-ends-up-in-a-bad-boot-state for the
+              manual KVM/MEBx recovery path.
 
   post_tasks:
     - name: Remind the operator to visually confirm boot hand-off
@@ -61,4 +98,7 @@
           over KVM/console that {{ inventory_hostname }} actually booted
           from the attached ISO before treating this stage as passed --
           amt_power and amt_media report protocol-level success, not what
-          the screen shows.
+          the screen shows. In CI (amt_qualify_attended=false) this
+          confirmation is the approver's responsibility, made before
+          approving hardware-media -- nothing in this playbook can see the
+          screen for you.
