@@ -11,6 +11,7 @@ import pytest
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.client import (
     AmtClient,
     PowerAction,
+    _canonical_uuid,
     _truthy,
 )
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import (
@@ -488,3 +489,56 @@ class TestSystemUuidSource:
         # a permanently-null identity.
         client = self._client_with({"PlatformGUID": "GOOD-GUID"})
         assert client.get_facts().uuid == "GOOD-GUID"
+
+
+class TestCanonicalUuidFormatting:
+    """PlatformGUID must be rendered the way MEBx displays it.
+
+    The SMBIOS Type 1 UUID stores its first three fields little-endian. Reading
+    them big-endian produces something that still looks like a UUID, so the
+    identity cross-check would fail against a correctly-recorded expectation and
+    be quietly useless. The version-nibble assertions below are the cheap
+    invariant that distinguishes the correct byte order from the plausible-but-
+    wrong one.
+    """
+
+    #: Exactly what AMT 16.1.30 returned for the lab machine.
+    REAL_PLATFORM_GUID = "LAMBDA_PLATFORM_GUID_COMPACT"
+    EXPECTED = "LAMBDA_PLATFORM_GUID"
+
+    def test_real_firmware_value_renders_canonically(self):
+        assert _canonical_uuid(self.REAL_PLATFORM_GUID) == self.EXPECTED
+
+    def test_version_nibble_is_valid(self):
+        # A valid UUID version is 1-8. The naive big-endian reading of this same
+        # value yields 'F', which is not a version at all -- that is how we know
+        # the field reversal is right rather than merely self-consistent.
+        version = _canonical_uuid(self.REAL_PLATFORM_GUID).split("-")[2][0]
+        assert version in "12345678", f"version nibble {version} is not a valid UUID version"
+
+    def test_naive_big_endian_would_be_invalid(self):
+        # Guards the reasoning itself: if someone "simplifies" the function to a
+        # plain dash-insertion, this documents why that is wrong.
+        raw = self.REAL_PLATFORM_GUID
+        naive = f"{raw[0:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:32]}".upper()
+        assert naive.split("-")[2][0] not in "12345678"
+        assert _canonical_uuid(raw) != naive
+
+    def test_already_dashed_value_is_not_converted_twice(self):
+        # Firmware generations differ; a value that already carries dashes must be
+        # left alone rather than reversed again.
+        assert _canonical_uuid(self.EXPECTED) == self.EXPECTED
+
+    def test_case_is_normalised(self):
+        assert _canonical_uuid(self.REAL_PLATFORM_GUID.lower()) == self.EXPECTED
+
+    @pytest.mark.parametrize("weird", ["", "not-hex-at-all", "0064", "ZZ6467CCB605F0118833AD07FBD52200", "00" * 20])
+    def test_unexpected_shapes_are_returned_unchanged_and_never_raise(self, weird):
+        # Better to surface an odd value verbatim than to mangle it into a
+        # confident lie about a machine's identity.
+        assert _canonical_uuid(weird) == weird
+
+    def test_end_to_end_through_get_facts(self):
+        wsman = _fake_wsman()
+        wsman.get.side_effect = lambda rc, **kw: {"PlatformGUID": self.REAL_PLATFORM_GUID} if rc == "CIM_ComputerSystemPackage" else {}
+        assert _client(wsman).get_facts().uuid == self.EXPECTED
