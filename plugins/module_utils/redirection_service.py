@@ -70,10 +70,14 @@ def _truthy(value: Any) -> bool:
 class RedirectionCapabilities:
     """What the firmware advertises it supports, from ``AMT_BootCapabilities``.
 
-    Field names (``IDER``, ``SOL``) follow Intel's published AMT_BootCapabilities schema; unlike
-    the five-step boot sequence, docs/protocol-notes.md s2.6 does not itself name the specific
-    capability fields, so this mapping has not been independently re-verified against real
-    firmware output. Flagged for hardware verification -- see the PR description.
+    The field names ``IDER`` and ``SOL`` are verified: both appear in a recorded firmware
+    response fixture, pkg/wsman/wsmantesting/responses/amt/boot/capabilities/get.xml in
+    device-management-toolkit/go-wsman-messages. See the field table in
+    docs/protocol-notes.md s2.5.
+
+    Note this reports what the firmware says it *supports*. Whether redirection is *enabled*
+    comes from AMT_RedirectionService, and whether the port is actually *reachable* needs a TCP
+    connect. Those three are deliberately kept separate -- see RedirectionReport.
     """
 
     ider_supported: bool
