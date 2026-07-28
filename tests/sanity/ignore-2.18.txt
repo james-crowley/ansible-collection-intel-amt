@@ -1,0 +1,1 @@
+plugins/module_utils/redirection.py pep8:E704 # Protocol stubs; ruff format collapses them, 2.19 no longer flags this. See tests/sanity/README.md
