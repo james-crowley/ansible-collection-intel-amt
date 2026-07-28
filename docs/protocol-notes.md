@@ -166,7 +166,22 @@ This is the sequence MeshCmd uses and it is load-bearing. Order matters.
 1. **`Get AMT_BootSettingData`** — read the whole instance.
 
 2. **`CIM_BootConfigSetting.ChangeBootOrder(null)`** — clear the boot order first.
-   Some AMT versions do not clear it automatically. Pass an empty `Source`.
+   Some AMT versions do not clear it automatically. **Omit the `Source` element
+   entirely** — do not send an empty `<Source/>`.
+
+   This distinction is load-bearing and was verified the hard way. `Source` is
+   typed as an endpoint reference, so it requires `Address` and
+   `ReferenceParameters` children. An empty element is schema-invalid and real
+   AMT 16.1.30 rejects the whole request:
+
+   ```
+   HTTP 400 -- "The supplied SOAP violates the corresponding XML schema definition."
+   ```
+
+   An absent element is valid, because these method parameters are optional
+   (`minOccurs=0`). "Pass a null Source" therefore means *send no element*, which
+   is what MeshCmd does when it passes `null`.
+
    Must return `ReturnValue == 0`.
 
 3. **`Put AMT_BootSettingData`** with the mutated instance. Fields to set:
