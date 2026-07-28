@@ -210,7 +210,7 @@ file and can collect post-install artifacts.
       james_crowley.intel_amt.amt_boot:
         device: ider_cdrom
         mode: once
-        action_token: "{{ media.operation.session_id }}"
+        action_token: "{{ media.session_id }}"
       no_log: true
 
     - name: Reset into the installer
@@ -228,7 +228,7 @@ file and can collect post-install artifacts.
     - name: Detach the media
       james_crowley.intel_amt.amt_media:
         state: detached
-        session_id: "{{ media.operation.session_id }}"
+        session_id: "{{ media.session_id }}"
       no_log: true
 ```
 
@@ -306,4 +306,16 @@ Full attribution with per-file provenance is in [NOTICE](NOTICE).
 ## Contributing
 
 Issues and PRs welcome. Conventional commits; every change needs a changelog
-fragment in `changelogs/fragments/`; CI must be green.
+fragment in `changelogs/fragments/`; CI must be green. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for the local verification sequence and the
+practical traps this project has actually hit.
+
+## Further reading
+
+- [`docs/amt_info.md`](docs/amt_info.md), [`docs/amt_power.md`](docs/amt_power.md),
+  [`docs/amt_boot.md`](docs/amt_boot.md), [`docs/amt_redirection.md`](docs/amt_redirection.md),
+  [`docs/amt_media.md`](docs/amt_media.md) — per-module reference: options, return
+  values, examples, errors, and limitations.
+- [`docs/capability-matrix.md`](docs/capability-matrix.md) — exactly what is verified
+  against real firmware evidence, what is only mock-tested, and what open risks are
+  tracked and why.
