@@ -368,6 +368,16 @@ class _FrameReader:
         return b"".join(chunks)
 
 
+#: How long accept() and the bounded session joins wait before re-checking the
+#: stop event. Small enough that shutdown feels immediate, large enough not to
+#: spin a core.
+_ACCEPT_POLL_SECONDS = 0.25
+
+#: Per-attempt budget for joining a worker thread during shutdown. stop() makes
+#: two attempts, so a well-behaved server exits well inside the first.
+_SHUTDOWN_JOIN_SECONDS = 5.0
+
+
 class IderMockServer:
     """Threaded mock IDE-R / redirection endpoint, playing firmware.
 
@@ -437,6 +447,11 @@ class IderMockServer:
         raw_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         raw_sock.bind((self.host, 0))
         raw_sock.listen(1)
+        # A timeout, not a blocking accept: it makes the accept loop poll the stop
+        # event instead of sitting in accept() until a connection or a socket
+        # close wakes it. Without this, shutdown depends on close() racing an
+        # in-flight accept, which is exactly the thread leak this surfaced as.
+        raw_sock.settimeout(_ACCEPT_POLL_SECONDS)
         self.port = raw_sock.getsockname()[1]
 
         if self.use_tls:
@@ -452,22 +467,39 @@ class IderMockServer:
 
     def stop(self) -> None:
         self._stop_event.set()
-        for sock in (self._conn, self._listen_sock):
-            if sock is not None:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-        if self._accept_thread is not None:
-            self._accept_thread.join(timeout=5)
-        if self._session_thread is not None:
-            self._session_thread.join(timeout=5)
+        # Closed twice, deliberately. The accept loop can assign self._conn after
+        # the first pass, so a single sweep can leave a live connection whose
+        # session thread then blocks shutdown.
+        for _attempt in range(2):
+            for sock in (self._conn, self._listen_sock):
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+            if self._session_thread is not None:
+                self._session_thread.join(timeout=_SHUTDOWN_JOIN_SECONDS)
+            if self._accept_thread is not None:
+                self._accept_thread.join(timeout=_SHUTDOWN_JOIN_SECONDS)
+            if not self._is_running():
+                break
         if self._tls_tmpdir is not None:
             self._tls_tmpdir.cleanup()
             self._tls_tmpdir = None
         self._listen_sock = None
         self._accept_thread = None
         self._session_thread = None
+
+    def _is_running(self) -> bool:
+        """Whether either worker thread is still alive.
+
+        Used by stop() to decide whether a second close-and-join pass is needed,
+        and by tests to assert nothing was left behind.
+        """
+        for thread in (self._accept_thread, self._session_thread):
+            if thread is not None and thread.is_alive():
+                return True
+        return False
 
     def __enter__(self) -> IderMockServer:
         return self.start()
@@ -479,6 +511,9 @@ class IderMockServer:
         while not self._stop_event.is_set():
             try:
                 conn, _addr = self._listen_sock.accept()  # type: ignore[union-attr]
+            except TimeoutError:
+                # No client yet. Loop so the stop event gets re-checked.
+                continue
             except OSError:
                 return
             if self._ssl_context is not None:
@@ -490,7 +525,14 @@ class IderMockServer:
             self._conn = conn
             self._session_thread = threading.Thread(target=self._run_session, args=(conn,), name="ider-mock-session", daemon=True)
             self._session_thread.start()
-            self._session_thread.join()
+            # Bounded joins rather than one unbounded join. An unbounded join here
+            # means a session still winding down keeps this thread from ever
+            # noticing the stop event, so stop()'s own join times out and the
+            # thread is reported as leaked.
+            while self._session_thread.is_alive():
+                self._session_thread.join(timeout=_ACCEPT_POLL_SECONDS)
+                if self._stop_event.is_set():
+                    break
             if self._stop_event.is_set():
                 return
 

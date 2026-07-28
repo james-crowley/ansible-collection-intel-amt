@@ -77,11 +77,14 @@ class SocketLike(Protocol):
     handshake can be driven without a network.
     """
 
-    def recv(self, bufsize: int) -> bytes: ...
+    def recv(self, bufsize: int) -> bytes:
+        """Receive up to ``bufsize`` bytes, or b"" once the peer has closed."""
 
-    def sendall(self, data: bytes) -> None: ...
+    def sendall(self, data: bytes) -> None:
+        """Send all of ``data``, blocking until it has been handed to the kernel."""
 
-    def close(self) -> None: ...
+    def close(self) -> None:
+        """Release the underlying descriptor. Must tolerate being called twice."""
 
 
 class TlsSocketLike(SocketLike, Protocol):
@@ -91,7 +94,8 @@ class TlsSocketLike(SocketLike, Protocol):
     fake in tests need not subclass ``ssl.SSLSocket``.
     """
 
-    def getpeercert(self, binary_form: bool = ...) -> object: ...
+    def getpeercert(self, binary_form: bool = ...) -> object:
+        """Return the peer certificate; DER bytes when ``binary_form`` is true."""
 
 
 SocketFactory = Callable[[str, int, float], SocketLike]
