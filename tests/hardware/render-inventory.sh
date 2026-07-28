@@ -39,22 +39,9 @@ AMT_ALLOW_INSECURE="${AMT_ALLOW_INSECURE:-false}"
 # always explicit. Refuse to render an inventory that would ask a module to do
 # something it will reject anyway, so the failure lands here with a clear cause
 # rather than midway through a playbook.
-if [ -z "${AMT_TLS_FINGERPRINT}" ] && [ "${AMT_ALLOW_INSECURE}" != "true" ]; then
-    echo "Refusing to render: no AMT_TLS_FINGERPRINT and AMT_ALLOW_INSECURE is not 'true'." >&2
-    echo "Run the hardware-observe CI job, review the fingerprint it prints, then store it" >&2
-    echo "as AMT_TLS_FINGERPRINT in the amt-lab-runner context. Alternatively set" >&2
-    echo "AMT_ALLOW_INSECURE=true for firmware with no TLS at all (AMT in Small Business" >&2
-    echo "Mode never opens port 16993)." >&2
-    exit 1
-fi
+# The transport gate is applied per machine in emit_host(), because each endpoint
+# has its own certificate and therefore its own pin.
 
-if [ -n "${AMT_TLS_FINGERPRINT}" ]; then
-    use_tls=true
-    allow_insecure=false
-else
-    use_tls=false
-    allow_insecure=true
-fi
 
 emit_scalar() {
     # Single-quote and escape for YAML, so a value containing ':', '#', '{' or a
@@ -70,30 +57,82 @@ printf '  children:\n'
 printf '    amt_targets:\n'
 printf '      hosts:\n'
 
+# Per-machine credentials via a numeric suffix.
+#
+# The first machine uses unsuffixed variables (AMT_HOST, AMT_PASSWORD, ...) and
+# each additional machine appends _N: AMT_HOST_2, AMT_PASSWORD_2, and so on.
+# Ports are deliberately NOT suffixed -- AMT always answers on the same ports, so
+# a per-machine port would be a footgun rather than a feature.
+#
+# This matters because the machines genuinely differ: each presents its own
+# self-signed certificate, so each needs its own reviewed fingerprint. A single
+# shared AMT_TLS_FINGERPRINT across two machines cannot work, and would fail as a
+# pin mismatch rather than as a clear configuration error.
+#
+# Credentials are emitted as env lookups, never literals, so nothing secret is
+# written to disk. Each host gets host_vars naming its own variables.
+emit_host() {
+    suffix="$1"      # "" for the first machine, "_2", "_3", ... for the rest
+    index="$2"
+    host_value="$3"
+    printf '        amt-lab-%02d:\n' "${index}"
+    printf '          amt_host: %s\n' "$(emit_scalar "${host_value}")"
+    printf "          amt_username: \"{{ lookup('ansible.builtin.env', 'AMT_USERNAME%s') | default('admin', true) }}\"\n" "${suffix}"
+    printf "          amt_password: \"{{ lookup('ansible.builtin.env', 'AMT_PASSWORD%s') }}\"\n" "${suffix}"
+    eval "fp=\${AMT_TLS_FINGERPRINT${suffix}:-}"
+    if [ -n "${fp}" ]; then
+        printf "          amt_use_tls: true\n"
+        printf "          amt_allow_insecure_transport: false\n"
+        printf "          amt_tls_fingerprint: \"{{ lookup('ansible.builtin.env', 'AMT_TLS_FINGERPRINT%s') }}\"\n" "${suffix}"
+    elif [ "${AMT_ALLOW_INSECURE}" = "true" ]; then
+        printf "          amt_use_tls: false\n"
+        printf "          amt_allow_insecure_transport: true\n"
+    else
+        echo "Refusing to render: no AMT_TLS_FINGERPRINT${suffix} for ${host_value}, and" >&2
+        echo "AMT_ALLOW_INSECURE is not 'true'. Every machine needs its own reviewed pin," >&2
+        echo "because each AMT endpoint presents its own self-signed certificate." >&2
+        echo "Run the hardware-observe job to read this machine's fingerprint." >&2
+        exit 1
+    fi
+}
+
 index=0
+
+# Machine 1, from AMT_HOST (or the first entry of a comma-separated AMT_HOSTS,
+# which remains supported for machines that share one credential set).
 for host in $(printf '%s' "${AMT_HOSTS}" | tr ',' ' '); do
     [ -n "${host}" ] || continue
     index=$((index + 1))
-    printf '        amt-lab-%02d:\n' "${index}"
-    printf '          amt_host: %s\n' "$(emit_scalar "${host}")"
+    if [ "${index}" -eq 1 ]; then
+        emit_host "" 1 "${host}"
+    else
+        emit_host "_${index}" "${index}" "${host}"
+    fi
+done
+
+# Additional machines declared with suffixed variables. Starts at the next index
+# after whatever AMT_HOST/AMT_HOSTS produced, and stops at the first gap.
+n=$((index + 1))
+while : ; do
+    eval "extra_host=\${AMT_HOST_${n}:-}"
+    [ -n "${extra_host}" ] || break
+    # Skip if AMT_HOSTS already covered this index, so the two styles can coexist
+    # without emitting a machine twice.
+    if [ "${n}" -gt "${index}" ]; then
+        emit_host "_${n}" "${n}" "${extra_host}"
+        index="${n}"
+    fi
+    n=$((n + 1))
 done
 
 if [ "${index}" -eq 0 ]; then
-    echo "AMT_HOSTS produced no usable entries." >&2
+    echo "No machines to render: set AMT_HOST (and optionally AMT_HOST_2, ...)." >&2
     exit 1
 fi
 
 printf '      vars:\n'
-printf "        amt_username: \"{{ lookup('ansible.builtin.env', 'AMT_USERNAME') | default('admin', true) }}\"\n"
-printf "        amt_password: \"{{ lookup('ansible.builtin.env', 'AMT_PASSWORD') }}\"\n"
-printf '        amt_use_tls: %s\n' "${use_tls}"
-printf '        amt_allow_insecure_transport: %s\n' "${allow_insecure}"
-if [ -n "${AMT_TLS_FINGERPRINT}" ]; then
-    printf "        amt_tls_fingerprint: \"{{ lookup('ansible.builtin.env', 'AMT_TLS_FINGERPRINT') }}\"\n"
-fi
-# Ports are emitted only when the context sets them. Otherwise the collection
-# derives 16993/16992 and 16995/16994 from the transport mode, and hardcoding a
-# default here could silently drift from the collection's own.
+# Ports are shared across machines by design -- AMT always listens on the same
+# ports, so these stay group-level rather than per-host.
 if [ -n "${AMT_PORT:-}" ]; then
     printf '        amt_port: %s\n' "${AMT_PORT}"
 fi
