@@ -103,11 +103,15 @@ to let an operator shut it down.
 
 ## Return values
 
+`amt_media` nests its `intel-amt-operation/v1` receipt under an `operation` key, the
+same shape every module in this collection returns it under (see
+[Capability matrix](capability-matrix.md) — this was previously inconsistent across
+modules, and is exactly what caused issue #21's `media.operation.session_id` bug before
+issue #22 normalised it: `session_id` has always been, and remains, a top-level field,
+never nested under `operation`).
+
 | Field | Type | Returned | Description |
 |---|---|---|---|
-| `schema` | `str` | always | Always `intel-amt-operation/v1`. |
-| `action` | `str` | always | `amt_media.attach` or `amt_media.detach`. |
-| `endpoint` | `str` | always | The redirection `host:port`. |
 | `changed` | `bool` | always | Attach: `true` only if a new background process was actually forked (or, in check mode, would be) — `false` if an already-live session for `session_id` was found and confirmed. Detach: `true` only if a live process was actually signalled — `false` if nothing was live. |
 | `session_id` | `str` | always | The session id in effect — generated for `state=attached` when not supplied. **Capture this** if you will need to detach later. |
 | `session_state` | `str` | always | Last state the background process reported: `starting`, `connecting`, `attached`, `detached`, `error`. `unknown` if `state=detached` found no state file. |
@@ -116,12 +120,24 @@ to let an operator shut it down.
 | `bytes_written` | `int` | always | Total bytes written across all attached devices. Always `0` for a read-only session. |
 | `devices` | `dict` | always | Keyed by `cdrom`/`floppy`. Each entry: `path`, `writable`, `size`, `bytes_read`, `bytes_written`. `writable` is always `false` for `cdrom`. |
 | `error` | `str` | when `session_state` is `error` | The background process's own error message. |
-| `error_class` | `str` | on failure | Stable machine-readable failure class. |
+| `operation.schema` | `str` | always | Always `intel-amt-operation/v1`. |
+| `operation.action` | `str` | always | `amt_media.attach` or `amt_media.detach`. |
+| `operation.endpoint` | `str` | always | The redirection `host:port`. |
+| `operation.changed` | `bool` | always | Mirrors the top-level `changed`. |
+| `operation.previous` | `dict` or `null` | always | The session state as read before this call, or `null` when none existed. |
+| `operation.desired` | `str` | always | `attached` or `detached`, whichever this call requested. |
+| `operation.observed` | `dict` | always | The session state as read (or, in check mode, assumed) after this call. |
+| `operation.tls_peer_fingerprint` | `str` or `null` | always | SHA-256 fingerprint of the TLS leaf certificate observed, or `null` over plaintext or before any connection was made. This used to also be duplicated at the top level (spread from the receipt); it now lives only under `operation`. |
+| `operation.error_class` | `str` or `null` | always | `null` on success; a stable machine-readable failure class on failure. |
 
 Additional fields not in the module's `RETURN` docstring but present in the actual
 result dict (see `_attach()`/`_detach()` in `amt_media.py`): `recovered_stale_session`
 (`bool`, when a stale state file was discarded) and `exited_cleanly` (`bool`, on
-detach, whether the process exited within `detach_timeout`).
+detach, whether the process exited within `detach_timeout`). Both are module-specific
+and stay at the top level, same as `session_id`. `error_class` also appears at the
+**top level** of a failed module's result (what `fail_json`/rescue blocks read),
+independent of `operation.error_class`, which is always `null` on the successful-exit
+path documented above.
 
 ## Examples
 
