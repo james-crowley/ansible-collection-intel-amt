@@ -17,6 +17,17 @@ parameters:
   run-hardware-tests:
     type: boolean
     default: false
+  # Stage 7 (qualify_pxe.yml) refuses to arm a native one-time PXE boot unless told that
+  # DHCP and a TFTP/HTTP boot service have been proven to work on the target's network
+  # independently of AMT -- amt_pxe_prereqs_confirmed is an operator attestation, not
+  # something any module in this collection can check. Defaulting to false here means a
+  # pipeline trigger that only sets run-hardware-tests=true still stops at that assertion
+  # for the pxe stage; a human must deliberately also set this on the SAME trigger, after
+  # actually verifying the network, rather than it being a standing "true" baked into this
+  # file that nobody re-confirms.
+  pxe-prereqs-confirmed:
+    type: boolean
+    default: false
 
 executors:
   python:
@@ -73,6 +84,120 @@ commands:
       - store_artifacts:
           path: ~/project/test-results
           destination: test-results
+
+  # ---------------------------------------------------------------------------
+  # Shared steps for the hardware-in-the-loop jobs (hardware-tests plus the stage 4-7 jobs
+  # below). Factored out once there were five jobs repeating the same credential check,
+  # venv/collection install, and inventory render -- a second (or fifth) copy drifting from
+  # the first is exactly how e.g. the ansible-core pin or the required-variable list would go
+  # stale in only some jobs.
+  verify-lab-credentials:
+    description: >-
+      Verify the restricted amt-lab-runner context injected the required AMT credentials, and
+      either a reviewed TLS fingerprint or an explicit insecure-transport override, before
+      anything tries to use them.
+    steps:
+      - run:
+          name: Verify the lab credentials were injected
+          command: |
+            missing=""
+            for var in AMT_HOST AMT_USERNAME AMT_PASSWORD; do
+              eval "val=\${$var:-}"
+              [ -n "$val" ] || missing="$missing $var"
+            done
+            if [ -n "$missing" ]; then
+              echo "Missing required context variables:$missing" >&2
+              echo "Add them to the amt-lab-runner context:" >&2
+              echo "  circleci context store-secret amt-lab-runner --org gh/james-crowley <NAME>" >&2
+              exit 1
+            fi
+            if [ -z "${AMT_TLS_FINGERPRINT:-}" ] && [ "${AMT_ALLOW_INSECURE:-false}" != "true" ]; then
+              echo "AMT_TLS_FINGERPRINT is not set." >&2
+              echo "Run the hardware-observe job, review the fingerprint it prints, then store it." >&2
+              echo "This refusal is deliberate: pinning is the only trust mode AMT's" >&2
+              echo "self-signed, bare-IP certificate supports, and unauthenticated TLS would" >&2
+              echo "let an on-path device impersonate the endpoint." >&2
+              exit 1
+            fi
+            echo "Credentials present for $(echo "${AMT_HOSTS:-$AMT_HOST}" | tr ',' '\n' | wc -l) endpoint(s)."
+
+  install-lab-ansible-venv:
+    description: >-
+      Install ansible-core 2.17 into a workspace virtualenv -- the runner is rootless with a
+      read-only root filesystem and ships Python 3.10 -- and build+install this collection
+      from the checkout, so qualification runs against the code under test, on the oldest
+      ansible-core series the collection claims to support.
+    steps:
+      - run:
+          name: Install ansible-core into a workspace virtualenv
+          command: |
+            python3 --version
+            python3 -m venv .venv
+            . .venv/bin/activate
+            python -m pip install --upgrade pip
+            python -m pip install "ansible-core~=2.17.0" -r requirements.txt
+            ansible --version
+      - run:
+          name: Install the collection from this checkout
+          command: |
+            . .venv/bin/activate
+            ansible-galaxy collection build --output-path ./dist --force
+            ansible-galaxy collection install ./dist/*.tar.gz --force
+
+  provision-test-media:
+    description: >-
+      Materialise the small bootable ISO (stage 5) and writable raw image (stage 6) that
+      tests/hardware/make-test-media.sh produces, entirely inside the workspace -- neither may
+      ever be committed (.gitignore blocks *.iso/*.img) -- and export their absolute paths so
+      the render-lab-inventory command below picks them up.
+    steps:
+      - run:
+          name: Provision local test media (ISO + writable image)
+          command: |
+            export AMT_TEST_ISO_PATH="$(pwd)/tests/hardware/media/ipxe-test.iso"
+            export AMT_TEST_IMAGE_PATH="$(pwd)/tests/hardware/media/writable-test.img"
+            ./tests/hardware/make-test-media.sh
+            echo "export AMT_TEST_ISO_PATH=${AMT_TEST_ISO_PATH}" >> "$BASH_ENV"
+            echo "export AMT_TEST_IMAGE_PATH=${AMT_TEST_IMAGE_PATH}" >> "$BASH_ENV"
+
+  render-lab-inventory:
+    description: >-
+      Render tests/hardware/inventory.yml from the amt-lab-runner context. Must run after
+      provision-test-media, when that command is used, so AMT_TEST_ISO_PATH/AMT_TEST_IMAGE_PATH
+      are already exported and render-inventory.sh picks them up.
+    steps:
+      - run:
+          name: Render the lab inventory from the context
+          command: |
+            ./tests/hardware/render-inventory.sh > tests/hardware/inventory.yml
+            # Safe to display: the renderer emits env lookups, not secret values, so the
+            # password and fingerprint never touch disk. Printing it makes a host/group
+            # mismatch obvious instead of silently matching 0 hosts.
+            cat tests/hardware/inventory.yml
+
+  remove-lab-inventory:
+    description: Remove the rendered inventory, always -- even on failure, so a resolvable secret lookup never lingers past the job that needed it.
+    steps:
+      - run:
+          name: Remove the rendered inventory
+          when: always
+          command: rm -f tests/hardware/inventory.yml
+
+  note-recovery-path-on-failure:
+    description: >-
+      On failure, point at the manual KVM/MEBx recovery path documented in
+      tests/hardware/README.md -- every stage 4-7 job can leave real hardware in a state that
+      needs a human to look at the console, and the next person debugging a red build should
+      not have to go hunting for that document.
+    steps:
+      - run:
+          name: If this failed, see the manual recovery path
+          when: on_fail
+          command: |
+            echo "This job mutates real hardware and can leave it in an uncertain state." >&2
+            echo "Manual recovery path: tests/hardware/README.md#if-a-machine-ends-up-in-a-bad-boot-state" >&2
+            echo "Evidence written before the failure (if any) is under tests/hardware/output/," >&2
+            echo "stored above as this job's hardware-evidence artifact." >&2
 
 jobs:
   # -------------------------------------------------------------------------
@@ -316,61 +441,9 @@ jobs:
       # Env vars rather than a committed vault: the runner host is the trust
       # boundary here, and a vault password would have to come from the context
       # anyway.
-      - run:
-          name: Verify the lab credentials were injected
-          command: |
-            missing=""
-            for var in AMT_HOST AMT_USERNAME AMT_PASSWORD; do
-              eval "val=\${$var:-}"
-              [ -n "$val" ] || missing="$missing $var"
-            done
-            if [ -n "$missing" ]; then
-              echo "Missing required context variables:$missing" >&2
-              echo "Add them to the amt-lab-runner context:" >&2
-              echo "  circleci context store-secret amt-lab-runner --org gh/james-crowley <NAME>" >&2
-              exit 1
-            fi
-            if [ -z "${AMT_TLS_FINGERPRINT:-}" ] && [ "${AMT_ALLOW_INSECURE:-false}" != "true" ]; then
-              echo "AMT_TLS_FINGERPRINT is not set." >&2
-              echo "Run the hardware-observe job, review the fingerprint it prints, then store it." >&2
-              echo "This refusal is deliberate: pinning is the only trust mode AMT's" >&2
-              echo "self-signed, bare-IP certificate supports, and unauthenticated TLS would" >&2
-              echo "let an on-path device impersonate the endpoint." >&2
-              exit 1
-            fi
-            echo "Credentials present for $(echo "${AMT_HOSTS:-$AMT_HOST}" | tr ',' '\n' | wc -l) endpoint(s)."
-      - run:
-          name: Install ansible-core into a workspace virtualenv
-          command: |
-            # A venv in the workspace rather than `pip install --user`: the runner
-            # is rootless and its workspace is the reliably writable location.
-            #
-            # Pinned to 2.17, not the 2.19 the Docker-based jobs use, because the
-            # runner image ships Python 3.10 and ansible-core 2.19 requires 3.11+
-            # on the controller. 2.17 is also this collection's declared floor
-            # (meta/runtime.yml), so hardware qualification runs against the
-            # oldest version we claim to support -- which is the version most
-            # likely to expose an incompatibility.
-            python3 --version
-            python3 -m venv .venv
-            . .venv/bin/activate
-            python -m pip install --upgrade pip
-            python -m pip install "ansible-core~=2.17.0" -r requirements.txt
-            ansible --version
-      - run:
-          name: Install the collection from this checkout
-          command: |
-            . .venv/bin/activate
-            ansible-galaxy collection build --output-path ./dist --force
-            ansible-galaxy collection install ./dist/*.tar.gz --force
-      - run:
-          name: Render the lab inventory from the context
-          command: |
-            ./tests/hardware/render-inventory.sh > tests/hardware/inventory.yml
-            # Safe to display: the renderer emits env lookups, not secret values,
-            # so the password and fingerprint never touch disk. Printing it makes
-            # a host/group mismatch obvious instead of silently matching 0 hosts.
-            cat tests/hardware/inventory.yml
+      - verify-lab-credentials
+      - install-lab-ansible-venv
+      - render-lab-inventory
       - run:
           name: "Stage 1: read-only AMT qualification"
           command: |
@@ -392,10 +465,138 @@ jobs:
       - store_artifacts:
           path: tests/hardware/output
           destination: hardware-evidence
+      - remove-lab-inventory
+      - note-recovery-path-on-failure
+
+  # -------------------------------------------------------------------------
+  # Hardware-in-the-loop, stage 4 (tests/hardware/qualify_power.yml): attended power on/off.
+  # Same five controls as hardware-tests above, PLUS its own approval gate
+  # (hardware-power-approval) escalating past hardware-tests's read-only/check-mode-only
+  # stages -- this job actually power-cycles the machine. amt_qualify_attended=false skips
+  # the playbook's interactive pauses, which would otherwise block forever on stdin the
+  # machine executor cannot supply; the approval gate is this job's real human checkpoint,
+  # and the approver is expected to already be watching the console before approving.
+  hardware-power:
+    machine: true
+    resource_class: crowley/amt-runner
+    steps:
+      - checkout
+      - verify-lab-credentials
+      - install-lab-ansible-venv
+      - render-lab-inventory
       - run:
-          name: Remove the rendered inventory
-          when: always
-          command: rm -f tests/hardware/inventory.yml
+          name: "Stage 4: attended power on/off (unattended in CI; the approval gate is the human checkpoint)"
+          command: |
+            . .venv/bin/activate
+            ansible-playbook tests/hardware/qualify_power.yml \
+              -i tests/hardware/inventory.yml -e amt_qualify_attended=false -v
+      - store_artifacts:
+          path: tests/hardware/output
+          destination: hardware-evidence
+      - remove-lab-inventory
+      - note-recovery-path-on-failure
+
+  # -------------------------------------------------------------------------
+  # Hardware-in-the-loop, stage 5 (tests/hardware/qualify_media_attach.yml): IDE-R attach with
+  # a small test ISO, confirming boot hand-off. Escalates past hardware-power behind its own
+  # approval gate. provision-test-media materialises tests/hardware/make-test-media.sh's ISO
+  # (iPXE's own ipxe.iso) before rendering the inventory, so amt_test_iso_path is populated.
+  #
+  # A green run here proves the attach-and-boot-handoff path accepted the media and issued a
+  # reset; it does NOT by itself prove the screen showed iPXE booting -- that still needs an
+  # operator (or the approver, in CI) watching the console. See the playbook's own header.
+  hardware-media:
+    machine: true
+    resource_class: crowley/amt-runner
+    steps:
+      - checkout
+      - verify-lab-credentials
+      - install-lab-ansible-venv
+      - provision-test-media
+      - render-lab-inventory
+      - run:
+          name: "Stage 5: IDE-R attach with a small test ISO (unattended in CI)"
+          command: |
+            . .venv/bin/activate
+            ansible-playbook tests/hardware/qualify_media_attach.yml \
+              -i tests/hardware/inventory.yml -e amt_qualify_attended=false -v
+      - store_artifacts:
+          path: tests/hardware/output
+          destination: hardware-evidence
+      - remove-lab-inventory
+      - note-recovery-path-on-failure
+
+  # -------------------------------------------------------------------------
+  # Hardware-in-the-loop, stage 6 (tests/hardware/qualify_writable_image.yml): writable-image
+  # test. Escalates past hardware-media behind its own approval gate.
+  #
+  # IMPORTANT: a green run here does NOT prove bytes were written to the device. With nothing
+  # booted on the target to issue SCSI writes (amt_qualify_attended=false skips the interactive
+  # "go write something now" pause), bytes_written=0 is the expected outcome every time this
+  # runs unattended in CI, and the playbook reports that as a legitimate result, not a
+  # failure. What this job DOES prove every run: the writable image is accepted and attached,
+  # and the device is presented to the guest as writable (MODE_SENSE write-protect bit
+  # cleared). See the playbook's own header for the full breakdown.
+  hardware-writable:
+    machine: true
+    resource_class: crowley/amt-runner
+    steps:
+      - checkout
+      - verify-lab-credentials
+      - install-lab-ansible-venv
+      - provision-test-media
+      - render-lab-inventory
+      - run:
+          name: "Stage 6: writable-image test (unattended in CI -- bytes_written=0 is expected)"
+          command: |
+            . .venv/bin/activate
+            ansible-playbook tests/hardware/qualify_writable_image.yml \
+              -i tests/hardware/inventory.yml -e amt_qualify_attended=false -v
+      - store_artifacts:
+          path: tests/hardware/output
+          destination: hardware-evidence
+      - remove-lab-inventory
+      - note-recovery-path-on-failure
+
+  # -------------------------------------------------------------------------
+  # Hardware-in-the-loop, stage 7 (tests/hardware/qualify_pxe.yml): one-time native PXE boot.
+  # The last and most escalated of the gated hardware jobs, behind its own approval gate.
+  #
+  # amt_pxe_prereqs_confirmed is wired to the pxe-prereqs-confirmed pipeline parameter
+  # (default false), NOT hardcoded true -- this attestation ("DHCP and a boot service already
+  # proven to work on this network, independently of AMT") has to be a fresh, informed
+  # decision made at trigger time, not a standing value baked into this file that nobody
+  # re-confirms. A pipeline triggered with only run-hardware-tests=true will reach this job
+  # and fail closed at that assertion, which is correct, not a bug.
+  #
+  # IMPORTANT: this job cannot verify netboot itself succeeds -- that depends on DHCP/TFTP/HTTP
+  # boot-service infrastructure this collection has no way to observe. What it DOES prove: the
+  # one-time PXE arm is accepted and reads back as armed, the reset is issued and the endpoint
+  # recovers, and AMT_BootSettingData is not left drifted or corrupted by the reset. See the
+  # playbook's own header for exactly what it cannot prove about the internal one-shot role
+  # bit either.
+  hardware-pxe:
+    machine: true
+    resource_class: crowley/amt-runner
+    steps:
+      - checkout
+      - verify-lab-credentials
+      - install-lab-ansible-venv
+      - render-lab-inventory
+      - run:
+          name: "Stage 7: one-time native PXE boot (unattended in CI)"
+          command: |
+            . .venv/bin/activate
+            ansible-playbook tests/hardware/qualify_pxe.yml \
+              -i tests/hardware/inventory.yml \
+              -e amt_qualify_attended=false \
+              -e amt_pxe_prereqs_confirmed=<< pipeline.parameters.pxe-prereqs-confirmed >> \
+              -v
+      - store_artifacts:
+          path: tests/hardware/output
+          destination: hardware-evidence
+      - remove-lab-inventory
+      - note-recovery-path-on-failure
 
   # -------------------------------------------------------------------------
   publish:
@@ -523,6 +724,67 @@ workflows:
           requires: [hardware-approval]
           # Restricted to this project only, so no other project in the org can
           # use the lab credentials it carries.
+          context: amt-lab-runner
+          filters:
+            branches:
+              only: main
+
+      # -----------------------------------------------------------------------
+      # Stages 4-7, escalating past hardware-tests's read-only/check-mode-only floor. Each one
+      # power-cycles, attaches media to, writes to, or PXE-boots real hardware, and each sits
+      # behind its OWN type: approval job -- deliberately not one approval covering all four,
+      # so a human confirms every escalation independently rather than one click green-lighting
+      # everything from "read a certificate" through "arm a native PXE boot." See each job's own
+      # comment above (and the corresponding playbook's header) for exactly what it proves and
+      # does not prove.
+
+      - hardware-power-approval:
+          type: approval
+          requires: [hardware-tests]
+          filters:
+            branches:
+              only: main
+      - hardware-power:
+          requires: [hardware-power-approval]
+          context: amt-lab-runner
+          filters:
+            branches:
+              only: main
+
+      - hardware-media-approval:
+          type: approval
+          requires: [hardware-power]
+          filters:
+            branches:
+              only: main
+      - hardware-media:
+          requires: [hardware-media-approval]
+          context: amt-lab-runner
+          filters:
+            branches:
+              only: main
+
+      - hardware-writable-approval:
+          type: approval
+          requires: [hardware-media]
+          filters:
+            branches:
+              only: main
+      - hardware-writable:
+          requires: [hardware-writable-approval]
+          context: amt-lab-runner
+          filters:
+            branches:
+              only: main
+
+      - hardware-pxe-approval:
+          type: approval
+          requires: [hardware-writable]
+          filters:
+            branches:
+              only: main
+      - hardware-pxe:
+          requires: [hardware-pxe-approval]
           context: amt-lab-runner
           filters:
             branches:
