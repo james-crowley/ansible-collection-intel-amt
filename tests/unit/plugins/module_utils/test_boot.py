@@ -375,3 +375,60 @@ class TestNoCredentialLeakage:
         assert TOKEN not in repr(result.put_properties)
         assert TOKEN not in repr(result.previous)
         assert TOKEN not in repr(result.observed)
+
+
+class TestGlobalCallInterleaving:
+    """The five-step sequence is a strict global ordering, not five independently
+    ordered call lists.
+
+    The other ordering test asserts each method's own call list, which cannot
+    catch a regression that (for example) moves the Put after SetBootConfigRole:
+    put would still be called once, and the invokes would still be in order.
+    Firmware rejects a wrong interleaving, so assert the interleaving itself.
+    """
+
+    def test_pxe_interleaving_is_exact(self):
+        client = _make_client()
+        parent = Mock()
+        parent.attach_mock(client.enumerate, "enumerate")
+        parent.attach_mock(client.get, "get")
+        parent.attach_mock(client.put, "put")
+        parent.attach_mock(client.invoke, "invoke")
+
+        boot.arm_one_time_boot(client, "pxe", action_token=TOKEN)
+
+        steps = []
+        for name, args, _kwargs in parent.mock_calls:
+            if name == "invoke":
+                steps.append(f"invoke:{args[1]}")
+            elif name == "enumerate":
+                steps.append(f"enumerate:{args[0]}")
+            else:
+                steps.append(name)
+
+        # Discovery must precede every mutation; ChangeBootOrder(null) must
+        # precede the Put; SetBootConfigRole must sit between the two
+        # ChangeBootOrder calls; the read-back Get comes last.
+        assert steps == [
+            "enumerate:AMT_BootCapabilities",
+            "enumerate:CIM_BootSourceSetting",
+            "get",
+            "invoke:ChangeBootOrder",
+            "put",
+            "invoke:SetBootConfigRole",
+            "invoke:ChangeBootOrder",
+            "get",
+        ], steps
+
+    def test_no_mutation_precedes_discovery_when_capability_is_absent(self):
+        # Fail-closed ordering: if discovery rejects the request, nothing may
+        # have been written first.
+        client = _make_client(capabilities={"ForcePXEBoot": "false", "IDER": "true"})
+        parent = Mock()
+        parent.attach_mock(client.put, "put")
+        parent.attach_mock(client.invoke, "invoke")
+
+        with pytest.raises(UnsupportedCapabilityError):
+            boot.arm_one_time_boot(client, "pxe", action_token=TOKEN)
+
+        assert parent.mock_calls == [], "a mutation was attempted before discovery rejected the request"
