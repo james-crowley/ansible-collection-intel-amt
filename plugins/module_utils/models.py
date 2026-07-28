@@ -82,11 +82,31 @@ class CallerSuppliedIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class AmtCapabilities:
+    """Firmware-discovered capability flags for ``amt_info``.
+
+    Every field here is derived from an actual WS-Man response (mainly
+    ``AMT_BootCapabilities``), never assumed from AMT generation or SKU. A
+    firmware that omits the backing class entirely degrades every flag here
+    to ``False`` rather than failing the whole facts read -- see
+    :meth:`client.AmtClient.get_facts`.
+    """
+
+    power: bool = False
+    boot_once_pxe: bool = False
+    sol: bool = False
+    storage_redirection: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class AmtFacts:
     """Firmware-observed evidence only. Every field here came from a WS-Man response.
 
-    Do not add a field for caller-supplied data (hostname, MAC, inventory
+    Do not add a field for *caller-supplied* data (hostname, MAC, inventory
     labels, ...) to this class -- see :class:`CallerSuppliedIdentity`.
+    ``reported_hostname`` is deliberately named to avoid that trap while still
+    surfacing it: it is what ``AMT_GeneralSettings`` itself reports, i.e.
+    firmware-observed evidence, not an inventory claim, so it belongs here.
     """
 
     version: str | None = None
@@ -94,6 +114,9 @@ class AmtFacts:
     control_mode: str | None = None
     provisioning_state: str | None = None
     power_state: PowerState | None = None
+    reported_hostname: str | None = None
+    capabilities: AmtCapabilities = field(default_factory=AmtCapabilities)
+    redirection: RedirectionState | None = None
 
 
 @dataclass(frozen=True, slots=True)

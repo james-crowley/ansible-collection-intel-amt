@@ -33,6 +33,11 @@ ignore = [
 # and come from an endpoint already authenticated via HTTP Digest before any
 # XML is parsed.
 "plugins/module_utils/wsman.py" = ["S314"]
+# Ansible module convention requires DOCUMENTATION/EXAMPLES/RETURN string
+# literals at the top of the file, before any import -- ansible-doc and the
+# sanity toolchain both depend on that ordering, so the imports that follow
+# are legitimately not at the top of the file.
+"plugins/modules/*.py" = ["E402"]
 # Tests use asserts and construct fixture data freely.
 "tests/**" = ["S101", "S105", "S106", "S311"]
 

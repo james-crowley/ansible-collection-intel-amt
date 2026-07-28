@@ -308,6 +308,11 @@ class WsmanClient:
             session=session,
         )
 
+    @property
+    def endpoint(self) -> str:
+        """The ``host:port`` this client talks to, for embedding in operation receipts."""
+        return self._endpoint
+
     def close(self) -> None:
         self._session.close()
 
