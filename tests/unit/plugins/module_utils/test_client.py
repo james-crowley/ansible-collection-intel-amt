@@ -108,7 +108,10 @@ class TestGetFacts:
         return {
             "AMT_GeneralSettings": {"HostName": "amt-host-07", "DomainName": "lab.example.com"},
             "AMT_SetupAndConfigurationService": {"ProvisioningState": "2", "ProvisioningMode": "1"},
-            "CIM_ComputerSystem": {"UUID": "4C4C4544-0000-0000-0000-000000000000"},
+            # PlatformGUID lives on CIM_ComputerSystemPackage. CIM_ComputerSystem
+            # has no UUID property at all, which is why reading it there returned
+            # None on every endpoint.
+            "CIM_ComputerSystemPackage": {"PlatformGUID": "4C4C4544-0000-0000-0000-000000000000"},
             "CIM_AssociatedPowerManagementService": {"PowerState": "2"},
             "AMT_BootCapabilities": {"IDER": "true", "SOL": "true", "ForcePXEBoot": "true"},
             "AMT_RedirectionService": {"EnabledState": "32771", "ListenerEnabled": "true"},
@@ -430,3 +433,58 @@ class TestAmtVersionSource:
     def test_non_dict_entries_are_skipped(self):
         client = self._client_with([None, "junk", {"InstanceID": "AMT", "VersionString": "12.0.0"}])
         assert client.get_facts().version == "12.0.0"
+
+
+class TestSystemUuidSource:
+    """The system UUID comes from CIM_ComputerSystemPackage.PlatformGUID.
+
+    It was previously read as ``UUID`` from ``CIM_ComputerSystem``, which has no
+    such property, so it was ``None`` on every endpoint. That silently disabled
+    the stage-2 identity cross-check -- the guard that stops a reset landing on
+    the wrong machine -- which is why this is tested rather than assumed.
+    """
+
+    @staticmethod
+    def _client_with(package):
+        wsman = _fake_wsman()
+
+        def _get(resource_class, **kwargs):
+            if resource_class == "CIM_ComputerSystemPackage":
+                if package is None:
+                    raise ProtocolError("class not implemented", endpoint="10.0.0.5:16993")
+                return package
+            return {}
+
+        wsman.get.side_effect = _get
+        return _client(wsman)
+
+    def test_uuid_read_from_platform_guid(self):
+        client = self._client_with({"PlatformGUID": "4C4C4544-0044-5310-8051-B3C04F464331"})
+        assert client.get_facts().uuid == "4C4C4544-0044-5310-8051-B3C04F464331"
+
+    def test_whitespace_is_stripped(self):
+        client = self._client_with({"PlatformGUID": "  4C4C4544-0044  "})
+        assert client.get_facts().uuid == "4C4C4544-0044"
+
+    def test_absent_property_degrades_to_none(self):
+        client = self._client_with({"SomethingElse": "x"})
+        assert client.get_facts().uuid is None
+
+    def test_empty_property_degrades_to_none(self):
+        # An empty string must not be reported as an identity: it would compare
+        # equal to another endpoint that also reported nothing.
+        client = self._client_with({"PlatformGUID": "   "})
+        assert client.get_facts().uuid is None
+
+    def test_absent_class_degrades_without_failing_the_whole_read(self):
+        client = self._client_with(None)
+        facts = client.get_facts()
+        assert facts.uuid is None
+        # The rest of facts gathering must still succeed.
+        assert facts.capabilities is not None
+
+    def test_computer_system_is_no_longer_consulted_for_uuid(self):
+        # Regression guard: reading UUID from CIM_ComputerSystem is what produced
+        # a permanently-null identity.
+        client = self._client_with({"PlatformGUID": "GOOD-GUID"})
+        assert client.get_facts().uuid == "GOOD-GUID"
