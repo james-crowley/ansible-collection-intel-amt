@@ -264,18 +264,6 @@ EXAMPLES = r"""
 """
 
 RETURN = r"""
-schema:
-  description: Always V(intel-amt-operation/v1).
-  type: str
-  returned: always
-action:
-  description: One of V(amt_media.attach) or V(amt_media.detach).
-  type: str
-  returned: always
-endpoint:
-  description: The redirection C(host:port) this session connects (or connected) to.
-  type: str
-  returned: always
 changed:
   description: >-
     For O(state=attached): V(true) only when a new background process was actually forked (or, in
@@ -336,10 +324,42 @@ error:
   description: The background process's own error message, when RV(session_state) is V(error).
   type: str
   returned: when session_state is error
-error_class:
-  description: A stable machine-readable failure class. Only present on failure.
-  type: str
-  returned: on failure
+operation:
+  description: >-
+    The C(intel-amt-operation/v1) receipt for this action, in the same nested shape every module
+    in this collection returns it under.
+  type: dict
+  returned: always
+  contains:
+    schema:
+      description: Always V(intel-amt-operation/v1).
+      type: str
+    action:
+      description: One of V(amt_media.attach) or V(amt_media.detach).
+      type: str
+    endpoint:
+      description: The redirection C(host:port) this session connects (or connected) to.
+      type: str
+    changed:
+      description: Mirrors the top-level RV(changed).
+      type: bool
+    previous:
+      description: The session state as read before this call, or V(null) when none existed.
+      type: dict
+    desired:
+      description: V(attached) or V(detached), whichever this call requested.
+      type: str
+    observed:
+      description: The session state as read (or, in check mode, assumed) after this call.
+      type: dict
+    tls_peer_fingerprint:
+      description: >-
+        SHA-256 fingerprint of the TLS leaf certificate observed during this session, or V(null)
+        over plaintext or before a connection was ever established.
+      type: str
+    error_class:
+      description: A stable machine-readable failure class. V(null) on success.
+      type: str
 """
 
 from ansible.module_utils.basic import AnsibleModule
@@ -482,6 +502,28 @@ def build_session_config(params: dict, *, session_id: str, port: int, specs: tup
     )
 
 
+def _finalize(receipt: OperationReceipt, *, session_id: str, fields: dict, **extra) -> dict:
+    """Assemble the module result: module-specific keys at the top level, the receipt nested.
+
+    ``fields`` (from :func:`_status_fields`) carries ``tls_peer_fingerprint`` purely so callers
+    of this helper can hand it straight to ``OperationReceipt`` -- it is deliberately not
+    re-exposed at the top level here, since it already lives in ``operation.tls_peer_fingerprint``
+    and this collection does not duplicate receipt fields outside the receipt (see issue #22).
+    """
+    return {
+        "changed": receipt.changed,
+        "session_id": session_id,
+        "session_state": fields["session_state"],
+        "pid": fields["pid"],
+        "bytes_read": fields["bytes_read"],
+        "bytes_written": fields["bytes_written"],
+        "devices": fields["devices"],
+        "error": fields["error"],
+        "operation": receipt.to_dict(),
+        **extra,
+    }
+
+
 def _status_fields(state: dict | None) -> dict:
     bytes_read, bytes_written = media_session.aggregate_bytes(state)
     return {
@@ -524,7 +566,7 @@ def _attach(module: AnsibleModule, params: dict, *, endpoint: str, port: int) ->
             observed=existing,
             tls_peer_fingerprint=fields["tls_peer_fingerprint"],
         )
-        return {**receipt.to_dict(), "session_id": session_id, **fields}
+        return _finalize(receipt, session_id=session_id, fields=fields)
 
     recovered_stale = existing is not None
     if recovered_stale:
@@ -544,7 +586,7 @@ def _attach(module: AnsibleModule, params: dict, *, endpoint: str, port: int) ->
             "tls_peer_fingerprint": None,
         }
         receipt = OperationReceipt(action="amt_media.attach", endpoint=endpoint, changed=True, previous=existing, desired="attached", observed=None)
-        return {**receipt.to_dict(), "session_id": session_id, "recovered_stale_session": recovered_stale, **fields}
+        return _finalize(receipt, session_id=session_id, fields=fields, recovered_stale_session=recovered_stale)
 
     config = build_session_config(params, session_id=session_id, port=port, specs=specs)
     media_session.spawn_session(config, username=params["username"], password=params["password"])
@@ -574,7 +616,7 @@ def _attach(module: AnsibleModule, params: dict, *, endpoint: str, port: int) ->
         observed=observed,
         tls_peer_fingerprint=fields["tls_peer_fingerprint"],
     )
-    return {**receipt.to_dict(), "session_id": session_id, "recovered_stale_session": recovered_stale, **fields}
+    return _finalize(receipt, session_id=session_id, fields=fields, recovered_stale_session=recovered_stale)
 
 
 def _detach(module: AnsibleModule, params: dict, *, endpoint: str) -> dict:
@@ -585,7 +627,7 @@ def _detach(module: AnsibleModule, params: dict, *, endpoint: str) -> dict:
     if existing is None:
         fields = _status_fields(None)
         receipt = OperationReceipt(action="amt_media.detach", endpoint=endpoint, changed=False, previous=None, desired="detached", observed=None)
-        return {**receipt.to_dict(), "session_id": session_id, **fields}
+        return _finalize(receipt, session_id=session_id, fields=fields)
 
     pid = existing.get("pid")
     live = media_session.is_pid_alive(pid)
@@ -593,7 +635,7 @@ def _detach(module: AnsibleModule, params: dict, *, endpoint: str) -> dict:
     if module.check_mode:
         fields = _status_fields(existing)
         receipt = OperationReceipt(action="amt_media.detach", endpoint=endpoint, changed=live, previous=existing, desired="detached", observed=existing)
-        return {**receipt.to_dict(), "session_id": session_id, **fields}
+        return _finalize(receipt, session_id=session_id, fields=fields)
 
     if not live:
         # Stale: nothing live to stop. Clean the file up so the id is usable again, but this was
@@ -601,7 +643,7 @@ def _detach(module: AnsibleModule, params: dict, *, endpoint: str) -> dict:
         media_session.remove_state(runtime_dir, session_id)
         fields = _status_fields(existing)
         receipt = OperationReceipt(action="amt_media.detach", endpoint=endpoint, changed=False, previous=existing, desired="detached", observed=existing)
-        return {**receipt.to_dict(), "session_id": session_id, "recovered_stale_session": True, **fields}
+        return _finalize(receipt, session_id=session_id, fields=fields, recovered_stale_session=True)
 
     media_session.request_stop(pid)
     exited = media_session.wait_for_exit(pid, timeout=float(params["detach_timeout"]))
@@ -624,7 +666,7 @@ def _detach(module: AnsibleModule, params: dict, *, endpoint: str) -> dict:
         observed=final_state,
         tls_peer_fingerprint=fields["tls_peer_fingerprint"],
     )
-    return {**receipt.to_dict(), "session_id": session_id, "exited_cleanly": exited, **fields}
+    return _finalize(receipt, session_id=session_id, fields=fields, exited_cleanly=exited)
 
 
 def main() -> None:

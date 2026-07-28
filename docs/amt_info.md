@@ -70,6 +70,22 @@ Everything is nested under a single `amt` key (`type: dict`, `returned: success`
 | `amt.redirection_status.listener_enabled` | `bool` | when available | `AMT_RedirectionService.ListenerEnabled`. |
 | `amt.redirection_status.ider_enabled` | `bool` | when available | Derived: `enabled_state` in `{32769, 32771}`. |
 | `amt.redirection_status.sol_enabled` | `bool` | when available | Derived: `enabled_state` in `{32770, 32771}`. |
+| `operation.schema` | `str` | always | Always `intel-amt-operation/v1`. |
+| `operation.action` | `str` | always | Always `get_facts`. |
+| `operation.endpoint` | `str` | always | `host:port` this read was performed against. |
+| `operation.changed` | `bool` | always | Always `false`. |
+| `operation.previous` | `null` | always | Always `null` — a read-only module has no prior state to report. |
+| `operation.desired` | `null` | always | Always `null` — a read-only module has no intended state to report. |
+| `operation.observed` | `null` | always | Always `null`. See `amt` above instead, which carries the actual observed facts; it is not duplicated here. |
+| `operation.tls_peer_fingerprint` | `str` or `null` | always | SHA-256 fingerprint of the TLS leaf certificate observed, or `null` over plaintext. |
+| `operation.error_class` | `str` or `null` | always | `null` on success; a stable machine-readable failure class on failure. |
+
+`amt_info` previously had neither the nested-`operation` shape nor the spread shape —
+see [Capability matrix](capability-matrix.md). It now gets the same `operation` receipt
+every other module in this collection returns, per issue #22, so that a caller can read
+`error_class`/`tls_peer_fingerprint` uniformly regardless of which module produced the
+result. `previous`/`desired`/`observed` are deliberately left `null` rather than
+populated with something invented for a module that has no mutation to describe.
 
 Note that `amt.capabilities` (what firmware *supports*, per `AMT_BootCapabilities`) and
 `amt.redirection_status` (what is currently *enabled*, per `AMT_RedirectionService`) are

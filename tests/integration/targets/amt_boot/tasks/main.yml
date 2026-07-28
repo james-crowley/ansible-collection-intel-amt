@@ -92,7 +92,9 @@
         that:
           - boot_check.changed == true
           - boot_check.device == 'pxe'
-          - boot_check.observed == boot_check.previous
+          - boot_check.operation.schema == 'intel-amt-operation/v1'
+          - boot_check.operation.action == 'amt_boot'
+          - boot_check.operation.observed == boot_check.operation.previous
 
     - name: Arm a one-time PXE boot for real -- exercises the read-only-field delete-list
       james_crowley.intel_amt.amt_boot:
@@ -113,7 +115,7 @@
         that:
           - boot_pxe.changed == true
           - boot_pxe.device == 'pxe'
-          - boot_pxe.observed.UseIDER == 'false'
+          - boot_pxe.operation.observed.UseIDER == 'false'
           - 'boot_pxe.boot_source_selector.InstanceID == "Intel(r) AMT: Force PXE Boot"'
 
     - name: Arm IDE-R floppy redirection over TLS with the mock's fingerprint pinned
@@ -136,7 +138,13 @@
           - boot_ider.changed == true
           - boot_ider.device == 'ider_floppy'
           - boot_ider.boot_source_selector is none
-          - boot_ider.observed.UseIDER == 'true'
+          - boot_ider.operation.observed.UseIDER == 'true'
+          # Not asserting a specific tls_peer_fingerprint value here: whether it is populated
+          # depends on requests/urllib3 internals that plugins/module_utils/tls.py's
+          # _peer_socket() duck-types against (see docs/capability-matrix.md); that is a
+          # pre-existing, unrelated behaviour this target does not re-litigate. The point of
+          # this assertion is only that the key still exists under `operation` -- issue #22.
+          - "'tls_peer_fingerprint' in boot_ider.operation"
 
     - name: Empty action_token is rejected before any mutation
       james_crowley.intel_amt.amt_boot:

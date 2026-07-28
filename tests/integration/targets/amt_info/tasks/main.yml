@@ -89,6 +89,17 @@
           - info_plain.amt.capabilities.sol == true
           - info_plain.amt.capabilities.boot_once_pxe == true
 
+    - name: Assert amt_info now carries a non-secret operation receipt, per collection issue 22
+      ansible.builtin.assert:
+        that:
+          - info_plain.operation.schema == 'intel-amt-operation/v1'
+          - info_plain.operation.action == 'get_facts'
+          - info_plain.operation.changed == false
+          - info_plain.operation.previous is none
+          - info_plain.operation.desired is none
+          - info_plain.operation.observed is none
+          - info_plain.operation.error_class is none
+
     - name: Idempotence -- reading again still reports changed=false
       james_crowley.intel_amt.amt_info:
         host: 127.0.0.1
@@ -143,6 +154,10 @@
           - info_tls.changed == false
           - info_tls.amt.reachable == true
           - info_tls.amt.hostname == 'mock-amt-host'
+          # Not asserting a specific value: whether tls_peer_fingerprint is populated depends
+          # on requests/urllib3 internals unrelated to issue #22 (see amt_boot's integration
+          # target for the same note). This only confirms the key exists under `operation`.
+          - "'tls_peer_fingerprint' in info_tls.operation"
 
     - name: Fault injection -- wrong password is refused with error_class=authentication
       james_crowley.intel_amt.amt_info:

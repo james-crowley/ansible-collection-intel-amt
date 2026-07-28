@@ -173,10 +173,10 @@
         - name: Confirm AMT_BootSettingData was not left drifted or corrupted by the reset
           ansible.builtin.assert:
             that:
-              - amt_boot_pxe_probe_after.observed.UseIDER == amt_baremetal_install_boot_result.observed.UseIDER
-              - amt_boot_pxe_probe_after.observed.IDERBootDevice == amt_baremetal_install_boot_result.observed.IDERBootDevice
-              - amt_boot_pxe_probe_after.observed.BootMediaIndex == amt_baremetal_install_boot_result.observed.BootMediaIndex
-              - amt_boot_pxe_probe_after.observed.BIOSSetup == amt_baremetal_install_boot_result.observed.BIOSSetup
+              - amt_boot_pxe_probe_after.operation.observed.UseIDER == amt_baremetal_install_boot_result.operation.observed.UseIDER
+              - amt_boot_pxe_probe_after.operation.observed.IDERBootDevice == amt_baremetal_install_boot_result.operation.observed.IDERBootDevice
+              - amt_boot_pxe_probe_after.operation.observed.BootMediaIndex == amt_baremetal_install_boot_result.operation.observed.BootMediaIndex
+              - amt_boot_pxe_probe_after.operation.observed.BIOSSetup == amt_baremetal_install_boot_result.operation.observed.BIOSSetup
             fail_msg: >-
               AMT_BootSettingData read back differently after the reset than it did right
               after arming. That is unexpected drift in fields this collection itself
@@ -214,9 +214,9 @@
     - name: Record evidence for this target
       ansible.builtin.copy:
         content: >-
-          {{ {'before_arm': amt_boot_pxe_probe_before.observed,
-              'armed': amt_baremetal_install_boot_result.observed,
-              'after_reset': amt_boot_pxe_probe_after.observed,
+          {{ {'before_arm': amt_boot_pxe_probe_before.operation.observed,
+              'armed': amt_baremetal_install_boot_result.operation.observed,
+              'after_reset': amt_boot_pxe_probe_after.operation.observed,
               'note': "before_arm/after_reset compare AMT_BootSettingData only -- neither reads the internal one-shot role bit; see this playbook header."}
              | to_nice_json }}
         dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_pxe.json"

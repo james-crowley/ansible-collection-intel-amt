@@ -122,6 +122,38 @@ class TestAttachFreshSession:
         assert config.port == 16994
         assert config.devices[0].device_code == media_session.ider.DEVICE_FLOPPY
 
+    def test_receipt_is_nested_under_operation_not_spread_at_top_level(self, runtime_dir, floppy_image):
+        # issue #22: the receipt lives under `operation`, never spread at the top level
+        # alongside module-specific keys like `session_id`/`session_state`/`devices`.
+        _set_module_args(_attach_args(runtime_dir=runtime_dir, floppy_image=floppy_image))
+        attached_state = {
+            "session_id": "will-be-overwritten",
+            "pid": 4242,
+            "state": "attached",
+            "error": None,
+            "tls_peer_fingerprint": "aa" * 32,
+            "devices": {"floppy": {"path": floppy_image, "writable": False, "size": 512, "bytes_read": 0, "bytes_written": 0}},
+        }
+        with (
+            patch("ansible_collections.james_crowley.intel_amt.plugins.module_utils.media_session.spawn_session", return_value=4242),
+            patch(
+                "ansible_collections.james_crowley.intel_amt.plugins.module_utils.media_session.wait_for_state",
+                return_value=attached_state,
+            ),
+        ):
+            with pytest.raises(AnsibleExitJson) as excinfo:
+                amt_media.main()
+        result = excinfo.value.kwargs
+        for moved_field in ("schema", "action", "endpoint", "previous", "desired", "observed"):
+            assert moved_field not in result, f"{moved_field!r} must not be spread at the top level; it belongs under operation"
+        # tls_peer_fingerprint in particular used to be spread at the top level (from the
+        # receipt) *and* duplicated via _status_fields -- it now lives only under operation.
+        assert "tls_peer_fingerprint" not in result
+        assert result["operation"]["schema"] == "intel-amt-operation/v1"
+        assert result["operation"]["action"] == "amt_media.attach"
+        assert result["operation"]["tls_peer_fingerprint"] == "aa" * 32
+        assert result["operation"]["error_class"] is None
+
     def test_generated_session_id_is_returned_for_a_later_detach(self, runtime_dir, floppy_image):
         _set_module_args(_attach_args(runtime_dir=runtime_dir, floppy_image=floppy_image))
         with (
