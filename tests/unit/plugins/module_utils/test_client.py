@@ -35,6 +35,11 @@ def _fake_wsman() -> Mock:
     wsman = Mock(spec_set=["get", "put", "enumerate", "invoke", "endpoint", "last_peer_certificate", "close"])
     wsman.endpoint = "10.0.0.5:16993"
     wsman.last_peer_certificate = None
+    # enumerate() returns list[dict] in the real client. Default it to an empty
+    # list rather than leaving a bare Mock, which is not iterable and makes any
+    # test that does not explicitly stub enumeration fail with a confusing
+    # TypeError from deep inside the code under test.
+    wsman.enumerate.return_value = []
     return wsman
 
 
@@ -87,9 +92,21 @@ class TestGetPowerState:
 
 
 class TestGetFacts:
+    #: Enumerated separately from the Get map: firmware version lives in
+    #: CIM_SoftwareIdentity, not in AMT_GeneralSettings (which has no version
+    #: property at all). The BIOS/AMTApps siblings are present because real
+    #: firmware returns them and the AMT instance must be selected exactly.
+    #: A tuple, not a list: an immutable fixture cannot be mutated by one test
+    #: and observed by the next.
+    _SOFTWARE_IDENTITY = (
+        {"InstanceID": "BIOS", "VersionString": "MYBDWi5v.86A.0059"},
+        {"InstanceID": "AMTApps", "VersionString": "11.8.50"},
+        {"InstanceID": "AMT", "VersionString": "11.8.50"},
+    )
+
     def _full_response_map(self) -> dict:
         return {
-            "AMT_GeneralSettings": {"HostName": "amt-host-07", "Version": "11.8.50"},
+            "AMT_GeneralSettings": {"HostName": "amt-host-07", "DomainName": "lab.example.com"},
             "AMT_SetupAndConfigurationService": {"ProvisioningState": "2", "ProvisioningMode": "1"},
             "CIM_ComputerSystem": {"UUID": "4C4C4544-0000-0000-0000-000000000000"},
             "CIM_AssociatedPowerManagementService": {"PowerState": "2"},
@@ -101,6 +118,7 @@ class TestGetFacts:
         wsman = _fake_wsman()
         responses = self._full_response_map()
         wsman.get.side_effect = lambda resource_class: responses[resource_class]
+        wsman.enumerate.side_effect = lambda resource_class, **kwargs: self._SOFTWARE_IDENTITY if resource_class == "CIM_SoftwareIdentity" else []
         client = _client(wsman)
 
         facts = client.get_facts()
@@ -359,3 +377,56 @@ class TestAmtClientAcceptsRealWsmanClient:
         client = AmtClient(wsman)
         assert client is not None
         wsman.close()
+
+
+class TestAmtVersionSource:
+    """Firmware version comes from CIM_SoftwareIdentity, not from
+    AMT_GeneralSettings or AMT_SetupAndConfigurationService.
+
+    Neither of those classes defines a version property -- verified against the
+    class definitions in device-management-toolkit/go-wsman-messages. An earlier
+    implementation read ``Version``/``VersionsSupported`` from them, so the
+    reported version was silently always None.
+    """
+
+    @staticmethod
+    def _client_with(instances):
+        wsman = Mock()
+        wsman.get.side_effect = lambda resource_class, **kwargs: {}
+        wsman.enumerate.side_effect = lambda resource_class, **kwargs: instances if resource_class == "CIM_SoftwareIdentity" else []
+        return AmtClient(wsman)
+
+    def test_version_read_from_the_amt_instance(self):
+        client = self._client_with(
+            [
+                {"InstanceID": "BIOS", "VersionString": "MYBDWi5v.86A.0059"},
+                {"InstanceID": "AMT", "VersionString": "11.8.50"},
+                {"InstanceID": "AMTApps", "VersionString": "11.8.50"},
+            ]
+        )
+        assert client.get_facts().version == "11.8.50"
+
+    def test_amt_instance_matched_exactly_not_by_substring(self):
+        # "AMTApps" contains "AMT". A substring match would return whichever
+        # instance the firmware happened to enumerate first.
+        client = self._client_with(
+            [
+                {"InstanceID": "AMTApps", "VersionString": "wrong-apps-version"},
+                {"InstanceID": "AMT", "VersionString": "16.1.25"},
+            ]
+        )
+        assert client.get_facts().version == "16.1.25"
+
+    def test_missing_amt_instance_degrades_to_none(self):
+        client = self._client_with([{"InstanceID": "BIOS", "VersionString": "x"}])
+        assert client.get_facts().version is None
+
+    def test_enumeration_failure_degrades_to_none(self):
+        wsman = Mock()
+        wsman.get.side_effect = lambda resource_class, **kwargs: {}
+        wsman.enumerate.side_effect = ProtocolError("class not implemented")
+        assert AmtClient(wsman).get_facts().version is None
+
+    def test_non_dict_entries_are_skipped(self):
+        client = self._client_with([None, "junk", {"InstanceID": "AMT", "VersionString": "12.0.0"}])
+        assert client.get_facts().version == "12.0.0"
