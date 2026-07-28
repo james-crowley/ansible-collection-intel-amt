@@ -1,0 +1,64 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Hardware qualification stage 5 (see README.md): IDE-R attach with a small
+# test ISO, confirming boot hand-off. This is also the first stage to
+# exercise roles/amt_baremetal_install/ against real firmware -- before this
+# runs for the first time on a given machine, make sure the manual recovery
+# path below is actually reachable (KVM console open, MEBx access confirmed).
+#
+# Not wired into CircleCI. Run manually, one host at a time, attended:
+#
+#   ansible-playbook tests/hardware/qualify_media_attach.yml \
+#     -i tests/hardware/inventory.yml -l <single-host> \
+#     -e amt_test_iso_path=/path/to/small-test.iso
+
+- name: "Hardware qualification stage 5: IDE-R attach with a small test ISO; confirm boot hand-off"
+  hosts: amt_targets
+  serial: 1
+  gather_facts: false
+  connection: local
+  vars:
+    amt_baremetal_install_confirm_destructive: true
+    amt_baremetal_install_boot_provider: ider_cdrom
+    amt_baremetal_install_iso_path: "{{ amt_test_iso_path }}"
+    amt_baremetal_install_wait_for_handoff: false
+
+  pre_tasks:
+    - name: Refuse to run against more than one host at a time
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+        fail_msg: "This stage resets real hardware and must run one machine at a time. Re-run with -l <single-host>."
+
+    - name: Require a test ISO path
+      ansible.builtin.assert:
+        that:
+          - amt_test_iso_path is defined and amt_test_iso_path | length > 0
+        fail_msg: >-
+          Set amt_test_iso_path (e.g. -e amt_test_iso_path=/path/to/small-test.iso)
+          to a small ISO you can visually confirm booting over KVM/console.
+          Never commit the ISO itself -- see the repository .gitignore.
+
+    - name: Pause for the operator to be watching the KVM/console before attaching media
+      ansible.builtin.pause:
+        prompt: >-
+          About to attach {{ amt_test_iso_path }} and reset
+          {{ inventory_hostname }}. Have the KVM console (e.g. MeshCentral)
+          open and watching before continuing. If this goes wrong, the
+          manual recovery path is in this directory's README.md
+
+  roles:
+    - james_crowley.intel_amt.amt_baremetal_install
+
+  post_tasks:
+    - name: Remind the operator to visually confirm boot hand-off
+      ansible.builtin.debug:
+        msg: >-
+          Reset issued and the postcondition probe ran. Visually confirm
+          over KVM/console that {{ inventory_hostname }} actually booted
+          from the attached ISO before treating this stage as passed --
+          amt_power and amt_media report protocol-level success, not what
+          the screen shows.

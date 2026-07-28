@@ -1,0 +1,19 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Distinct from tasks/observe.yml: that phase confirms AMT itself saw the
+# machine power back on, well before any OS or installer environment would
+# answer anything. This phase waits for whatever the freshly installed/booted
+# environment answers on -- SSH by default, but point amt_baremetal_install_handoff_port at
+# whatever is meaningful for your installer (e.g. an unattended installer's
+# own completion signal).
+
+- name: Wait for the installed/booted OS to answer, confirming hand-off
+  ansible.builtin.wait_for:
+    host: "{{ amt_baremetal_install_handoff_host }}"
+    port: "{{ amt_baremetal_install_handoff_port }}"
+    timeout: "{{ amt_baremetal_install_handoff_timeout }}"
+    delay: "{{ amt_baremetal_install_handoff_delay }}"
+  delegate_to: localhost

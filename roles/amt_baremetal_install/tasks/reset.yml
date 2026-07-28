@@ -1,0 +1,60 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# The destructive boundary. Everything before this point is reversible or
+# read-only; this is not. amt_power itself never retries a mutation (a
+# timeout after the request was sent is reported as `indeterminate`, per
+# plugins/module_utils/errors.py), and this role does not second-guess that:
+# any failure here -- indeterminate or otherwise -- is treated conservatively
+# as "the reset may have happened" and recorded before the error propagates,
+# so tasks/state.yml refuses to let a later re-run silently retry it.
+
+- name: Issue the reset
+  block:
+    - name: Issue the reset via amt_power
+      james_crowley.intel_amt.amt_power:
+        host: "{{ amt_baremetal_install_host }}"
+        port: "{{ amt_baremetal_install_port }}"
+        username: "{{ amt_baremetal_install_username }}"
+        password: "{{ amt_baremetal_install_password }}"
+        use_tls: "{{ amt_baremetal_install_use_tls }}"
+        allow_insecure_transport: "{{ amt_baremetal_install_allow_insecure_transport }}"
+        validate_certs: "{{ amt_baremetal_install_validate_certs }}"
+        ca_path: "{{ amt_baremetal_install_ca_path }}"
+        tls_fingerprint: "{{ amt_baremetal_install_tls_fingerprint }}"
+        timeout: "{{ amt_baremetal_install_timeout }}"
+        connect_timeout: "{{ amt_baremetal_install_connect_timeout }}"
+        state: reset
+      delegate_to: localhost
+      no_log: true
+      register: amt_baremetal_install_reset_result
+
+    - name: Record that the reset request was accepted
+      ansible.builtin.set_fact:
+        amt_baremetal_install_run_state: "{{ amt_baremetal_install_run_state | combine({'reset_issued': true}) }}"
+
+    - name: Persist run state after issuing the reset
+      ansible.builtin.include_tasks: save_state.yml
+  rescue:
+    - name: Record an uncertain reset outcome before re-raising
+      ansible.builtin.set_fact:
+        amt_baremetal_install_run_state: >-
+          {{ amt_baremetal_install_run_state | combine({'reset_issued': true,
+                                       'last_failure': 'amt_power state=reset failed or timed out; outcome uncertain'}) }}
+
+    - name: Persist the uncertain state immediately
+      ansible.builtin.include_tasks: save_state.yml
+
+    - name: Re-raise -- this role never retries a reset automatically
+      ansible.builtin.fail:
+        msg: >-
+          amt_power state=reset failed or timed out for {{ amt_baremetal_install_host }}. A
+          timeout after the request was sent is indistinguishable from a
+          reset that actually happened, so this run records
+          reset_issued=true and stops rather than guessing. A later run of
+          this role refuses to proceed automatically (see tasks/state.yml)
+          until a human confirms the machine's actual state via the manual
+          recovery path in tests/hardware/README.md and re-runs with
+          -e amt_baremetal_install_force_resume=true.

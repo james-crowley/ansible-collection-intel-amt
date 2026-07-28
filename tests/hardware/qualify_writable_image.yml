@@ -1,0 +1,137 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Hardware qualification stage 6 (see README.md): writable-image test --
+# confirm the floppy/USB-R device accepts writes and the bytes actually land
+# on disk. This stage is only partly automatable: something on the other end
+# of the IDE-R session (a booted rescue environment, an installer) has to
+# actually issue SCSI writes. The ansible.builtin.pause below is where that
+# happens; everything around it is automated checksum evidence.
+#
+# Not wired into CircleCI. Run manually, one host at a time, attended:
+#
+#   ansible-playbook tests/hardware/qualify_writable_image.yml \
+#     -i tests/hardware/inventory.yml -l <single-host> \
+#     -e amt_test_image_path=/path/to/small-test.img
+
+- name: "Hardware qualification stage 6: writable-image test"
+  hosts: amt_targets
+  serial: 1
+  gather_facts: false
+  connection: local
+  vars:
+    amt_output_dir: "{{ playbook_dir }}/output"
+
+  tasks:
+    - name: Refuse to run against more than one host at a time
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+        fail_msg: "This stage attaches real hardware's boot device and must run one machine at a time."
+
+    - name: Require a scratch writable test image path
+      ansible.builtin.assert:
+        that:
+          - amt_test_image_path is defined and amt_test_image_path | length > 0
+        fail_msg: >-
+          Set amt_test_image_path to a small, disposable raw image (size a
+          multiple of 512 bytes) you are prepared to have overwritten. Never
+          commit it -- see the repository .gitignore.
+
+    - name: Checksum the image before attaching
+      ansible.builtin.stat:
+        path: "{{ amt_test_image_path }}"
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      register: amt_before_checksum
+
+    - name: Enable IDE-R
+      james_crowley.intel_amt.amt_redirection:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+        state: ider
+      delegate_to: localhost
+      no_log: true
+
+    - name: Attach the writable test image on the floppy/USB-R slot
+      james_crowley.intel_amt.amt_media:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+        floppy: "{{ amt_test_image_path }}"
+        floppy_writable: true
+        state: attached
+      delegate_to: localhost
+      no_log: true
+      register: amt_media_write_test
+
+    - name: Pause while the operator (or a booted helper OS) writes a known pattern to the device
+      ansible.builtin.pause:
+        prompt: >-
+          IDE-R session {{ amt_media_write_test.session_id }} is attached.
+          From a booted environment that sees this as a block device, write a
+          known pattern (e.g. `dd if=/dev/urandom of=/dev/sdX bs=1M count=1`)
+          and press enter once done. This stage cannot prove writability
+          without something on the other end actually issuing SCSI writes
+
+    - name: Re-read the session's reported bytes_written
+      james_crowley.intel_amt.amt_media:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        session_id: "{{ amt_media_write_test.session_id }}"
+        state: attached
+      delegate_to: localhost
+      no_log: true
+      register: amt_media_write_status
+
+    - name: Detach
+      james_crowley.intel_amt.amt_media:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        session_id: "{{ amt_media_write_test.session_id }}"
+        state: detached
+      delegate_to: localhost
+      no_log: true
+
+    - name: Checksum the image after detaching
+      ansible.builtin.stat:
+        path: "{{ amt_test_image_path }}"
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      register: amt_after_checksum
+
+    - name: Confirm bytes actually landed on disk
+      ansible.builtin.assert:
+        that:
+          - amt_media_write_status.bytes_written | int > 0
+          - amt_after_checksum.stat.checksum != amt_before_checksum.stat.checksum
+        fail_msg: >-
+          No write was observed (bytes_written=
+          {{ amt_media_write_status.bytes_written }}, checksum unchanged).
+          Either nothing wrote to the device, or the write path has a real
+          bug -- do not qualify this stage until bytes visibly change on
+          disk.
+
+    - name: Ensure the evidence output directory exists
+      ansible.builtin.file:
+        path: "{{ amt_output_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+
+    - name: Record evidence for this target
+      ansible.builtin.copy:
+        content: >-
+          {{ {'checksum_before': amt_before_checksum.stat.checksum,
+              'checksum_after': amt_after_checksum.stat.checksum,
+              'write_status': amt_media_write_status} | to_nice_json }}
+        dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_writable_image.json"
+        mode: "0600"
+      delegate_to: localhost

@@ -1,0 +1,30 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Internal constants, not caller-facing knobs -- those live in defaults/main.yml.
+# vars/ has higher precedence than defaults/ specifically so a group_vars/host_vars
+# override of a defaults/ variable can never accidentally shadow one of these.
+
+# The two boot providers this role actually implements, and the amt_boot
+# `device` value each one maps to 1:1. Kept as one list/mapping pair so a new
+# provider is added in exactly one place.
+amt_baremetal_install_supported_providers:
+  - ider_cdrom
+  - pxe
+
+# Fresh, unattached, unarmed run state. Used both for a target with no prior
+# state file at all, and to reset state cleanly once a prior run's reset was
+# confirmed complete (see tasks/state.yml) -- a fully finished prior run's
+# session id refers to a session that has already been detached, so nothing
+# in it is worth carrying forward.
+amt_baremetal_install_default_state:
+  media_attached: false
+  session_id: null
+  boot_armed: false
+  action_token_issued_at: null
+  reset_issued: false
+  reset_confirmed: false
+  detached: true
+  last_failure: null

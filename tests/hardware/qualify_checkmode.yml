@@ -1,0 +1,70 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Hardware qualification stage 3 (see README.md): check-mode power and boot
+# plans. No mutation, gated on this actually running under --check -- see the
+# ansible_check_mode assertion below, which turns "someone forgot the flag"
+# into an immediate, loud failure instead of a real power action.
+#
+# This is the second stage wired into .circleci/config.yml's hardware-tests
+# job, which invokes it with `ansible-playbook ... --check`.
+#
+#   ansible-playbook tests/hardware/qualify_checkmode.yml \
+#     -i tests/hardware/inventory.yml --check -v
+
+- name: "Hardware qualification stage 3: check-mode power and boot plans (no mutation)"
+  hosts: amt_targets
+  gather_facts: false
+  connection: local
+  vars:
+    amt_output_dir: "{{ playbook_dir }}/output"
+
+  tasks:
+    - name: Refuse to continue unless check mode is actually active
+      ansible.builtin.assert:
+        that:
+          - ansible_check_mode
+        fail_msg: >-
+          qualify_checkmode.yml must only be run with `ansible-playbook
+          --check`. Refusing to continue because check mode is not active --
+          running the tasks below for real would defeat the entire point of
+          this stage.
+
+    - name: Preview a power-on transition
+      james_crowley.intel_amt.amt_power:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+        state: "on"
+      delegate_to: localhost
+      no_log: true
+      register: amt_power_plan
+
+    - name: Preview a one-time PXE boot arm (dummy token, never applied under --check)
+      james_crowley.intel_amt.amt_boot:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+        device: pxe
+        action_token: "hardware-qualify-checkmode-preview-only"
+      delegate_to: localhost
+      no_log: true
+      register: amt_boot_plan
+
+    - name: Ensure the evidence output directory exists
+      ansible.builtin.file:
+        path: "{{ amt_output_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+
+    - name: Record evidence for this target
+      ansible.builtin.copy:
+        content: "{{ {'power_plan': amt_power_plan, 'boot_plan': amt_boot_plan} | to_nice_json }}\n"
+        dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_checkmode.json"
+        mode: "0600"
+      delegate_to: localhost
