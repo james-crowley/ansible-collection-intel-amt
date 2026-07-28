@@ -249,6 +249,34 @@ class TestCheckMode:
         # The whole point of check mode: the mutating call is never made.
         fake_client.request_power_state.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "initial,state",
+        [
+            ("on", "off"),
+            ("on", "reset"),
+            ("on", "cycle"),
+            ("on", "reboot"),
+            ("off", "on"),
+        ],
+    )
+    def test_check_mode_never_mutates_from_any_starting_state(self, monkeypatch, initial, state):
+        """`off` is as destructive as `reset` and was absent from the case list above.
+
+        Parametrising over the starting state as well as the requested state
+        means every transition that would mutate is proven not to, rather than
+        only the ones reachable from a powered-off machine.
+        """
+        fake_client = _fake_client_at(initial)
+        _wire_fake_client(monkeypatch, fake_client)
+
+        args = dict(BASE_ARGS)
+        args["state"] = state
+        args["_ansible_check_mode"] = True
+        result = _run(args)
+
+        assert result["changed"] is True
+        fake_client.request_power_state.assert_not_called()
+
     def test_check_mode_on_an_already_converged_state_reports_no_change(self, monkeypatch):
         fake_client = _fake_client_at("on")
         _wire_fake_client(monkeypatch, fake_client)
