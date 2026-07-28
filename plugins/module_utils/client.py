@@ -134,6 +134,46 @@ def _truthy(value: Any) -> bool:
     return str(value).strip().lower() in ("true", "1", "yes")
 
 
+def _canonical_uuid(value: str) -> str:
+    """Render a platform GUID in the canonical dashed form an operator sees.
+
+    ``CIM_ComputerSystemPackage.PlatformGUID`` comes back as 32 undashed hex
+    characters, and the SMBIOS Type 1 UUID stores its **first three fields
+    little-endian**. Both facts matter, because the whole purpose of this value is
+    to be compared against the UUID a human reads in MEBx or BIOS.
+
+    Getting the byte order wrong is not a cosmetic problem: it produces something
+    that still looks like a UUID, so the identity cross-check would fail against a
+    correctly-recorded expectation and be quietly useless. On real AMT 16.1.30
+    firmware the two readings are::
+
+        naive big-endian     006467CC-B605-F011-8833-AD07FBD52200   version F
+        SMBIOS little-endian CC676400-05B6-11F0-8833-AD07FBD52200   version 1
+
+    A valid UUID version is 1-8, so the naive reading is demonstrably wrong while
+    remaining plausible. The unit tests assert the version nibble for exactly this
+    reason -- it is the cheap invariant that distinguishes the two.
+
+    Anything that is not 32 bare hex characters is returned unchanged: firmware
+    that already reports a dashed UUID must not be converted twice, and an
+    unexpected shape is better surfaced verbatim than mangled into a confident
+    lie. Never raises -- this is a fact, and facts degrade rather than failing the
+    whole read.
+    """
+    compact = value.replace("-", "")
+    if len(compact) != 32:
+        return value
+    try:
+        raw = bytes.fromhex(compact)
+    except ValueError:
+        return value
+    if "-" in value:
+        # Already canonical (or at least already dashed): assume the firmware did
+        # the field ordering and leave it alone.
+        return value.upper()
+    return (f"{raw[0:4][::-1].hex()}-{raw[4:6][::-1].hex()}-{raw[6:8][::-1].hex()}-{raw[8:10].hex()}-{raw[10:16].hex()}").upper()
+
+
 class AmtClient:
     """Facts and power control for one Intel AMT endpoint.
 
@@ -292,7 +332,9 @@ class AmtClient:
         if value is None:
             return None
         text = str(value).strip()
-        return text or None
+        if not text:
+            return None
+        return _canonical_uuid(text)
 
     # -- Power ------------------------------------------------------------------
 
