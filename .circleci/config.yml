@@ -342,13 +342,20 @@ jobs:
       - run:
           name: Install ansible-core into a workspace virtualenv
           command: |
-            # A venv in the workspace, not `pip install --user`: this runner is
-            # rootless with a read-only root filesystem, so the workspace is the
-            # only reliably writable location.
+            # A venv in the workspace rather than `pip install --user`: the runner
+            # is rootless and its workspace is the reliably writable location.
+            #
+            # Pinned to 2.17, not the 2.19 the Docker-based jobs use, because the
+            # runner image ships Python 3.10 and ansible-core 2.19 requires 3.11+
+            # on the controller. 2.17 is also this collection's declared floor
+            # (meta/runtime.yml), so hardware qualification runs against the
+            # oldest version we claim to support -- which is the version most
+            # likely to expose an incompatibility.
+            python3 --version
             python3 -m venv .venv
             . .venv/bin/activate
             python -m pip install --upgrade pip
-            python -m pip install "ansible-core~=2.19.0" -r requirements.txt
+            python -m pip install "ansible-core~=2.17.0" -r requirements.txt
             ansible --version
       - run:
           name: Install the collection from this checkout
