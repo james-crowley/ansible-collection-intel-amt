@@ -1,0 +1,169 @@
+ancestor: null
+releases:
+  0.1.0:
+    changes:
+      bugfixes:
+      - Collection staging derives its build root from the repository path, so concurrent
+        checkouts on one host no longer clobber each other's staged tree (https://github.com/james-crowley/ansible-collection-intel-amt/pull/14).
+      - Mock WS-Man fixture server - answer ``Enumerate`` for ``AMT_BootCapabilities``,
+        not only ``Get``. Unit tests mock enumeration directly, so this was invisible
+        until a real integration target sent a real ``Enumerate`` (https://github.com/james-crowley/ansible-collection-intel-amt/pull/20).
+      - 'README - fix the unattended-install example playbook referencing C(media.operation.session_id),
+        which does not exist: M(james_crowley.intel_amt.amt_media) returns RV(session_id)
+        at the top level of its result, not nested under an C(operation) key (that
+        nesting is specific to M(james_crowley.intel_amt.amt_power)). Corrected to
+        C(media.session_id) in both the boot-arming and detach tasks (https://github.com/james-crowley/ansible-collection-intel-amt/issues/10).'
+      - amt_info - report the AMT firmware version from ``CIM_SoftwareIdentity`` (the
+        instance whose ``InstanceID`` is ``AMT``, read from ``VersionString``). It
+        was previously read from ``AMT_GeneralSettings.Version`` and ``AMT_SetupAndConfigurationService.VersionsSupported``,
+        neither of which exists, so the reported version was always null (https://github.com/james-crowley/ansible-collection-intel-amt/issues/18).
+      - tests/integration/mock_servers/wsman_server.py - AMT_BootCapabilities now
+        answers Enumerate as well as Get. amt_boot's discover_and_validate() and redirection_service.py's
+        get_capabilities() both reach it via Enumerate+Pull (it has no natural instance
+        key for a Get SelectorSet); the mock only implemented the Get form used by
+        amt_info's facts-gathering path, which every prior unit test masked by mocking
+        WsmanClient.enumerate() directly instead of exercising this server (https://github.com/james-crowley/ansible-collection-intel-amt/issues/8).
+      minor_changes:
+      - Add C(CONTRIBUTING.md) documenting the local verification sequence, the C(scripts/setup-collection-tree.sh)
+        staging requirement (it copies rather than symlinks, and C(COLLECTION_BUILD_ROOT)
+        must be set when several checkouts stage concurrently), conventional commits,
+        the changelog-fragment requirement, and the two gates in front of hardware-in-the-loop
+        tests (https://github.com/james-crowley/ansible-collection-intel-amt/issues/10).
+      - Add C(docs/capability-matrix.md), distinguishing what is verified against
+        an authoritative firmware/reference source, what is only unit/mock tested,
+        and what has not been verified against real firmware at all, plus a firmware-generation
+        compatibility table marking inferred rows and the known open risks (issue
+        number 13's WS-Addressing EPR byte-form ambiguity, the reset-during-write
+        IDE-R deferral gap, Small Business Mode's hardware-verified lack of TLS, and
+        C(amt_media)'s C(validate_certs)/C(ca_path) divergence from the WS-Man modules)
+        (https://github.com/james-crowley/ansible-collection-intel-amt/issues/10).
+      - Add ``AmtClient``, the typed facts/power management API that ``amt_info``
+        and ``amt_power`` adapt to, built on the existing ``WsmanClient`` transport
+        (https://github.com/james-crowley/ansible-collection-intel-amt/issues/2, https://github.com/james-crowley/ansible-collection-intel-amt/issues/3).
+      - Add integration test targets for amt_info, amt_power, amt_boot, amt_redirection,
+        and amt_media, driving the real modules against the mock WS-Man and IDE-R
+        fixture servers over both plaintext and TLS with a pinned fingerprint, including
+        idempotence, check-mode, a per-module fault-injection case, and (for amt_media)
+        a multi-frame write verified byte-for-byte on disk (https://github.com/james-crowley/ansible-collection-intel-amt/issues/8).
+      - Add per-module reference pages under C(docs/) for M(james_crowley.intel_amt.amt_info),
+        M(james_crowley.intel_amt.amt_power), M(james_crowley.intel_amt.amt_boot),
+        M(james_crowley.intel_amt.amt_redirection), and M(james_crowley.intel_amt.amt_media),
+        each covering options, return values, examples, idempotence/check-mode behaviour,
+        error classes, and known limitations, verified against the argument specs
+        and rendered C(ansible-doc) output rather than written from memory (https://github.com/james-crowley/ansible-collection-intel-amt/issues/10).
+      - Add the ``amt_info`` module -- read-only capability and state discovery. Capabilities
+        (``power``, ``boot_once_pxe``, ``sol``, ``storage_redirection``) and redirection-service
+        status are discovered from live firmware responses; a firmware that omits
+        an optional WS-Man class degrades that capability to ``false``/unknown instead
+        of failing the whole read (https://github.com/james-crowley/ansible-collection-intel-amt/issues/2).
+      - Add the ``amt_power`` module -- convergent ``on``/``off``, imperative ``reboot``/``reset``/``cycle``,
+        and a non-mutating ``query`` state. A successful ``RequestPowerStateChange``
+        is polled a bounded, injectable number of times afterwards and reports what
+        was actually observed, since ``ReturnValue == 0`` means accepted, not complete
+        (https://github.com/james-crowley/ansible-collection-intel-amt/issues/3).
+      - Extend ``AmtFacts`` with ``reported_hostname``, ``capabilities``, and ``redirection``
+        fields (all firmware-observed, defaulted for backward compatibility) and add
+        the new ``AmtCapabilities`` dataclass, so facts-gathering has a typed home
+        for capability discovery without collapsing it into an untyped dict (https://github.com/james-crowley/ansible-collection-intel-amt/issues/2).
+      - Integration test targets for all five modules, driven against the deterministic
+        mock WS-Man and IDE-R fixture servers, including a case asserting that a multi-frame
+        write actually lands in the backing image (https://github.com/james-crowley/ansible-collection-intel-amt/pull/20).
+      - Native Python IDE-R engine, removing the need to shell out to MeshCmd/Node.js
+        for virtual media. Implements the redirection-plane handshake, RFC 2617 digest
+        over the binary framing, the IDE-R state machine, and SCSI target emulation
+        (https://github.com/james-crowley/ansible-collection-intel-amt/pull/14).
+      - TLS trust policy with two mutually exclusive modes -- CA chain plus hostname
+        verification, or exact SHA-256 leaf-certificate pinning implemented via urllib3's
+        ``assert_fingerprint`` so the pin authenticates the handshake itself (https://github.com/james-crowley/ansible-collection-intel-amt/pull/12).
+      - Typed result models including CIM power-state normalisation and the ``intel-amt-operation/v1``
+        operation receipt (https://github.com/james-crowley/ansible-collection-intel-amt/pull/12).
+      - WS-Man transport layer with SOAP envelope construction, HTTP Digest authentication,
+        Enumerate/Pull paging, and WS-Addressing endpoint references (https://github.com/james-crowley/ansible-collection-intel-amt/pull/12).
+      - Writable virtual media on the floppy/USB-R device slot, which the upstream
+        reference implementation does not support. The CD/DVD slot remains read-only
+        by design, so a bootable ISO and a writable image can be attached in the same
+        session (https://github.com/james-crowley/ansible-collection-intel-amt/pull/14).
+      - amt_boot - new module that arms a one-time boot device selection (``pxe``,
+        ``hdd``, ``cd``, ``bios``, ``ider_floppy``, ``ider_cdrom``) using the exact
+        five-step ``AMT_BootSettingData`` / ``CIM_BootConfigSetting`` / ``CIM_BootService``
+        sequence documented in this collection's protocol notes, with mandatory discovery
+        before any mutation and a required per-call ``action_token`` that is never
+        re-armed automatically (https://github.com/james-crowley/ansible-collection-intel-amt/pull/13).
+      - amt_media - new module attaching and detaching IDE-R virtual media, so a bootable
+        ISO and a writable answer-file image can be served to a bare-metal machine
+        in one session (https://github.com/james-crowley/ansible-collection-intel-amt/pull/20).
+      - amt_media - new module that attaches a bootable read-only ISO and/or a writable
+        answer image over IDE-R, and detaches a previously attached session. An IDE-R
+        session is a long-lived process, so ``state=attached`` forks a detached background
+        daemon that owns the connection, writes a small JSON state/receipt file keyed
+        by ``session_id``, and returns once that daemon has reported success or an
+        early failure; ``state=detached`` looks the daemon up by the recorded pid
+        and asks it to stop. Credentials reach the daemon only as in-memory arguments
+        across the fork -- never via argv or the environment, since no process is
+        ever spawned or exec'd (https://github.com/james-crowley/ansible-collection-intel-amt/issues/7).
+      - amt_redirection - new module that reports Intel AMT redirection-service support,
+        enablement, and TCP reachability as three separate signals, and optionally
+        mutates enablement via ``AMT_RedirectionService.RequestStateChange``; read-only
+        by default and never attaches or streams media (https://github.com/james-crowley/ansible-collection-intel-amt/pull/13).
+      - plugins/module_utils/boot.py - data-driven allow/deny-list Put-body construction
+        for ``AMT_BootSettingData``, deleting the fields newer firmware rejects when
+        echoed back and zeroing ``UefiBootNumberOfParams`` when present (https://github.com/james-crowley/ansible-collection-intel-amt/pull/13).
+      - 'plugins/module_utils/media_session.py - the detached-session lifecycle this
+        module builds on: double-fork daemonization, an atomically-written state file,
+        pid-liveness-based staleness recovery, and pre-spawn media validation shared
+        between check mode and real attach (https://github.com/james-crowley/ansible-collection-intel-amt/issues/7).'
+      - plugins/module_utils/redirection.py - add ``RedirectionSession.set_recv_timeout()``
+        (so a long-lived caller can wake periodically without busy-polling) and ``peer_certificate_sha256()``
+        (best-effort TLS peer fingerprint, mirroring ``tls.peer_certificate_evidence()``
+        for the WS-Man transport) (https://github.com/james-crowley/ansible-collection-intel-amt/issues/7).
+      - plugins/module_utils/redirection_service.py - WS-Man view of redirection-service
+        capability/enablement plus an injectable TCP reachability probe, kept separate
+        from the stateful IDE-R/SOL session transport (https://github.com/james-crowley/ansible-collection-intel-amt/pull/13).
+      security_fixes:
+      - IDE-R write payloads are bounded against the transfer length declared by the
+        WRITE CDB, and MediaImage refuses any write that would extend the backing
+        file. Previously a host could declare a small write, pass the bounds check,
+        then stream unbounded DATA_FROM_HOST frames at an advancing offset and grow
+        a local file (https://github.com/james-crowley/ansible-collection-intel-amt/pull/14).
+      - The insecure-transport gate is enforced in the ``WsmanClient`` constructor
+        rather than only in the convenience classmethod, so plaintext WS-Man cannot
+        be selected without explicitly setting ``allow_insecure_transport=true`` regardless
+        of which entry point is used (https://github.com/james-crowley/ansible-collection-intel-amt/pull/12).
+      - The redirection session refuses to downgrade to cleartext or cnonce-less digest
+        authentication, and verifies a pinned TLS leaf certificate before transmitting
+        any bytes (https://github.com/james-crowley/ansible-collection-intel-amt/pull/14).
+      - amt_media - require O(tls_fingerprint) when O(use_tls=true), and reject O(ca_path)
+        outright. The redirection plane is a raw TLS socket whose only trust mode
+        is leaf pinning; TLS without a pin is encrypted but unauthenticated, and silently
+        ignoring a supplied ca_path would leave an operator believing the session
+        was chain-validated (https://github.com/james-crowley/ansible-collection-intel-amt/pull/20).
+      - amt_media - session state files are created mode 0600 rather than at the umask
+        default, so they are not readable by other local users even when the runtime
+        directory already exists with laxer permissions (https://github.com/james-crowley/ansible-collection-intel-amt/pull/20).
+    fragments:
+    - 1-wsman-transport.yml
+    - 10-docs.yml
+    - 18-firmware-version-source.yml
+    - 2-boot-redirection.yml
+    - 2-client-info-power.yml
+    - 6-ider-engine.yml
+    - 7-amt-media-integration.yml
+    - 7-amt-media.yml
+    modules:
+    - description: Arm a one\-time boot device selection on an Intel AMT endpoint
+      name: amt_boot
+      namespace: ''
+    - description: Gather Intel AMT capability and state facts
+      name: amt_info
+      namespace: ''
+    - description: Attach or detach IDE\-R virtual media (bootable ISO and/or writable
+        image)
+      name: amt_media
+      namespace: ''
+    - description: Control and query Intel AMT power state
+      name: amt_power
+      namespace: ''
+    - description: Report and optionally toggle Intel AMT redirection\-service enablement
+      name: amt_redirection
+      namespace: ''
+    release_date: '2026-07-28'

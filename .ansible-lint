@@ -1,0 +1,40 @@
+---
+# ansible-lint configuration.
+#
+# This file was missing until the first real CI run, which is why `lint` failed
+# on it. Adding it deliberately rather than loosening the job: ansible-lint
+# caught a genuine bug in a documented example (`state: on`, which YAML parses
+# as the boolean true rather than the string "on"), so the rules earn their keep.
+
+profile: production
+
+exclude_paths:
+  # Generated or vendored, not authored Ansible content.
+  - .git/
+  - .circleci/
+  - dist/
+  - tests/output/
+  - .venv/
+  - licenses/
+  # Changelog fragments are antsibull-changelog's format, not Ansible content.
+  # Its convention is one long single line per entry, ending in a PR/issue URL,
+  # which unavoidably exceeds any sane line-length limit. `antsibull-changelog
+  # lint` is the correct validator for these and runs separately; ansible-lint
+  # scanning them only produces noise about a rule they cannot satisfy.
+  - changelogs/
+
+# Keep this list short and justified. Every entry is a rule we are choosing not
+# to enforce, so each one needs a reason that survives review.
+skip_list:
+  # Our own .yamllint sets line-length to 160 as a warning, deliberately: module
+  # DOCUMENTATION blocks and long resource URIs (the WS-Man schema URLs in
+  # particular) do not usefully wrap. yamllint still runs as its own CI step and
+  # is the authority on YAML style here.
+  - yaml[line-length]
+
+# Rules that must never be skipped, even if a future profile change would
+# otherwise relax them. yaml[truthy] is listed because it is what caught the
+# `state: on` bug: in YAML, bare on/off/yes/no become booleans, so an unquoted
+# option value silently becomes the wrong type for anyone copying the example.
+enable_list:
+  - yaml[truthy]

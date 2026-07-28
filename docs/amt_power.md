@@ -71,7 +71,7 @@ per-module summary).
     username: "{{ amt_username }}"
     password: "{{ amt_password }}"
     tls_fingerprint: "{{ amt_tls_fingerprint }}"
-    state: on
+    state: "on"
   delegate_to: localhost
   no_log: true
   register: power
