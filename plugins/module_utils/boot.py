@@ -58,11 +58,14 @@ _BOOT_SOURCE_INSTANCE_ID: dict[str, str] = {
 }
 
 #: AMT_BootCapabilities boolean field that must be true before mutating towards a given target.
-#: protocol-notes s2.5 says only "enumerate AMT_BootCapabilities to confirm IDER / ForcedPXE
-#: support rather than assuming" without listing every field name; the hdd/cd/bios field names
-#: here are this collection's best-effort mapping onto Intel's published AMT_BootCapabilities
-#: schema and have not been independently re-verified against real firmware output. Flagged for
-#: hardware verification -- see the PR description.
+#: All of these field names are verified: they appear in a recorded firmware response fixture,
+#: pkg/wsman/wsmantesting/responses/amt/boot/capabilities/get.xml in
+#: device-management-toolkit/go-wsman-messages. The full field table is in
+#: docs/protocol-notes.md s2.5.
+#:
+#: A field absent from a given firmware's response must be read as "not supported", never
+#: defaulted to true. That way a name that is wrong on some future generation fails closed --
+#: the module refuses the boot -- rather than arming a boot the firmware cannot perform.
 _CAPABILITY_FIELD_BY_TARGET: dict[str, str] = {
     "pxe": "ForcePXEBoot",
     "hdd": "ForceHardDriveBoot",
