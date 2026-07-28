@@ -207,6 +207,52 @@ class RedirectionSession:
     def recv(self, bufsize: int = _RECV_CHUNK) -> bytes:
         return self._connected_socket.recv(bufsize)
 
+    def set_recv_timeout(self, timeout: float | None) -> None:
+        """Set (or clear, with ``None``) a timeout on the underlying socket's ``recv``.
+
+        Not needed by the handshake itself (:meth:`connect` blocks until each expected
+        message arrives), but a long-lived caller that pumps :meth:`recv` in a loop --
+        such as ``amt_media``'s background session process -- needs a way to wake up
+        periodically (to check for a stop request, refresh a heartbeat, ...) without
+        busy-polling or blocking forever on a quiet connection. A timeout firing raises
+        the standard library's ``TimeoutError`` (``socket.timeout`` is an alias of it as
+        of Python 3.10), which the caller distinguishes from a real transport failure.
+        """
+        sock = self._connected_socket
+        settimeout = getattr(sock, "settimeout", None)
+        if settimeout is None:
+            raise ProtocolError(
+                "the connected socket does not support settimeout(); cannot set a recv timeout",
+                endpoint=self.endpoint,
+                secrets=self._password,
+            )
+        settimeout(timeout)
+
+    def peer_certificate_sha256(self) -> str | None:
+        """Best-effort SHA-256 fingerprint (hex) of the connected peer's TLS leaf certificate.
+
+        Returns ``None`` whenever the evidence is unavailable -- a plaintext connection,
+        a fake socket in tests, or any extraction failure -- exactly like
+        :func:`tls.peer_certificate_evidence`, whose duck-typed ``getpeercert`` access this
+        mirrors. This is diagnostic colour for an operation receipt, never something to
+        raise over, and it is intentionally independent of whether pinning was configured:
+        :meth:`_verify_tls_pin` already did the security-relevant comparison (if any) before
+        a single protocol byte was sent; this is only for a caller that wants to report what
+        was actually observed.
+        """
+        if self._sock is None:
+            return None
+        getpeercert = getattr(self._sock, "getpeercert", None)
+        if getpeercert is None:
+            return None
+        try:
+            der = getpeercert(binary_form=True)
+        except (ValueError, OSError):
+            return None
+        if not der:
+            return None
+        return hashlib.sha256(der).hexdigest()
+
     # -- socket plumbing -------------------------------------------------
 
     def _default_socket_factory(self, host: str, port: int, timeout: float) -> SocketLike:

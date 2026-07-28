@@ -473,8 +473,29 @@ def _boot_source_items(state: AmtState) -> list[str]:
     return items
 
 
+def _boot_capabilities_items(state: AmtState) -> list[str]:
+    """``Enumerate`` form of ``AMT_BootCapabilities``, sharing ``_get_boot_capabilities``'s
+    fields with the ``Get`` form (``GET_HANDLERS``) so both verbs report identically.
+
+    AMT_BootCapabilities has no natural instance key, so real WS-Man implementations
+    (and this collection's own client code -- ``plugins/module_utils/boot.py``'s
+    ``discover_and_validate()`` and ``plugins/module_utils/redirection_service.py``'s
+    ``get_capabilities()``) reach it via Enumerate+Pull, not Get with a SelectorSet.
+    ``plugins/module_utils/client.py``'s facts-gathering path (``amt_info``) happens to
+    use ``Get`` instead, which is why a ``GET_HANDLERS`` entry exists too -- this mock
+    must answer both verbs the same way, or a client written against one of them starts
+    failing the moment it is exercised against a real WS-Man endpoint's actual required
+    verb. Found via the ``amt_boot``/``amt_redirection`` integration targets: unit tests
+    mocking ``WsmanClient.enumerate()`` directly never exercised this mock server's own
+    ``Enumerate`` dispatch table for this resource, so the gap went unnoticed until a
+    real Enumerate request actually hit this server.
+    """
+    return [_fields_to_instance_xml(AMT_BOOT_CAPABILITIES, _get_boot_capabilities(state))]
+
+
 ENUMERATE_HANDLERS: dict[str, Callable[[AmtState], list[str]]] = {
     CIM_BOOT_SOURCE_SETTING: _boot_source_items,
+    AMT_BOOT_CAPABILITIES: _boot_capabilities_items,
 }
 
 
