@@ -1,0 +1,66 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Hardware qualification stage 7 (see README.md): one-time native firmware
+# PXE boot. This must only run after DHCP/boot-service prerequisites are
+# separately proven -- amt_info can confirm the firmware *supports* one-time
+# PXE (AMT_BootCapabilities.ForcePXEBoot), but has no way to confirm a
+# DHCP/TFTP/HTTP boot server actually answers on the target's network. The
+# amt_pxe_prereqs_confirmed gate below exists so that unproven prerequisite is
+# never silently assumed.
+#
+# Not wired into CircleCI. Run manually, one host at a time, attended, after
+# stages 1-4 have already qualified this machine and its network:
+#
+#   ansible-playbook tests/hardware/qualify_pxe.yml \
+#     -i tests/hardware/inventory.yml -l <single-host> \
+#     -e amt_pxe_prereqs_confirmed=true
+
+- name: "Hardware qualification stage 7: one-time native PXE boot"
+  hosts: amt_targets
+  serial: 1
+  gather_facts: false
+  connection: local
+  vars:
+    amt_baremetal_install_confirm_destructive: true
+    amt_baremetal_install_boot_provider: pxe
+    amt_baremetal_install_wait_for_handoff: false
+
+  pre_tasks:
+    - name: Refuse to run against more than one host at a time
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+        fail_msg: "This stage resets real hardware and must run one machine at a time."
+
+    - name: Require an explicit acknowledgement that DHCP/PXE boot-service prerequisites were proven separately
+      ansible.builtin.assert:
+        that:
+          - amt_pxe_prereqs_confirmed | default(false) | bool
+        fail_msg: >-
+          Stage 7 must only run after DHCP and the PXE boot service
+          (TFTP/HTTP boot server, whatever serves this network) have been
+          proven to work independently of AMT -- for example by netbooting a
+          machine manually on the same VLAN. Set
+          -e amt_pxe_prereqs_confirmed=true once you have done that; nothing
+          in this collection can verify a PXE server exists on your network,
+          and arming this boot selection without one just strands the
+          machine at a PXE ROM prompt.
+
+    - name: Pause for the operator to be watching the console before continuing
+      ansible.builtin.pause:
+        prompt: >-
+          About to arm one-time PXE boot and reset {{ inventory_hostname }}.
+          Have the console open before continuing
+
+  roles:
+    - james_crowley.intel_amt.amt_baremetal_install
+
+  post_tasks:
+    - name: Remind the operator to visually confirm PXE hand-off
+      ansible.builtin.debug:
+        msg: >-
+          Visually confirm over console that {{ inventory_hostname }}
+          actually entered PXE boot before treating this stage as passed.
