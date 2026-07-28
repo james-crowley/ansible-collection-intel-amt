@@ -1,0 +1,43 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+galaxy_info:
+  role_name: amt_baremetal_install
+  namespace: james_crowley
+  author: Jim Crowley (@james-crowley)
+  description: >-
+    Reusable lifecycle role for an unattended bare-metal OS install driven
+    entirely over Intel AMT: validate -> probe -> attach media -> arm
+    one-time boot -> reset -> observe -> wait for hand-off -> detach. Supports
+    both an IDE-R virtual-media boot provider and native one-time PXE boot.
+    Generic across arbitrary AMT endpoints -- no lab-specific hosts, IPs, or
+    machine names. See README.md for the Proxmox VE worked example.
+  license: GPL-3.0-or-later
+  min_ansible_version: "2.17"
+  # This role never executes anything on a managed node -- every task
+  # delegates to localhost, exactly like the modules it drives (see
+  # plugins/doc_fragments/connection.py). "Platforms" below therefore
+  # describes controllers this role has been exercised on, not targets.
+  platforms:
+    - name: EL
+      versions: [all]
+    - name: Ubuntu
+      versions: [all]
+    - name: Debian
+      versions: [all]
+    - name: Fedora
+      versions: [all]
+    - name: MacOSX
+      versions: [all]
+  galaxy_tags:
+    - intel
+    - amt
+    - vpro
+    - ider
+    - baremetal
+    - provisioning
+    - outofband
+
+dependencies: []

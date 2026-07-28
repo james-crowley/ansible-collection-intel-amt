@@ -1,0 +1,101 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# ---------------------------------------------------------------------------
+# Connection options. These map 1:1 onto the shared `connection` doc fragment
+# every module in this collection extends (plugins/doc_fragments/connection.py).
+# amt_baremetal_install_password and amt_baremetal_install_tls_fingerprint have no default on purpose: a missing
+# required value must fail loudly in tasks/validate.yml, not coerce silently.
+# ---------------------------------------------------------------------------
+amt_baremetal_install_host: "{{ inventory_hostname }}"
+amt_baremetal_install_port: null
+amt_baremetal_install_username: admin
+amt_baremetal_install_password: null
+amt_baremetal_install_use_tls: true
+amt_baremetal_install_allow_insecure_transport: false
+amt_baremetal_install_validate_certs: true
+amt_baremetal_install_ca_path: null
+amt_baremetal_install_tls_fingerprint: null
+amt_baremetal_install_timeout: 30
+amt_baremetal_install_connect_timeout: 10
+
+# ---------------------------------------------------------------------------
+# The single most important variable in this role. Must be explicitly set to
+# `true` (e.g. `-e amt_baremetal_install_confirm_destructive=true`) or the role refuses to go
+# past validation -- see tasks/validate.yml.
+# ---------------------------------------------------------------------------
+amt_baremetal_install_confirm_destructive: false
+
+# ---------------------------------------------------------------------------
+# Which one-time boot provider arms the destructive reset.
+#
+#   ider_cdrom - boot from IDE-R virtual media this role attaches (the
+#                Proxmox VE worked example in README.md). Requires
+#                amt_baremetal_install_iso_path and/or amt_baremetal_install_answer_image_path.
+#   pxe        - arm native one-time PXE boot. Skips the media phase
+#                entirely. Requires DHCP/boot-service prerequisites this
+#                role cannot verify -- see tests/hardware/README.md stage 7.
+#
+# Native PXE and IDE-R boot are mutually exclusive by firmware construction
+# (see amt_boot's DOCUMENTATION): selecting one boot source overrides the
+# other's redirection. This role therefore requires exactly one explicit
+# choice and rejects anything else rather than guessing -- see
+# tasks/validate.yml.
+# ---------------------------------------------------------------------------
+amt_baremetal_install_boot_provider: ider_cdrom
+
+# --- amt_baremetal_install_boot_provider: ider_cdrom -----------------------------------------
+# Bootable ISO for the read-only CD/DVD slot. The CD/DVD slot is read-only by
+# firmware design; there is no writable option for it anywhere in this role
+# or the amt_media module it drives.
+amt_baremetal_install_iso_path: null
+# Raw image for the writable floppy/USB-R slot -- the only slot that can ever
+# be opened writable. This is where an unattended installer's answer file
+# (e.g. Proxmox VE's answer.toml) lives.
+amt_baremetal_install_answer_image_path: null
+amt_baremetal_install_answer_image_writable: true
+amt_baremetal_install_media_start_mode: on_reboot
+amt_baremetal_install_media_allowed_directory: null
+amt_baremetal_install_media_runtime_dir: ~/.ansible/intel_amt/media-sessions
+amt_baremetal_install_media_attach_timeout: 10
+amt_baremetal_install_media_detach_timeout: 15
+
+# --- amt_baremetal_install_boot_provider: pxe -------------------------------------------------
+# (no extra variables -- native PXE needs nothing beyond amt_baremetal_install_boot_provider:
+# pxe and a working DHCP/PXE boot service on the target's network, which this
+# role cannot verify on your behalf.)
+
+# ---------------------------------------------------------------------------
+# Postcondition wait: whether/how long to wait for something to answer on the
+# target after the reset, before declaring hand-off complete. Point this at
+# whatever the freshly installed/booted OS answers on (SSH by default).
+# ---------------------------------------------------------------------------
+amt_baremetal_install_wait_for_handoff: true
+amt_baremetal_install_handoff_host: "{{ amt_baremetal_install_host }}"
+amt_baremetal_install_handoff_port: 22
+amt_baremetal_install_handoff_timeout: 3600
+amt_baremetal_install_handoff_delay: 120
+
+# Bounded power-state postcondition probing immediately after the reset,
+# mirroring amt_power's own bounded, non-retrying probe contract. This is
+# separate from amt_baremetal_install_wait_for_handoff: it only confirms AMT itself observed the
+# machine come back on, well before an OS or installer would answer anything.
+amt_baremetal_install_observe_retries: 5
+amt_baremetal_install_observe_delay: 10
+
+# ---------------------------------------------------------------------------
+# Resumability. One JSON state file per target, so re-running this role after
+# an interruption can tell what a prior, incomplete run already did instead of
+# blindly re-arming one-time boot or re-issuing a reset of uncertain outcome.
+# See tasks/state.yml and README.md#resumability.
+# ---------------------------------------------------------------------------
+amt_baremetal_install_state_dir: ~/.ansible/intel_amt/baremetal-install
+
+# Explicit human acknowledgement required to proceed past a prior run left in
+# an uncertain state (boot armed and/or reset issued with no confirmed
+# postcondition). Never set this from automation -- only after a human has
+# checked the machine's actual state via the manual recovery path in
+# tests/hardware/README.md.
+amt_baremetal_install_force_resume: false

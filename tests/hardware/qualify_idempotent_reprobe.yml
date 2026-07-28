@@ -1,0 +1,87 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Hardware qualification stage 8 (see README.md): idempotent re-probe. Reads
+# only -- confirms amt_info still reports changed=false and that two
+# consecutive amt_redirection reads agree, which is what catches a session
+# left attached from an earlier stage that is still quietly changing state
+# underneath a supposedly read-only check.
+#
+# Not wired into CircleCI. Run manually, after every earlier stage a target
+# has gone through:
+#
+#   ansible-playbook tests/hardware/qualify_idempotent_reprobe.yml \
+#     -i tests/hardware/inventory.yml -l <single-host>
+
+- name: "Hardware qualification stage 8: idempotent re-probe"
+  hosts: amt_targets
+  gather_facts: false
+  connection: local
+  vars:
+    amt_output_dir: "{{ playbook_dir }}/output"
+
+  tasks:
+    - name: Re-read AMT capabilities and state
+      james_crowley.intel_amt.amt_info:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+      delegate_to: localhost
+      no_log: true
+      register: amt_reprobe
+
+    - name: Confirm this read reports changed=false, as amt_info always must
+      ansible.builtin.assert:
+        that:
+          - not amt_reprobe.changed
+        fail_msg: >-
+          amt_info reported changed={{ amt_reprobe.changed }}; a read-only
+          module must never report changed=true.
+
+    - name: Read redirection status once
+      james_crowley.intel_amt.amt_redirection:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+      delegate_to: localhost
+      no_log: true
+      register: amt_redirection_reprobe_1
+
+    - name: Read redirection status again immediately
+      james_crowley.intel_amt.amt_redirection:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+      delegate_to: localhost
+      no_log: true
+      register: amt_redirection_reprobe_2
+
+    - name: Confirm the two reads agree
+      ansible.builtin.assert:
+        that:
+          - amt_redirection_reprobe_1.enabled == amt_redirection_reprobe_2.enabled
+          - amt_redirection_reprobe_1.supported == amt_redirection_reprobe_2.supported
+        fail_msg: >-
+          Two consecutive read-only amt_redirection calls disagreed. That
+          points at a flaky WS-Man read, or a session left attached from an
+          earlier stage that is still changing state -- investigate before
+          qualifying this machine as done.
+
+    - name: Ensure the evidence output directory exists
+      ansible.builtin.file:
+        path: "{{ amt_output_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+
+    - name: Record evidence for this target
+      ansible.builtin.copy:
+        content: "{{ {'info': amt_reprobe.amt, 'redirection': amt_redirection_reprobe_2} | to_nice_json }}\n"
+        dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_idempotent_reprobe.json"
+        mode: "0600"
+      delegate_to: localhost

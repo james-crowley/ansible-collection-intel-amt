@@ -1,0 +1,48 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# By the time this file runs, amt_baremetal_install_run_state.boot_armed is always false: either
+# this is a fresh run, or tasks/state.yml already cleared it (either because a
+# prior run's reset_confirmed was true -- fully completed, clean slate -- or
+# because the operator explicitly set amt_baremetal_install_force_resume=true after manually
+# confirming the machine's actual state). There is deliberately no branch here
+# that re-arms using a token from a previous attempt: every arm gets a brand
+# new token, generated fresh, exactly once, right before it is used.
+
+- name: Generate a fresh one-time boot action token
+  ansible.builtin.set_fact:
+    amt_baremetal_install_boot_action_token: "{{ lookup('ansible.builtin.password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+  no_log: true
+
+- name: Map the selected boot provider onto amt_boot's device option
+  ansible.builtin.set_fact:
+    amt_baremetal_install_boot_device: "{{ amt_baremetal_install_boot_provider }}"
+
+- name: Arm the one-time boot selection
+  james_crowley.intel_amt.amt_boot:
+    host: "{{ amt_baremetal_install_host }}"
+    port: "{{ amt_baremetal_install_port }}"
+    username: "{{ amt_baremetal_install_username }}"
+    password: "{{ amt_baremetal_install_password }}"
+    use_tls: "{{ amt_baremetal_install_use_tls }}"
+    allow_insecure_transport: "{{ amt_baremetal_install_allow_insecure_transport }}"
+    validate_certs: "{{ amt_baremetal_install_validate_certs }}"
+    ca_path: "{{ amt_baremetal_install_ca_path }}"
+    tls_fingerprint: "{{ amt_baremetal_install_tls_fingerprint }}"
+    timeout: "{{ amt_baremetal_install_timeout }}"
+    connect_timeout: "{{ amt_baremetal_install_connect_timeout }}"
+    device: "{{ amt_baremetal_install_boot_device }}"
+    mode: once
+    action_token: "{{ amt_baremetal_install_boot_action_token }}"
+  delegate_to: localhost
+  no_log: true
+  register: amt_baremetal_install_boot_result
+
+- name: Record that the boot selection is armed
+  ansible.builtin.set_fact:
+    amt_baremetal_install_run_state: "{{ amt_baremetal_install_run_state | combine({'boot_armed': true, 'action_token_issued_at': now(utc=true) | string}) }}"
+
+- name: Persist run state after arming boot
+  ansible.builtin.include_tasks: save_state.yml

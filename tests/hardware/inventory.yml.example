@@ -1,0 +1,43 @@
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Template for tests/hardware/inventory.yml, which is gitignored (see the
+# repository .gitignore) and must never be committed. Copy this file to
+# tests/hardware/inventory.yml and replace every value below with your own
+# lab's real hostnames, AMT addresses, and (on the self-hosted runner)
+# environment-sourced credentials.
+#
+# The values here are deliberately fake: the hostnames are under the
+# .invalid TLD (RFC 2606) and the addresses are in the TEST-NET-3 documentation
+# range (203.0.113.0/24, RFC 5737) -- neither resolves or routes anywhere.
+#
+# Real credentials, passwords, and TLS fingerprints come from the self-hosted
+# runner's environment (see docs/testing.md's "Runner setup" section), never
+# from this file or from group_vars/host_vars committed to the repository.
+#
+# amt_expected_uuid on each host is filled in only *after* stage 1-2
+# (tests/hardware/qualify_readonly.yml) has run once and a human has reviewed
+# the firmware-reported UUID against the physical machine. Leaving it unset
+# is fine for a machine's very first qualification run; the identity
+# cross-check in qualify_readonly.yml is a no-op until it is present.
+
+all:
+  children:
+    amt_targets:
+      hosts:
+        amt-lab-node-1.example.invalid:
+          amt_host: 203.0.113.10
+          # amt_expected_uuid: "00000000-0000-0000-0000-000000000001"
+        amt-lab-node-2.example.invalid:
+          amt_host: 203.0.113.11
+          # amt_expected_uuid: "00000000-0000-0000-0000-000000000002"
+      vars:
+        amt_username: "{{ lookup('ansible.builtin.env', 'AMT_USERNAME') | default('admin', true) }}"
+        amt_password: "{{ lookup('ansible.builtin.env', 'AMT_PASSWORD') }}"
+        amt_tls_fingerprint: "{{ lookup('ansible.builtin.env', 'AMT_TLS_FINGERPRINT') }}"
+        # Stage 5/6 only -- point at small, disposable test media you are
+        # prepared to have the firmware read from / write to. Never commit
+        # the images themselves (see .gitignore's *.iso / *.img rules).
+        amt_test_iso_path: "{{ lookup('ansible.builtin.env', 'AMT_TEST_ISO_PATH') }}"
+        amt_test_image_path: "{{ lookup('ansible.builtin.env', 'AMT_TEST_IMAGE_PATH') }}"

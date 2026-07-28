@@ -1,0 +1,94 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Hardware qualification stage 4 (see README.md): attended power on/off.
+# "Attended" means a human is watching the machine (console/KVM) while this
+# runs -- the ansible.builtin.pause prompts below exist specifically to force
+# that, rather than trusting AMT's own report of what happened.
+#
+# Not wired into CircleCI. Run manually, one host at a time:
+#
+#   ansible-playbook tests/hardware/qualify_power.yml \
+#     -i tests/hardware/inventory.yml -l <single-host>
+
+- name: "Hardware qualification stage 4: attended power on/off"
+  hosts: amt_targets
+  serial: 1
+  gather_facts: false
+  connection: local
+  vars:
+    amt_output_dir: "{{ playbook_dir }}/output"
+
+  tasks:
+    - name: Refuse to run against more than one host at a time
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+        fail_msg: >-
+          This stage power-cycles real hardware and must be attended one
+          machine at a time. Re-run with -l <single-host>.
+
+    - name: Query current power state
+      james_crowley.intel_amt.amt_power:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+        state: query
+      delegate_to: localhost
+      no_log: true
+      register: amt_before
+
+    - name: Pause for the operator to confirm they are watching this machine
+      ansible.builtin.pause:
+        prompt: >-
+          About to power-cycle {{ inventory_hostname }} ({{ amt_host }}),
+          currently {{ amt_before.previous_state.normalized }}. Confirm you
+          are watching this machine (console/KVM) and press enter to
+          continue, or Ctrl-C then A to abort
+
+    - name: Power on
+      james_crowley.intel_amt.amt_power:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+        state: "on"
+      delegate_to: localhost
+      no_log: true
+      register: amt_on
+
+    - name: Pause for the operator to visually confirm power-on
+      ansible.builtin.pause:
+        prompt: "Confirm the machine actually powered on, then press enter"
+
+    - name: Power off
+      james_crowley.intel_amt.amt_power:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+        state: "off"
+      delegate_to: localhost
+      no_log: true
+      register: amt_off
+
+    - name: Pause for the operator to visually confirm power-off
+      ansible.builtin.pause:
+        prompt: "Confirm the machine actually powered off, then press enter"
+
+    - name: Ensure the evidence output directory exists
+      ansible.builtin.file:
+        path: "{{ amt_output_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+
+    - name: Record evidence for this target
+      ansible.builtin.copy:
+        content: "{{ {'before': amt_before, 'on': amt_on, 'off': amt_off} | to_nice_json }}\n"
+        dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_power.json"
+        mode: "0600"
+      delegate_to: localhost

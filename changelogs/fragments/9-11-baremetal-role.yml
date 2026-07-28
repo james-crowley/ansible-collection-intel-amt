@@ -1,0 +1,21 @@
+---
+minor_changes:
+  - >-
+    roles/amt_baremetal_install - new reusable role that drives a complete unattended bare-metal install
+    lifecycle (validate -> probe -> attach media -> arm one-time boot -> reset -> observe -> wait for
+    hand-off -> detach) on top of amt_info, amt_power, amt_boot, amt_redirection, and amt_media. Asserts
+    the play targets exactly one host (delegate_to: localhost does not stop inventory fan-out), requires
+    an explicit confirm_destructive=true before doing anything destructive, runs preflight capability
+    checks via amt_info before any mutation, persists resumability state per target so an interrupted run
+    never blindly re-arms one-time boot or re-issues a reset of uncertain outcome, and always detaches
+    media via block/rescue/always even on failure. Supports both an ider_cdrom (IDE-R virtual media) and
+    a native pxe boot provider, mutually exclusive by construction
+    (https://github.com/james-crowley/ansible-collection-intel-amt/issues/9).
+  - >-
+    tests/hardware - add the eight-stage hardware qualification playbooks (qualify_readonly,
+    qualify_checkmode, qualify_power, qualify_media_attach, qualify_writable_image, qualify_pxe,
+    qualify_idempotent_reprobe), an inventory.yml.example with obviously fake values, and a README
+    documenting the gating, staged ordering rationale, and the manual KVM/MEBx recovery path to keep
+    reachable before running the media-attach stage for the first time. qualify_readonly.yml and
+    qualify_checkmode.yml are the two filenames the CircleCI hardware workflow already references
+    (https://github.com/james-crowley/ansible-collection-intel-amt/issues/11).

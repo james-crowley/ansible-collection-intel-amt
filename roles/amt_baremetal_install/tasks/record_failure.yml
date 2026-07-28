@@ -1,0 +1,19 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Runs from tasks/main.yml's `rescue` block. ansible_failed_result is only
+# populated inside a rescue block, and only once amt_baremetal_install_run_state exists (i.e.
+# tasks/state.yml already ran) is there anywhere useful to record it --
+# a failure during validate.yml itself has nothing to persist.
+
+- name: Record the failure reason for the next resumption attempt
+  ansible.builtin.set_fact:
+    amt_baremetal_install_fail_msg: "{{ ansible_failed_result.msg | default('unknown failure') }}"
+    amt_baremetal_install_run_state: "{{ amt_baremetal_install_run_state | combine({'last_failure': ansible_failed_result.msg | default('unknown failure')}) }}"
+  when: amt_baremetal_install_run_state is defined
+
+- name: Persist run state after a failure
+  ansible.builtin.include_tasks: save_state.yml
+  when: amt_baremetal_install_run_state is defined

@@ -1,0 +1,75 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Hardware qualification stage 1-2 (see README.md): read-only amt_info on
+# every target, cross-checked against a reviewed inventory binding
+# (amt_expected_uuid). Never mutates anything -- this is deliberately safe to
+# run against every target in one pass, unlike every later stage.
+#
+# This is the stage wired into .circleci/config.yml's hardware-tests job.
+
+- name: "Hardware qualification stage 1-2: read-only amt_info and inventory cross-check"
+  hosts: amt_targets
+  gather_facts: false
+  connection: local
+  vars:
+    amt_output_dir: "{{ playbook_dir }}/output"
+
+  tasks:
+    - name: Read AMT capabilities and state
+      james_crowley.intel_amt.amt_info:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+      delegate_to: localhost
+      no_log: true
+      register: amt
+
+    - name: Require the endpoint to be reachable
+      ansible.builtin.assert:
+        that:
+          - amt.amt.reachable
+        fail_msg: "amt_info reports {{ inventory_hostname }} ({{ amt_host }}) unreachable."
+
+    - name: Cross-check the firmware-reported UUID against reviewed inventory
+      ansible.builtin.assert:
+        that:
+          - amt_expected_uuid is not defined or amt.amt.uuid == amt_expected_uuid
+        fail_msg: >-
+          Identity mismatch for {{ inventory_hostname }}: firmware reports
+          UUID {{ amt.amt.uuid }}, reviewed inventory expected
+          {{ amt_expected_uuid | default('unset') }}. This is exactly the
+          check that catches an inventory/reality mismatch before it becomes
+          a reset of the wrong machine -- stop, and re-verify the binding
+          between inventory_hostname, amt_host, and the physical machine
+          before any later stage runs against this target.
+        success_msg: >-
+          {{ 'No amt_expected_uuid recorded yet for ' + inventory_hostname + '; nothing to cross-check on this first run.'
+             if amt_expected_uuid is not defined
+             else 'Firmware-reported UUID matches reviewed inventory for ' + inventory_hostname + '.' }}
+
+    - name: Ensure the evidence output directory exists
+      ansible.builtin.file:
+        path: "{{ amt_output_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+
+    - name: Record evidence for this target
+      ansible.builtin.copy:
+        content: "{{ amt.amt | to_nice_json }}\n"
+        dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_readonly.json"
+        mode: "0600"
+      delegate_to: localhost
+
+    - name: Remind the operator what amt_expected_uuid is for, if it is still unset
+      ansible.builtin.debug:
+        msg: >-
+          Record amt.amt.uuid == {{ amt.amt.uuid }} as amt_expected_uuid for
+          {{ inventory_hostname }} in tests/hardware/inventory.yml once you
+          have visually confirmed this is the right physical machine. Every
+          later run of this stage will then catch a drifted binding.
+      when: amt_expected_uuid is not defined

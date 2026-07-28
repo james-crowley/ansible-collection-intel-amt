@@ -1,0 +1,78 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Guards run before anything else, in order of how bad it would be to miss
+# each one. Fan-out is checked first because it is the one mistake that turns
+# a single-machine mistake into a many-machine incident.
+
+- name: Guard against inventory fan-out -- this role must run against exactly one host per play
+  ansible.builtin.assert:
+    that:
+      - ansible_play_hosts_all | length == 1
+    fail_msg: >-
+      amt_baremetal_install refuses to run: this play targets
+      {{ ansible_play_hosts_all | length }} hosts
+      ({{ ansible_play_hosts_all | join(', ') }}). Power actions and one-time
+      boot arming are physically disruptive, and delegate_to: localhost does
+      not stop Ansible from fanning a task out across every host in a play --
+      a ten-host play still issues ten resets. Target exactly one host (e.g.
+      `ansible-playbook ... -l <single-host>`).
+    success_msg: Fan-out guard passed -- this play targets exactly one host.
+
+- name: Guard against a play that forgot serial -- one host per batch too
+  ansible.builtin.assert:
+    that:
+      - ansible_play_batch | length == 1
+    fail_msg: >-
+      amt_baremetal_install refuses to run: this play's current batch
+      contains {{ ansible_play_batch | length }} hosts. Set `serial: 1`
+      explicitly on the play. This is a second, independent guard against
+      fan-out, not a substitute for the host-count check above -- both must
+      hold.
+    success_msg: "serial: 1 guard passed."
+
+- name: Require the destructive-action confirmation variable
+  ansible.builtin.assert:
+    that:
+      - amt_baremetal_install_confirm_destructive | bool
+    fail_msg: >-
+      Refusing to continue: amt_baremetal_install power-cycles and can
+      reimage {{ amt_baremetal_install_host }}. Re-run with -e amt_baremetal_install_confirm_destructive=true only
+      after confirming this is the intended target.
+    success_msg: Destructive-action confirmation received.
+
+- name: Require a boot provider this role actually implements
+  ansible.builtin.assert:
+    that:
+      - amt_baremetal_install_boot_provider in amt_baremetal_install_supported_providers
+    fail_msg: >-
+      amt_baremetal_install_boot_provider={{ amt_baremetal_install_boot_provider }} is not one of
+      {{ amt_baremetal_install_supported_providers }}. Native PXE and IDE-R boot are
+      mutually exclusive at the firmware level (see amt_boot's
+      DOCUMENTATION), so this role requires one explicit choice rather than
+      guessing or silently combining them.
+
+- name: Require connection settings that are actually consistent
+  ansible.builtin.assert:
+    that:
+      - amt_baremetal_install_host is truthy
+      - amt_baremetal_install_password is not none
+      - (amt_baremetal_install_use_tls | bool and amt_baremetal_install_tls_fingerprint is not none) or
+        (not (amt_baremetal_install_use_tls | bool) and amt_baremetal_install_allow_insecure_transport | bool)
+    fail_msg: >-
+      Missing or inconsistent connection settings. amt_baremetal_install_host and amt_baremetal_install_password
+      are always required; amt_baremetal_install_tls_fingerprint is required when amt_baremetal_install_use_tls is
+      true (the default), and amt_baremetal_install_allow_insecure_transport must be explicitly
+      true when amt_baremetal_install_use_tls is false. See plugins/doc_fragments/connection.py.
+
+- name: Require at least one media source for the ider_cdrom provider
+  ansible.builtin.assert:
+    that:
+      - amt_baremetal_install_iso_path is not none or amt_baremetal_install_answer_image_path is not none
+    fail_msg: >-
+      amt_baremetal_install_boot_provider=ider_cdrom requires at least one of amt_baremetal_install_iso_path or
+      amt_baremetal_install_answer_image_path -- amt_media itself refuses state=attached with
+      neither cdrom nor floppy set.
+  when: amt_baremetal_install_boot_provider == 'ider_cdrom'

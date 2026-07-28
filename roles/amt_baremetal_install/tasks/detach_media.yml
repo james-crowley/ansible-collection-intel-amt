@@ -1,0 +1,35 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Included from tasks/main.yml's `always` block, so this runs whether the
+# lifecycle above succeeded, failed validation, or failed mid-flight. It is
+# always safe to run even when nothing was ever attached this run (the pxe
+# provider, or a failure before attach_media.yml ran at all): amt_baremetal_install_run_state.
+# session_id is simply null in that case, and amt_media's own state=detached
+# contract already reports changed=false with nothing to do when no state
+# file exists for the given session_id, so there is no need to duplicate that
+# check here beyond the truthiness guard below.
+
+- name: Detach IDE-R media, if a session was ever attached this run
+  james_crowley.intel_amt.amt_media:
+    host: "{{ amt_baremetal_install_host }}"
+    username: "{{ amt_baremetal_install_username }}"
+    password: "{{ amt_baremetal_install_password }}"
+    session_id: "{{ amt_baremetal_install_run_state.session_id }}"
+    runtime_dir: "{{ amt_baremetal_install_media_runtime_dir }}"
+    detach_timeout: "{{ amt_baremetal_install_media_detach_timeout }}"
+    state: detached
+  delegate_to: localhost
+  no_log: true
+  register: amt_baremetal_install_media_detach_result
+  when: amt_baremetal_install_run_state.session_id is truthy
+
+- name: Record that media has been detached
+  ansible.builtin.set_fact:
+    amt_baremetal_install_run_state: "{{ amt_baremetal_install_run_state | combine({'detached': true}) }}"
+  when: amt_baremetal_install_run_state.session_id is truthy
+
+- name: Persist run state after detach
+  ansible.builtin.include_tasks: save_state.yml
