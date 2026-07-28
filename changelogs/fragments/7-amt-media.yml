@@ -1,9 +1,0 @@
----
-minor_changes:
-  - "amt_media - new module attaching and detaching IDE-R virtual media, so a bootable ISO and a writable answer-file image can be served to a bare-metal machine in one session (https://github.com/james-crowley/ansible-collection-intel-amt/pull/20)."
-  - Integration test targets for all five modules, driven against the deterministic mock WS-Man and IDE-R fixture servers, including a case asserting that a multi-frame write actually lands in the backing image (https://github.com/james-crowley/ansible-collection-intel-amt/pull/20).
-security_fixes:
-  - "amt_media - require O(tls_fingerprint) when O(use_tls=true), and reject O(ca_path) outright. The redirection plane is a raw TLS socket whose only trust mode is leaf pinning; TLS without a pin is encrypted but unauthenticated, and silently ignoring a supplied ca_path would leave an operator believing the session was chain-validated (https://github.com/james-crowley/ansible-collection-intel-amt/pull/20)."
-  - "amt_media - session state files are created mode 0600 rather than at the umask default, so they are not readable by other local users even when the runtime directory already exists with laxer permissions (https://github.com/james-crowley/ansible-collection-intel-amt/pull/20)."
-bugfixes:
-  - Mock WS-Man fixture server - answer ``Enumerate`` for ``AMT_BootCapabilities``, not only ``Get``. Unit tests mock enumeration directly, so this was invisible until a real integration target sent a real ``Enumerate`` (https://github.com/james-crowley/ansible-collection-intel-amt/pull/20).

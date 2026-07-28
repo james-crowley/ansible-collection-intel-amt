@@ -1,0 +1,6 @@
+---
+minor_changes:
+  - CI - hardware-in-the-loop jobs target the ``crowley/amt-runner`` self-hosted resource class and run under the ``amt-lab-runner`` context, which is restricted to this project alone so no other project in the organisation can borrow the lab credentials. Four independent controls now stand in front of the runner - the ``run-hardware-tests`` pipeline parameter, a manual approval, the project-restricted context, and a main-branch filter.
+  - CI - lab inventory is rendered on the runner from context environment variables by ``tests/hardware/render-inventory.sh`` and removed afterwards, so endpoint addresses, credentials and reviewed TLS fingerprints never enter the repository.
+bugfixes:
+  - "amt_power - correct the documentation example, which used ``state: on``. YAML parses an unquoted ``on`` as the boolean ``true`` rather than the string ``\"on\"``, so anyone copying the example would have passed the wrong type and failed argument validation."
