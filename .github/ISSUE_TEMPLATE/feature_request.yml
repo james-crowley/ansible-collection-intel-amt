@@ -1,0 +1,60 @@
+---
+name: Feature request
+description: Propose new functionality or a new module
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: >-
+        The operational problem, not the proposed API. It is often possible to
+        solve it with what already exists, and if not, knowing the goal shapes a
+        better interface.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like this collection to do
+    validations:
+      required: true
+
+  - type: dropdown
+    id: plane
+    attributes:
+      label: Which protocol plane does this need
+      description: >-
+        AMT is effectively two protocols. WS-Man is stateless request/response on
+        16992/16993. Redirection (SOL, IDE-R) is a stateful binary session on
+        16994/16995 and is far more work to extend. See docs/protocol-notes.md.
+      options:
+        - "WS-Man management (power, boot, settings, inventory)"
+        - "Redirection plane (SOL, IDE-R, KVM)"
+        - "Both"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Protocol evidence, if you have any
+      description: >-
+        A WS-Man class and property name, a firmware response, or a reference in
+        Intel's documentation. This collection tries hard not to guess at wire
+        formats — several bugs came from plausible assumptions that real firmware
+        rejected — so evidence moves a request along considerably.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: hardware
+    attributes:
+      label: Hardware access
+      options:
+        - label: >-
+            I have AMT hardware I can test against, and can report the firmware
+            version
+          required: false

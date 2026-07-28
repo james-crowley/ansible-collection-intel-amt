@@ -318,6 +318,13 @@ Full attribution with per-file provenance is in [NOTICE](NOTICE).
 
 ## Contributing
 
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the local verification sequence and
+the traps worth knowing about, [`SECURITY.md`](SECURITY.md) for why this
+collection warrants unusual care with credentials, and
+[`docs/maintainer-setup.md`](docs/maintainer-setup.md) for the one-time
+account/secret steps a maintainer needs.
+
+
 Issues and PRs welcome. Conventional commits; every change needs a changelog
 fragment in `changelogs/fragments/`; CI must be green. See
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for the local verification sequence and the
