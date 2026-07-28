@@ -97,6 +97,19 @@ jobs:
           name: ruff format check
           command: ruff format --check plugins tests
       - run:
+          # tests/hardware/*.yml are this repository's first real top-level
+          # playbooks (files with their own `hosts:` key). ansible-lint's
+          # syntax-check[unknown-module] rule (tagged "unskippable" -- it
+          # cannot be silenced with a per-line `# noqa`) only performs real
+          # module resolution for files shaped like a playbook, and unlike
+          # ansible-test it does not stage the ansible_collections/<ns>/<name>/
+          # layout scripts/setup-collection-tree.sh builds. A plain symlink is
+          # enough to make this checkout resolvable as its own collection.
+          name: Make this checkout resolvable as its own collection (for ansible-lint)
+          command: |
+            mkdir -p ~/.ansible/collections/ansible_collections/james_crowley
+            ln -sfn "$(pwd)" ~/.ansible/collections/ansible_collections/james_crowley/intel_amt
+      - run:
           name: ansible-lint
           command: ansible-lint --offline
 
