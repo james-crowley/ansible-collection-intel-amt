@@ -1,0 +1,284 @@
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+"""The typed AMT management API that ``amt_info`` and ``amt_power`` adapt to.
+
+:class:`AmtClient` is the seam between "Ansible module shaped" requests
+(gather facts, read power state, request a power transition) and the raw
+WS-Man operations in :mod:`wsman`. It is intentionally scoped to facts and
+power only -- boot configuration and redirection-service mutation are owned
+by sibling client methods added alongside ``amt_boot``/``amt_redirection``,
+not by this module.
+
+Two design rules carried over from :mod:`models` and :mod:`wsman`:
+
+1. **Facts-gathering degrades, it does not abort.** Real AMT firmware varies
+   in which optional WS-Man classes it implements. A ``Get`` against a class
+   the firmware does not support comes back as a SOAP Fault (``ProtocolError``)
+   or an explicit ``UnsupportedCapabilityError``; either is treated as "this
+   capability is unknown/False", not as a reason to fail the whole read.
+2. **A mutation is requested, never confirmed, by ``ReturnValue == 0``.**
+   :meth:`AmtClient.request_power_state` polls afterwards and reports what it
+   actually observed. A timeout raised *after* the request was transmitted
+   (``TimeoutError_`` with ``indeterminate=True``) is allowed to propagate
+   unmodified -- it must reach the caller so they re-probe rather than retry.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import time
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any
+
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import (
+    AmtError,
+    ProtocolError,
+    UnsupportedCapabilityError,
+)
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.models import (
+    AmtCapabilities,
+    AmtFacts,
+    OperationReceipt,
+    PowerState,
+    RedirectionState,
+)
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.wsman import (
+    EndpointReference,
+    WsmanClient,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+#: Errors that mean "this optional class/property is not implemented by this
+#: firmware" rather than "the operation failed". Only these are swallowed
+#: while gathering facts; connection/auth/timeout/TLS failures are real
+#: failures and must propagate.
+_DEGRADABLE_ERRORS: tuple[type[AmtError], ...] = (ProtocolError, UnsupportedCapabilityError)
+
+#: The ``CIM_ComputerSystem`` selector RequestPowerStateChange's
+#: ``ManagedElement`` must name, per docs/protocol-notes.md s2.4.
+_MANAGED_SYSTEM_SELECTOR = {"Name": "ManagedSystem"}
+
+
+class PowerAction(StrEnum):
+    """A requestable AMT power transition.
+
+    Values match the ``state`` argument ``amt_power`` documents. ``RESET``
+    and ``REBOOT`` are distinct members but issue the identical underlying
+    AMT action (master bus reset, code 10) -- AMT has no separate "graceful
+    reboot" primitive, so both are offered as friendlier/more technical names
+    for the same request.
+    """
+
+    ON = "on"
+    OFF = "off"
+    CYCLE = "cycle"
+    RESET = "reset"
+    REBOOT = "reboot"
+    SLEEP_LIGHT = "sleep-light"
+    SLEEP_DEEP = "sleep-deep"
+    HIBERNATE = "hibernate"
+
+
+#: docs/protocol-notes.md s2.4 -- CIM_PowerManagementService.RequestPowerStateChange
+#: action codes, as used by MeshCmd and verified against firmware.
+_POWER_ACTION_CODES: dict[PowerAction, int] = {
+    PowerAction.ON: 2,
+    PowerAction.SLEEP_LIGHT: 3,
+    PowerAction.SLEEP_DEEP: 4,
+    PowerAction.CYCLE: 5,
+    PowerAction.HIBERNATE: 7,
+    PowerAction.OFF: 8,
+    PowerAction.RESET: 10,
+    PowerAction.REBOOT: 10,
+}
+
+#: The normalized :class:`PowerState` a successful request is expected to
+#: converge on. Action codes are *requests*, not CIM power-state values, so
+#: this is a separate table rather than a reuse of ``PowerState``'s.
+_ACTION_EXPECTED_STATE: dict[PowerAction, str] = {
+    PowerAction.ON: "on",
+    PowerAction.SLEEP_LIGHT: "sleep",
+    PowerAction.SLEEP_DEEP: "sleep",
+    PowerAction.CYCLE: "on",
+    PowerAction.HIBERNATE: "hibernate",
+    PowerAction.OFF: "off",
+    PowerAction.RESET: "on",
+    PowerAction.REBOOT: "on",
+}
+
+
+def _truthy(value: Any) -> bool:
+    """Interpret a WS-Man boolean property, which arrives as element text (a string)."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in ("true", "1", "yes")
+
+
+class AmtClient:
+    """Facts and power control for one Intel AMT endpoint.
+
+    Wraps an already-constructed :class:`WsmanClient` -- callers (modules)
+    own connection setup via ``WsmanClient.from_connection_options()``; this
+    class owns only the mapping from AMT's CIM/AMT classes to typed results.
+    Accepting the transport as a constructor argument, rather than building
+    one internally, is what lets unit tests exercise this class without ever
+    touching a socket.
+    """
+
+    def __init__(
+        self,
+        wsman: WsmanClient,
+        *,
+        poll_count: int = 5,
+        poll_delay: float = 2.0,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._wsman = wsman
+        #: Bounded postcondition-probe parameters for request_power_state.
+        #: Injectable so tests can set poll_count=0 or a no-op `sleep` and
+        #: never actually wait -- see docs/protocol-notes.md s2.4: ReturnValue
+        #: == 0 means accepted, not complete, so a caller must poll to see
+        #: what actually happened, but that polling must stay bounded.
+        self._poll_count = poll_count
+        self._poll_delay = poll_delay
+        self._sleep = sleep
+
+    # -- Facts ----------------------------------------------------------------
+
+    def get_facts(self) -> AmtFacts:
+        """Gather firmware-observed facts and capabilities.
+
+        Each source class is read independently and tolerated if absent, per
+        the module docstring: a firmware that does not implement e.g.
+        ``AMT_BootCapabilities`` yields ``capabilities`` with every flag
+        ``False`` rather than failing the whole read. A genuine transport
+        failure (connection/auth/TLS/timeout) is not tolerated here and
+        propagates to the caller unchanged.
+        """
+        general = self._get_optional("AMT_GeneralSettings")
+        setup = self._get_optional("AMT_SetupAndConfigurationService")
+        computer_system = self._get_optional("CIM_ComputerSystem")
+        power_assoc = self._get_optional("CIM_AssociatedPowerManagementService")
+        boot_caps = self._get_optional("AMT_BootCapabilities")
+        redirection = self._get_optional("AMT_RedirectionService")
+
+        power_state = None
+        if power_assoc and power_assoc.get("PowerState") is not None:
+            power_state = PowerState.from_cim_value(power_assoc["PowerState"])
+
+        capabilities = AmtCapabilities(
+            power=power_state is not None,
+            boot_once_pxe=_truthy(boot_caps.get("ForcePXEBoot")) if boot_caps else False,
+            sol=_truthy(boot_caps.get("SOL")) if boot_caps else False,
+            storage_redirection=_truthy(boot_caps.get("IDER")) if boot_caps else False,
+        )
+
+        redirection_state = None
+        if redirection is not None:
+            redirection_state = RedirectionState.from_enabled_state(
+                redirection.get("EnabledState", -1),
+                listener_enabled=_truthy(redirection.get("ListenerEnabled")),
+            )
+
+        version = (general or {}).get("Version") or (setup or {}).get("VersionsSupported")
+
+        return AmtFacts(
+            version=version,
+            uuid=(computer_system or {}).get("UUID"),
+            control_mode=(setup or {}).get("ProvisioningMode"),
+            provisioning_state=(setup or {}).get("ProvisioningState"),
+            power_state=power_state,
+            reported_hostname=(general or {}).get("HostName"),
+            capabilities=capabilities,
+            redirection=redirection_state,
+        )
+
+    def _get_optional(self, resource_class: str) -> dict[str, Any] | None:
+        """``Get`` a class that a firmware may legitimately not implement.
+
+        Returns ``None`` on the degradable errors (protocol/unsupported --
+        i.e. "this class does not exist here"), letting the caller degrade
+        the derived capability rather than aborting. Anything else (a real
+        connection/auth/TLS/timeout failure) is not this method's to hide and
+        is left to propagate.
+        """
+        try:
+            return self._wsman.get(resource_class)
+        except _DEGRADABLE_ERRORS:
+            return None
+
+    # -- Power ------------------------------------------------------------------
+
+    def get_power_state(self) -> PowerState:
+        """Read the endpoint's current power state.
+
+        Unlike :meth:`get_facts`, failures here are not tolerated: a caller
+        asking for power state wants to know it, or wants to know why it
+        could not be read, not a silent "unknown".
+        """
+        instance = self._wsman.get("CIM_AssociatedPowerManagementService")
+        return PowerState.from_cim_value(instance.get("PowerState", -1))
+
+    def request_power_state(self, action: PowerAction) -> OperationReceipt:
+        """Request a power transition and report the bounded postcondition probe.
+
+        ``ReturnValue == 0`` from ``RequestPowerStateChange`` means AMT
+        accepted the request, not that the transition finished (see
+        docs/protocol-notes.md s2.4), so this polls
+        ``CIM_AssociatedPowerManagementService`` a bounded number of times
+        afterwards and reports what it actually observed.
+
+        Deliberately does not catch ``RemoteOperationError`` (non-zero
+        ``ReturnValue``) or ``TimeoutError_`` raised by the ``invoke`` call
+        itself -- both must reach the caller unmodified: a non-zero
+        ``ReturnValue`` is a real rejection, and a timeout *after* the
+        request was transmitted must surface as ``indeterminate`` so the
+        caller re-probes instead of this method retrying a possibly-applied
+        mutation on its own initiative.
+        """
+        previous = self.get_power_state()
+        code = _POWER_ACTION_CODES[action]
+        managed_element = EndpointReference("CIM_ComputerSystem", _MANAGED_SYSTEM_SELECTOR)
+
+        _output, return_value = self._wsman.invoke(
+            "CIM_PowerManagementService",
+            "RequestPowerStateChange",
+            {"PowerState": code, "ManagedElement": managed_element},
+        )
+
+        expected = _ACTION_EXPECTED_STATE[action]
+        probes: list[PowerState] = []
+        observed: PowerState | None = None
+        for _unused_attempt in range(max(0, self._poll_count)):
+            self._sleep(self._poll_delay)
+            try:
+                observed = self.get_power_state()
+            except AmtError:
+                # The mutation itself already succeeded (ReturnValue == 0
+                # above); a failed postcondition probe is diagnostic-only and
+                # must not turn a successful request into a reported failure.
+                continue
+            probes.append(observed)
+            if observed.normalized == expected:
+                break
+
+        peer_cert = self._wsman.last_peer_certificate
+        return OperationReceipt(
+            action=f"amt_power.{action.value}",
+            endpoint=self._wsman.endpoint,
+            changed=True,
+            previous=previous,
+            desired=expected,
+            observed=observed,
+            tls_peer_fingerprint=peer_cert.sha256_fingerprint if peer_cert else None,
+            extra={
+                "return_value": return_value,
+                "probes": [dataclasses.asdict(probe) for probe in probes],
+            },
+        )
