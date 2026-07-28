@@ -55,6 +55,9 @@ def _make_client(*, max_retries: int = 2) -> WsmanClient:
         username="admin",
         password=PASSWORD,
         use_tls=False,
+        # Required now that the insecure-transport gate is enforced in
+        # __init__ rather than only in from_connection_options().
+        allow_insecure_transport=True,
         max_retries=max_retries,
         session=session,
     )
@@ -372,3 +375,30 @@ class TestSecretsNeverLeak:
         assert PASSWORD not in str(excinfo.value)
         assert PASSWORD not in repr(excinfo.value)
         assert PASSWORD not in repr(excinfo.value.to_result())
+
+
+class TestInsecureTransportGateIsUnbypassable:
+    """The gate must hold on the direct constructor, not only the convenience
+    classmethod. A gate guarding one of two entry points does not enforce the
+    policy that plaintext is never selected implicitly."""
+
+    def test_direct_constructor_refuses_plaintext_without_acknowledgement(self):
+        with pytest.raises(TlsValidationError):
+            WsmanClient(host="10.0.0.5", port=16992, username="admin", password="test-password-not-real", use_tls=False)
+
+    def test_direct_constructor_allows_plaintext_when_acknowledged(self):
+        client = WsmanClient(
+            host="10.0.0.5",
+            port=16992,
+            username="admin",
+            password="test-password-not-real",
+            use_tls=False,
+            allow_insecure_transport=True,
+        )
+        assert client._url.startswith("http://")
+        client.close()
+
+    def test_tls_needs_no_acknowledgement(self):
+        client = WsmanClient(host="10.0.0.5", port=16993, username="admin", password="test-password-not-real")
+        assert client._url.startswith("https://")
+        client.close()

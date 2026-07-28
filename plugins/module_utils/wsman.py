@@ -25,8 +25,20 @@ from dataclasses import dataclass
 from typing import Any
 from xml.etree import ElementTree as ET
 
-import requests
-from requests.auth import HTTPDigestAuth
+try:
+    import requests
+    from requests.auth import HTTPDigestAuth
+
+    HAS_REQUESTS = True
+    REQUESTS_IMPORT_ERROR: str | None = None
+except ImportError as _import_error:  # pragma: no cover - exercised by the import sanity test
+    # See the equivalent guard in tls.py. Modules must check HAS_REQUESTS and
+    # fail with missing_required_lib('requests') so the user gets an actionable
+    # message instead of a traceback.
+    requests = None  # type: ignore[assignment]
+    HTTPDigestAuth = None  # type: ignore[assignment,misc]
+    HAS_REQUESTS = False
+    REQUESTS_IMPORT_ERROR = str(_import_error)
 
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils import tls
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import (
@@ -220,12 +232,19 @@ class WsmanClient:
         username: str,
         password: str,
         use_tls: bool = True,
+        allow_insecure_transport: bool = False,
         trust_policy: tls.TlsTrustPolicy | None = None,
         connect_timeout: float = 10.0,
         timeout: float = 30.0,
         max_retries: int = 2,
         session: requests.Session | None = None,
     ) -> None:
+        # Enforced here rather than only in from_connection_options() so the gate
+        # cannot be sidestepped by constructing the client directly. The point of
+        # the policy is that plaintext is never selected implicitly, and a gate
+        # that only guards one of two entry points does not achieve that.
+        tls.enforce_transport_policy(use_tls=use_tls, allow_insecure_transport=allow_insecure_transport)
+
         self._endpoint = f"{host}:{port}"
         scheme = "https" if use_tls else "http"
         self._url = f"{scheme}://{host}:{port}/wsman"
@@ -269,11 +288,10 @@ class WsmanClient:
     ) -> WsmanClient:
         """Build a client directly from the ``connection.py`` doc-fragment option names.
 
-        Enforces the insecure-transport gate and resolves the trust policy
-        before any connection is attempted, so a misconfiguration fails
-        before a single byte goes on the wire.
+        Resolves the trust policy and port before any connection is attempted, so
+        a misconfiguration fails before a single byte goes on the wire. The
+        insecure-transport gate is enforced by ``__init__``.
         """
-        tls.enforce_transport_policy(use_tls=use_tls, allow_insecure_transport=allow_insecure_transport)
         policy = tls.TlsTrustPolicy.create(validate_certs=validate_certs, ca_path=ca_path, tls_fingerprint=tls_fingerprint)
         resolved_port = tls.resolve_port(port=port, use_tls=use_tls)
         return cls(
@@ -282,6 +300,7 @@ class WsmanClient:
             username=username,
             password=password,
             use_tls=use_tls,
+            allow_insecure_transport=allow_insecure_transport,
             trust_policy=policy,
             connect_timeout=connect_timeout,
             timeout=timeout,

@@ -28,7 +28,20 @@ import ssl
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from requests.adapters import HTTPAdapter
+try:
+    from requests.adapters import HTTPAdapter
+
+    HAS_REQUESTS = True
+    REQUESTS_IMPORT_ERROR: str | None = None
+except ImportError as _import_error:  # pragma: no cover - exercised by the import sanity test
+    # Guarded so that importing this module on a controller without `requests`
+    # yields a clear "requests is required" failure from the calling module via
+    # missing_required_lib(), rather than an ImportError traceback. This is also
+    # what lets the `import` sanity test pass, since it runs against a minimal
+    # interpreter with no third-party packages installed.
+    HTTPAdapter = object  # type: ignore[assignment,misc]
+    HAS_REQUESTS = False
+    REQUESTS_IMPORT_ERROR = str(_import_error)
 
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import TlsValidationError
 
@@ -360,8 +373,9 @@ def _parse_name(name_content: bytes) -> str:
 def _parse_der_certificate(der: bytes) -> tuple[str | None, str | None, str | None] | None:
     """Best-effort extraction of (subject, issuer, not_after) from a DER X.509 certificate."""
     try:
-        _, certificate_content, _ = _der_read_tlv(der, 0)
-        _, tbs_content, _ = _der_read_tlv(certificate_content, 0)
+        # Bare `_` is rejected by ansible-test's pylint configuration.
+        _unused_tag, certificate_content, _unused_end = _der_read_tlv(der, 0)
+        _unused_tag, tbs_content, _unused_end = _der_read_tlv(certificate_content, 0)
         fields = _der_iter_children(tbs_content)
 
         index = 0
