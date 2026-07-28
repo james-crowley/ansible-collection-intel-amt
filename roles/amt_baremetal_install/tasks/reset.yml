@@ -10,10 +10,37 @@
 # any failure here -- indeterminate or otherwise -- is treated conservatively
 # as "the reset may have happened" and recorded before the error propagates,
 # so tasks/state.yml refuses to let a later re-run silently retry it.
+#
+# The transition is chosen from the observed power state rather than always
+# being a reset. A master bus reset does nothing to a machine that is already
+# off, and installing an operating system onto a powered-off machine is an
+# entirely ordinary thing to want -- arguably the common case for bare metal.
+# Hardcoding `reset` silently did nothing there: the media stayed attached, the
+# one-shot boot stayed armed, and the role reported success having booted
+# nothing. Found by running stage 4 (which leaves the machine off) immediately
+# before stage 5.
 
-- name: Issue the reset
+- name: Decide which power transition actually starts this machine
+  ansible.builtin.set_fact:
+    # `on` for a machine that is off, `reset` for one that is running. Both
+    # boot into the armed one-shot device; only one of them works from a given
+    # starting state.
+    amt_baremetal_install_power_action: >-
+      {{ 'on'
+         if (amt_baremetal_install_probe.amt.power_state.normalized | default('unknown')) in ['off', 'hibernate']
+         else 'reset' }}
+
+- name: Report the chosen transition
+  ansible.builtin.debug:
+    msg: >-
+      Observed power state
+      '{{ amt_baremetal_install_probe.amt.power_state.normalized | default('unknown') }}';
+      issuing '{{ amt_baremetal_install_power_action }}' to boot
+      {{ amt_baremetal_install_host }} from the armed one-shot device.
+
+- name: Issue the power transition
   block:
-    - name: Issue the reset via amt_power
+    - name: Issue the transition via amt_power
       james_crowley.intel_amt.amt_power:
         host: "{{ amt_baremetal_install_host }}"
         port: "{{ amt_baremetal_install_port }}"
@@ -26,12 +53,12 @@
         tls_fingerprint: "{{ amt_baremetal_install_tls_fingerprint }}"
         timeout: "{{ amt_baremetal_install_timeout }}"
         connect_timeout: "{{ amt_baremetal_install_connect_timeout }}"
-        state: reset
+        state: "{{ amt_baremetal_install_power_action }}"
       delegate_to: localhost
       no_log: true
       register: amt_baremetal_install_reset_result
 
-    - name: Record that the reset request was accepted
+    - name: Record that the power request was accepted
       ansible.builtin.set_fact:
         amt_baremetal_install_run_state: "{{ amt_baremetal_install_run_state | combine({'reset_issued': true}) }}"
 
@@ -42,7 +69,7 @@
       ansible.builtin.set_fact:
         amt_baremetal_install_run_state: >-
           {{ amt_baremetal_install_run_state | combine({'reset_issued': true,
-                                       'last_failure': 'amt_power state=reset failed or timed out; outcome uncertain'}) }}
+                                       'last_failure': 'amt_power state=' ~ amt_baremetal_install_power_action ~ ' failed or timed out; outcome uncertain'}) }}
 
     - name: Persist the uncertain state immediately
       ansible.builtin.include_tasks: save_state.yml
@@ -50,7 +77,8 @@
     - name: Re-raise -- this role never retries a reset automatically
       ansible.builtin.fail:
         msg: >-
-          amt_power state=reset failed or timed out for {{ amt_baremetal_install_host }}. A
+          amt_power state={{ amt_baremetal_install_power_action }} failed or timed out for
+          {{ amt_baremetal_install_host }}. A
           timeout after the request was sent is indistinguishable from a
           reset that actually happened, so this run records
           reset_issued=true and stops rather than guessing. A later run of
