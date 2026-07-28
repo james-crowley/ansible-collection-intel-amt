@@ -1,0 +1,4 @@
+---
+bugfixes:
+  - "amt_info - read the system UUID from ``CIM_ComputerSystemPackage.PlatformGUID``. It was read as ``UUID`` from ``CIM_ComputerSystem``, which has no such property, so it was null on every endpoint and silently disabled the identity cross-check that guards against acting on the wrong machine (https://github.com/james-crowley/ansible-collection-intel-amt/issues/30)."
+  - "amt_info - stop reading ``CIM_ComputerSystem`` during facts gathering. It existed only to source the UUID and contributed nothing else, so removing it also saves a WS-Man round trip per call."
