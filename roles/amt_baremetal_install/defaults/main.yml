@@ -6,20 +6,35 @@
 # ---------------------------------------------------------------------------
 # Connection options. These map 1:1 onto the shared `connection` doc fragment
 # every module in this collection extends (plugins/doc_fragments/connection.py).
-# amt_baremetal_install_password and amt_baremetal_install_tls_fingerprint have no default on purpose: a missing
-# required value must fail loudly in tasks/validate.yml, not coerce silently.
+#
+# Each falls back to the conventional `amt_*` inventory variable of the same
+# name, which is what this collection's README, docs/ examples, and
+# tests/hardware/inventory.yml.example all use. That means a conventional
+# inventory drives this role with no per-variable mapping, while an explicit
+# amt_baremetal_install_* value still wins.
+#
+# Note amt_baremetal_install_host does NOT fall back to inventory_hostname. It
+# used to, and that is wrong for AMT: the inventory hostname is the operating
+# system's name, whereas AMT answers on a separate management address, so the
+# default silently pointed at the wrong endpoint (or an unresolvable name).
+# It resolves via amt_host and otherwise stays unset so validate.yml fails
+# loudly.
+#
+# amt_baremetal_install_password and amt_baremetal_install_tls_fingerprint have
+# no default beyond that fallback on purpose: a missing required value must fail
+# loudly in tasks/validate.yml, not coerce silently.
 # ---------------------------------------------------------------------------
-amt_baremetal_install_host: "{{ inventory_hostname }}"
-amt_baremetal_install_port: null
-amt_baremetal_install_username: admin
-amt_baremetal_install_password: null
-amt_baremetal_install_use_tls: true
-amt_baremetal_install_allow_insecure_transport: false
-amt_baremetal_install_validate_certs: true
-amt_baremetal_install_ca_path: null
-amt_baremetal_install_tls_fingerprint: null
-amt_baremetal_install_timeout: 30
-amt_baremetal_install_connect_timeout: 10
+amt_baremetal_install_host: "{{ amt_host | default(None) }}"
+amt_baremetal_install_port: "{{ amt_port | default(None) }}"
+amt_baremetal_install_username: "{{ amt_username | default('admin') }}"
+amt_baremetal_install_password: "{{ amt_password | default(None) }}"
+amt_baremetal_install_use_tls: "{{ amt_use_tls | default(true) }}"
+amt_baremetal_install_allow_insecure_transport: "{{ amt_allow_insecure_transport | default(false) }}"
+amt_baremetal_install_validate_certs: "{{ amt_validate_certs | default(true) }}"
+amt_baremetal_install_ca_path: "{{ amt_ca_path | default(None) }}"
+amt_baremetal_install_tls_fingerprint: "{{ amt_tls_fingerprint | default(None) }}"
+amt_baremetal_install_timeout: "{{ amt_timeout | default(30) }}"
+amt_baremetal_install_connect_timeout: "{{ amt_connect_timeout | default(10) }}"
 
 # ---------------------------------------------------------------------------
 # The single most important variable in this role. Must be explicitly set to
