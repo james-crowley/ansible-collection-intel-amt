@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import dataclasses
 import time
-from enum import StrEnum
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import (
@@ -63,7 +63,7 @@ _DEGRADABLE_ERRORS: tuple[type[AmtError], ...] = (ProtocolError, UnsupportedCapa
 _MANAGED_SYSTEM_SELECTOR = {"Name": "ManagedSystem"}
 
 
-class PowerAction(StrEnum):
+class PowerAction(str, Enum):
     """A requestable AMT power transition.
 
     Values match the ``state`` argument ``amt_power`` documents. ``RESET``
@@ -81,6 +81,20 @@ class PowerAction(StrEnum):
     SLEEP_LIGHT = "sleep-light"
     SLEEP_DEEP = "sleep-deep"
     HIBERNATE = "hibernate"
+
+    def __str__(self) -> str:
+        """Return the bare value, e.g. ``"on"`` rather than ``"PowerAction.ON"``.
+
+        This restores the behaviour of :class:`enum.StrEnum`, which this class
+        replaced in order to support Python 3.10 (StrEnum is 3.11+, and
+        ansible-core 2.17 -- this collection's floor -- runs on 3.10).
+
+        Without this, a plain ``(str, Enum)`` renders as ``PowerAction.ON`` under
+        ``str()`` and f-string interpolation, so any message or receipt field
+        built that way would silently change shape. Keeping the shim
+        behaviourally identical is the whole point of it being a shim.
+        """
+        return self.value
 
 
 #: docs/protocol-notes.md s2.4 -- CIM_PowerManagementService.RequestPowerStateChange

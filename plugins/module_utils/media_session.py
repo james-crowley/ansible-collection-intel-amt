@@ -432,7 +432,7 @@ def _handle_sigterm(_signum: int, _frame: object) -> None:
 
 
 def _now_iso() -> str:
-    return datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
 def _redirect_std_fds(log_path: Path) -> None:
