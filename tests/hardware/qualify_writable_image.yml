@@ -134,11 +134,21 @@
               device on its own.
           when: amt_qualify_attended | default(true) | bool
 
+        # Every amt_media call needs the full connection options, not just
+        # host/username/password. This re-read omitted tls_fingerprint and
+        # therefore failed with error_class=tls_validation: amt_media requires a
+        # pin whenever use_tls is true, because unauthenticated TLS would let an
+        # on-path device serve its own boot media. The endpoint reported as
+        # `host:None` was the other tell -- the port was missing too.
         - name: Re-read the session's reported byte counters
           james_crowley.intel_amt.amt_media:
             host: "{{ amt_host }}"
+            port: "{{ amt_redirection_port | default(omit) }}"
             username: "{{ amt_username }}"
             password: "{{ amt_password }}"
+            use_tls: "{{ amt_use_tls | default(true) }}"
+            allow_insecure_transport: "{{ amt_allow_insecure_transport | default(false) }}"
+            tls_fingerprint: "{{ amt_tls_fingerprint | default(omit) }}"
             session_id: "{{ amt_media_write_test.session_id }}"
             state: attached
           delegate_to: localhost
@@ -240,6 +250,12 @@
         - name: Always detach the media session, even on failure, so no daemon is left holding the device open
           when: amt_media_write_test is defined and amt_media_write_test.session_id is defined
           block:
+            # No tls_fingerprint here, deliberately. amt_media enforces its
+            # trust policy on attach only: detach opens no connection at all --
+            # it reads the session state file and signals the recorded pid. If
+            # detach required a pin, a tightened trust configuration could make a
+            # running session unstoppable and leave a daemon holding the boot
+            # device open, which is the opposite of what a cleanup path should do.
             - name: Detach
               james_crowley.intel_amt.amt_media:
                 host: "{{ amt_host }}"
