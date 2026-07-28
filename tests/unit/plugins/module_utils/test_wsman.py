@@ -402,3 +402,43 @@ class TestInsecureTransportGateIsUnbypassable:
         client = WsmanClient(host="10.0.0.5", port=16993, username="admin", password="test-password-not-real")
         assert client._url.startswith("https://")
         client.close()
+
+
+class TestNullMethodParametersAreOmitted:
+    """A ``None`` method parameter must produce no element at all.
+
+    Real AMT 16.1.30 rejected ChangeBootOrder with an empty ``<Source/>``:
+
+        HTTP 400 -- "The supplied SOAP violates the corresponding XML schema
+        definition."
+
+    ``Source`` is typed as an endpoint reference, so it requires ``Address`` and
+    ``ReferenceParameters`` children; an empty element is schema-invalid while an
+    absent one is fine, because these parameters are optional. This is the exact
+    bug that blocked IDE-R boot against real firmware, and no mock could have
+    caught it -- the mock's XML parser accepted the empty element happily.
+    """
+
+    @staticmethod
+    def _body_xml(params):
+        client = _make_client()
+        response = _soap_response("<g:ChangeBootOrder_OUTPUT xmlns:g='x'><g:ReturnValue>0</g:ReturnValue></g:ChangeBootOrder_OUTPUT>")
+        client._session.post.return_value = response
+        client.invoke("CIM_BootConfigSetting", "ChangeBootOrder", params)
+        sent = client._session.post.call_args.kwargs.get("data") or client._session.post.call_args.args[1]
+        return sent.decode() if isinstance(sent, bytes) else sent
+
+    def test_none_parameter_emits_no_element(self):
+        xml = self._body_xml({"Source": None})
+        assert "ChangeBootOrder_INPUT" in xml
+        assert "Source" not in xml, "an empty <Source/> is schema-invalid and real firmware rejects it"
+
+    def test_non_none_parameter_is_still_emitted(self):
+        xml = self._body_xml({"Role": 1})
+        assert "Role" in xml
+        assert ">1<" in xml
+
+    def test_mixed_params_keep_the_non_null_ones(self):
+        xml = self._body_xml({"Source": None, "Role": 1})
+        assert "Source" not in xml
+        assert "Role" in xml
