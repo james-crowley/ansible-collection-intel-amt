@@ -87,13 +87,19 @@ options:
     type: int
     default: 10
 notes:
-  - An Intel AMT endpoint is firmware and cannot execute a Python payload, so these
+  # Block scalars are required on any item containing a colon-space sequence,
+  # such as C(delegate_to: localhost). In a plain scalar that reads as a YAML
+  # mapping key and fails the yamllint sanity test.
+  - >-
+    An Intel AMT endpoint is firmware and cannot execute a Python payload, so these
     modules run on the Ansible controller. Use C(delegate_to: localhost) (or
     C(connection: local)) on every task. No agent, SSH access, or Python interpreter
     is required on the target.
-  - Because the modules run on the controller, the C(requests) library must be
+  - >-
+    Because the modules run on the controller, the C(requests) library must be
     installed there, not on the managed node.
-  - Power and boot operations are physically disruptive. Delegating to localhost
+  - >-
+    Power and boot operations are physically disruptive. Delegating to localhost
     does not stop Ansible from fanning a task out across every host in the play,
     so pair these tasks with C(serial: 1) and an explicit single-target selection
     when mutating state.
