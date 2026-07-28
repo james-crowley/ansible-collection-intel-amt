@@ -156,5 +156,7 @@ compare caller-supplied identity.
   `BIOSPause`, `BIOSReflash`, and others) that `amt_info` does not surface; consult
   `amt_boot`'s and `amt_redirection`'s own capability checks, or read the class directly,
   if you need one of those.
-- This module is **hardware-unverified**, like the rest of the collection — see the
+- This module is **hardware-qualified against AMT 16.1.30** (firmware version, all four
+  capability flags, redirection state and platform UUID all confirmed on real firmware). It
+  remains unverified on any other firmware generation — see the
   [Capability matrix](capability-matrix.md).

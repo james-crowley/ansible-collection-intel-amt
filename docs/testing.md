@@ -96,7 +96,16 @@ against real firmware.
 
 ## Hardware-in-the-loop tests
 
-These power-cycle and reimage real machines. They are gated twice.
+These power-cycle and reimage real machines. Nothing here runs by accident:
+
+- the `run-hardware-tests` pipeline parameter, false by default;
+- a manual approval before the read-only stages;
+- **a separate manual approval before each mutating stage** (power, media,
+  writable, PXE), so every escalation is confirmed independently;
+- the `amt-lab-runner` context, restricted by project ID;
+- `branches: only: main`;
+- and for stage 7, a `pxe-prereqs-confirmed` parameter attesting that DHCP/boot
+  services exist, since no technical check can establish that.
 
 ### Gate 1: pipeline parameter
 
@@ -121,17 +130,29 @@ Hardware jobs target a self-hosted machine runner inside the lab network, so no
 inbound ports need opening — the agent polls outward.
 
 ```bash
-circleci namespace create james-crowley --org-id <org-id>
-circleci runner resource-class create james-crowley/amt-lab "Intel AMT hardware runner" --generate-token
+circleci runner resource-class create crowley/amt-runner "Intel AMT hardware runner" --generate-token
 # then install the machine runner 3 agent on the lab host with that token
+#
+# The agent must be able to create its working directory. A read-only root
+# filesystem, or a work volume the runner UID cannot write, makes every job die
+# in ~100ms with no steps executed and no error surfaced -- see issue #26.
 ```
 
 The job declares:
 
 ```yaml
 machine: true
-resource_class: james-crowley/amt-lab
+resource_class: crowley/amt-runner
 ```
+
+### Runner Python version
+
+The lab runner ships **Python 3.10**, so the hardware jobs pin
+`ansible-core~=2.17.0` — 2.19 requires 3.11+ on the controller. This is also the
+collection's declared floor, so hardware qualification exercises the oldest
+version we claim to support. Two 3.11-only APIs (`enum.StrEnum`, `datetime.UTC`)
+reached `main` before this was discovered, because the unit matrix started at
+3.11; it now includes 3.10.
 
 ### Inventory and credentials
 
@@ -171,14 +192,24 @@ on any new machine.
 
 Being explicit, because the gap matters:
 
-- No test here proves real firmware accepts our `AMT_BootSettingData` `Put`. The
-  field delete-list in [`protocol-notes.md`](protocol-notes.md) §2.5 exists
-  because firmware rejects echoed read-only fields, and the mock server cannot
-  independently confirm we got that list right.
+- ~~No test here proves real firmware accepts our `AMT_BootSettingData` `Put`.~~
+  **Now proven.** Stages 5 and 7 armed a one-shot boot against AMT 16.1.30, which
+  exercises the full `Put` including the field delete-list in
+  [`protocol-notes.md`](protocol-notes.md) §2.5. Retained here because the
+  reasoning still holds for every *other* firmware generation, and because the
+  same call did reject an empty `<Source/>` — so this firmware demonstrably
+  enforces its schema, which is what makes the passing result meaningful.
 - Mock servers implement the protocol *as we understand it*. A shared
   misunderstanding between implementation and mock passes both.
 - Real firmware differs across AMT generations and SKUs. Anything version
   dependent is unverified until step 1 runs on that generation.
 
-Until hardware qualification has run, treat this collection as protocol-complete
-and test-covered but **hardware-unverified**.
+This collection is protocol-complete, test-covered, and **hardware-qualified
+against a single AMT 16.1.30 endpoint** as of 2026-07-28. That qualification
+found six defects the first two tiers could not have found, which is the
+concrete argument for this tier existing rather than a theoretical one.
+
+What it still does not cover is listed as Tier 4 in
+[`capability-matrix.md`](capability-matrix.md): a non-zero IDE-R write, whether a
+PXE exchange actually occurred, AMT's internal one-shot role bit, a second
+machine, and any firmware generation other than 16.1.30.
