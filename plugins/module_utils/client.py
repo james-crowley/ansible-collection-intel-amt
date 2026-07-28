@@ -186,7 +186,7 @@ class AmtClient:
                 listener_enabled=_truthy(redirection.get("ListenerEnabled")),
             )
 
-        version = (general or {}).get("Version") or (setup or {}).get("VersionsSupported")
+        version = self._get_amt_version()
 
         return AmtFacts(
             version=version,
@@ -212,6 +212,40 @@ class AmtClient:
             return self._wsman.get(resource_class)
         except _DEGRADABLE_ERRORS:
             return None
+
+    def _get_amt_version(self) -> str | None:
+        """Read the AMT firmware version from ``CIM_SoftwareIdentity``.
+
+        Neither ``AMT_GeneralSettings`` nor ``AMT_SetupAndConfigurationService``
+        carries a version property at all -- verified against the class
+        definitions in ``device-management-toolkit/go-wsman-messages``.
+        ``AMT_GeneralSettings`` exposes ``HostName``, ``DomainName``,
+        ``DigestRealm`` and similar; ``AMT_SetupAndConfigurationService``
+        exposes ``ProvisioningMode`` and ``ProvisioningState``. An earlier
+        implementation read ``Version`` and ``VersionsSupported`` from those two
+        classes, so the reported version was always ``None``.
+
+        The firmware version lives in ``CIM_SoftwareIdentity``, which enumerates
+        several components. The AMT one is the instance whose ``InstanceID`` is
+        ``AMT``, and its version is in ``VersionString``. This is how MeshCmd
+        does it (``agents/meshcmd.js``, which selects the ``AMT`` instance and
+        reads ``VersionString``).
+        """
+        try:
+            instances = self._wsman.enumerate("CIM_SoftwareIdentity")
+        except _DEGRADABLE_ERRORS:
+            return None
+
+        for instance in instances or ():
+            if not isinstance(instance, dict):
+                continue
+            # Match exactly rather than by substring: the enumeration also
+            # carries entries such as "AMTApps" and "BIOS", and a substring
+            # match would report whichever happened to come back first.
+            if str(instance.get("InstanceID", "")).strip() == "AMT":
+                version = instance.get("VersionString")
+                return str(version) if version is not None else None
+        return None
 
     # -- Power ------------------------------------------------------------------
 
