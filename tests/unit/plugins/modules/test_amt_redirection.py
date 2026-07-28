@@ -83,11 +83,28 @@ class TestAmtRedirectionModule:
                 amt_redirection.main()
         result = excinfo.value.kwargs
         assert result["changed"] is False
-        assert result["action"] == "amt_redirection"
+        assert result["operation"]["action"] == "amt_redirection"
+        assert result["operation"]["schema"] == "intel-amt-operation/v1"
         assert result["supported"] == {"ider": True, "sol": True}
         assert result["enabled"]["enabled_state"] == 32768
         assert result["transport_reachable"] == {16994: False, 16995: False}
         fake_client.invoke.assert_not_called()
+
+    def test_receipt_is_nested_under_operation_not_spread_at_top_level(self):
+        # issue #22: the receipt lives under `operation`, never spread at the top level
+        # alongside module-specific keys like `supported`/`enabled`/`transport_reachable`.
+        _set_module_args(BASE_ARGS)
+        fake_client = _make_fake_client()
+        with patch(
+            "ansible_collections.james_crowley.intel_amt.plugins.modules.amt_redirection.WsmanClient.from_connection_options",
+            return_value=fake_client,
+        ):
+            with pytest.raises(AnsibleExitJson) as excinfo:
+                amt_redirection.main()
+        result = excinfo.value.kwargs
+        for moved_field in ("schema", "action", "endpoint", "previous", "desired", "observed", "tls_peer_fingerprint"):
+            assert moved_field not in result, f"{moved_field!r} must not be spread at the top level; it belongs under operation"
+        assert result["operation"]["error_class"] is None
 
     def test_three_signals_are_reported_as_separate_fields_not_one_boolean(self):
         _set_module_args(BASE_ARGS)

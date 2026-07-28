@@ -90,18 +90,6 @@ EXAMPLES = r"""
 """
 
 RETURN = r"""
-schema:
-  description: Always V(intel-amt-operation/v1).
-  type: str
-  returned: always
-action:
-  description: Always V(amt_redirection).
-  type: str
-  returned: always
-endpoint:
-  description: The C(host:port) this operation was performed against.
-  type: str
-  returned: always
 changed:
   description: >-
     V(true) only when O(state) was given, differed from the observed state, and (outside check
@@ -128,10 +116,42 @@ transport_reachable:
     M(james_crowley.intel_amt.amt_media) for that.
   type: dict
   returned: always
-error_class:
-  description: A stable machine-readable failure class. Only present on failure.
-  type: str
-  returned: on failure
+operation:
+  description: >-
+    The C(intel-amt-operation/v1) receipt for this action, in the same nested shape every module
+    in this collection returns it under.
+  type: dict
+  returned: always
+  contains:
+    schema:
+      description: Always V(intel-amt-operation/v1).
+      type: str
+    action:
+      description: Always V(amt_redirection).
+      type: str
+    endpoint:
+      description: The C(host:port) this operation was performed against.
+      type: str
+    changed:
+      description: Mirrors the top-level RV(changed).
+      type: bool
+    previous:
+      description: The C(AMT_RedirectionService) state name observed before any action, or V(null).
+      type: str
+    desired:
+      description: The O(state) requested, or V(null) when O(state) is absent.
+      type: str
+    observed:
+      description: Same shape as the top-level RV(enabled).
+      type: dict
+    tls_peer_fingerprint:
+      description: >-
+        SHA-256 fingerprint of the TLS leaf certificate observed during this operation, or V(null)
+        over plaintext.
+      type: str
+    error_class:
+      description: A stable machine-readable failure class. V(null) on success.
+      type: str
 """
 
 from ansible.module_utils.basic import AnsibleModule, missing_required_lib
@@ -228,13 +248,14 @@ def main() -> None:
         desired=desired_state_name,
         observed=enabled,
         tls_peer_fingerprint=(client.last_peer_certificate.sha256_fingerprint if client.last_peer_certificate else None),
-        extra={
-            "supported": supported,
-            "enabled": enabled,
-            "transport_reachable": transport_reachable,
-        },
     )
-    module.exit_json(**receipt.to_dict())
+    module.exit_json(
+        changed=changed,
+        supported=supported,
+        enabled=enabled,
+        transport_reachable=transport_reachable,
+        operation=receipt.to_dict(),
+    )
 
 
 if __name__ == "__main__":
