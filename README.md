@@ -123,6 +123,12 @@ mutually exclusive modes:
   mode you want: AMT certificates are typically self-signed and served on a bare
   IP address, where chain and hostname verification cannot succeed.
 
+> **`amt_media` is the exception**, because the redirection plane is a raw TLS
+> socket with no CA-chain path. It supports pinning only: `tls_fingerprint` is
+> **required** when `use_tls: true`, and `ca_path` is **rejected** rather than
+> silently ignored. TLS without a pin would be encrypted but unauthenticated,
+> which would let an on-path attacker serve its own boot media.
+
 ### The plaintext escape hatch, and why it exists
 
 Some AMT machines **cannot do TLS at all.** AMT provisioned in Small Business
