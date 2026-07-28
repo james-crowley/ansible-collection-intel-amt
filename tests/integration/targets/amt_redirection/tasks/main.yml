@@ -1,0 +1,217 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Drives the real amt_redirection module against the local mock WS-Man server.
+#
+# transport_reachable always reports both redirection ports (16994/16995) as
+# unreachable here: that probe is a bare TCP connect to the *real* well-known
+# redirection ports on the target host (docs/protocol-notes.md s1), which is
+# independent of whatever random port the mock WS-Man server itself is listening on
+# for this run, and nothing in this test environment listens on those specific ports.
+
+- name: Create a scratch directory for this target's runtime files
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: amt_redirection_integration_
+  register: scratch_dir
+  delegate_to: localhost
+
+- name: Set mock-server paths for this run
+  ansible.builtin.set_fact:
+    mock_servers_dir: "{{ role_path }}/../../mock_servers"
+    plain_ready_file: "{{ scratch_dir.path }}/wsman_plain_ready.json"
+
+- name: Start the plaintext mock WS-Man server
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ plain_ready_file }} \
+      > {{ scratch_dir.path }}/wsman_plain.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: plain_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Wait for the mock server to report ready
+  ansible.builtin.wait_for:
+    path: "{{ plain_ready_file }}"
+    state: present
+    timeout: 15
+  delegate_to: localhost
+
+- name: Read mock server connection info and pid
+  ansible.builtin.set_fact:
+    plain_info: "{{ lookup('ansible.builtin.file', plain_ready_file) | from_json }}"
+    plain_pid: "{{ plain_start.stdout | trim }}"
+
+- name: Exercise amt_redirection against the mock server
+  block:
+    - name: Inspect redirection status without mutating anything
+      james_crowley.intel_amt.amt_redirection:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: redir_inspect
+
+    - name: Assert the inspect call reports the mock's defaults and changed=false
+      ansible.builtin.assert:
+        that:
+          - redir_inspect.changed == false
+          - redir_inspect.supported.ider == true
+          - redir_inspect.supported.sol == true
+          - redir_inspect.enabled.enabled_state == 32768
+          - redir_inspect.enabled.ider_enabled == false
+          - redir_inspect.enabled.sol_enabled == false
+          # JSON object keys are always strings, so the port numbers arrive as string keys here.
+          - redir_inspect.transport_reachable['16994'] == false
+          - redir_inspect.transport_reachable['16995'] == false
+
+    - name: Idempotence -- inspecting again still reports changed=false
+      james_crowley.intel_amt.amt_redirection:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: redir_inspect_again
+
+    - name: Assert the repeated inspect is still changed=false
+      ansible.builtin.assert:
+        that:
+          - redir_inspect_again.changed == false
+
+    - name: Check mode previews enabling IDE-R without mutating anything
+      james_crowley.intel_amt.amt_redirection:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: ider
+      delegate_to: localhost
+      no_log: true
+      check_mode: true
+      register: redir_check
+
+    - name: Assert check mode reports the intended change but performs no mutation
+      ansible.builtin.assert:
+        that:
+          - redir_check.changed == true
+
+    - name: Confirm check mode did not actually enable IDE-R
+      james_crowley.intel_amt.amt_redirection:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: redir_still_disabled
+
+    - name: Assert IDE-R is still disabled after the check-mode preview
+      ansible.builtin.assert:
+        that:
+          - redir_still_disabled.enabled.ider_enabled == false
+
+    - name: Enable IDE-R for real
+      james_crowley.intel_amt.amt_redirection:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: ider
+      delegate_to: localhost
+      no_log: true
+      register: redir_enable
+
+    - name: Assert enabling IDE-R reports changed=true and the new state
+      ansible.builtin.assert:
+        that:
+          - redir_enable.changed == true
+          - redir_enable.enabled.ider_enabled == true
+          - redir_enable.enabled.enabled_state == 32769
+
+    - name: Idempotence -- requesting IDE-R again reports changed=false
+      james_crowley.intel_amt.amt_redirection:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: ider
+      delegate_to: localhost
+      no_log: true
+      register: redir_enable_again
+
+    - name: Assert the already-enabled request is a no-op
+      ansible.builtin.assert:
+        that:
+          - redir_enable_again.changed == false
+
+    - name: Disable redirection again to leave the mock in its starting state
+      james_crowley.intel_amt.amt_redirection:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: disabled
+      delegate_to: localhost
+      no_log: true
+      register: redir_disable
+
+    - name: Assert disabling again reports changed=true
+      ansible.builtin.assert:
+        that:
+          - redir_disable.changed == true
+          - redir_disable.enabled.ider_enabled == false
+
+    - name: Fault injection -- wrong password is refused with error_class=authentication
+      james_crowley.intel_amt.amt_redirection:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: definitely-the-wrong-password
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: redir_bad_password
+      ignore_errors: true
+
+    - name: Assert the wrong-password call failed with error_class=authentication
+      ansible.builtin.assert:
+        that:
+          - redir_bad_password.failed == true
+          - redir_bad_password.error_class == 'authentication'
+  always:
+    - name: Stop the mock WS-Man server
+      ansible.builtin.command: "kill {{ plain_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup; the assertions above are what must pass.
+      changed_when: false
+
+    - name: Remove the scratch directory
+      ansible.builtin.file:
+        path: "{{ scratch_dir.path }}"
+        state: absent
+      delegate_to: localhost

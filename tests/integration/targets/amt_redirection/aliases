@@ -1,0 +1,5 @@
+# Drives the real amt_redirection module against the local mock WS-Man server. No
+# network access, no privilege escalation, and no destructive action against anything
+# -- see docs/testing.md.
+needs/file/tests/integration/mock_servers/wsman_server.py
+needs/file/tests/integration/mock_servers/run_wsman_mock.py

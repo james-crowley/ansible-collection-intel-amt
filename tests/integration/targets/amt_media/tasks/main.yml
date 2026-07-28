@@ -1,0 +1,376 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Drives the real amt_media module against the local mock IDE-R server.
+#
+# Unlike the WS-Man-backed modules, amt_media's "attach" forks a real detached daemon
+# (plugins/module_utils/media_session.py) that holds the actual IDE-R connection. The
+# mock IDE-R server plays firmware, which means *it* must actively issue the SCSI
+# commands (tests/integration/mock_servers/run_ider_mock.py drives a fixed
+# TEST_UNIT_READY + READ_10 + WRITE_10 sequence automatically once a client connects --
+# see that script's docstring for why nothing else in this test could do that driving).
+#
+# Three independent mock instances, run one at a time: (A) the read+write proof over
+# plaintext, (B) the TLS/fingerprint-pinning happy path, (C) the wrong-password fault
+# injection. Keeping them sequential avoids juggling three sets of background pids at
+# once and keeps IDE-R's single-connection-at-a-time nature from ever being in doubt.
+
+- name: Create a scratch directory for this target's runtime files
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: amt_media_integration_
+  register: scratch_dir
+  delegate_to: localhost
+
+- name: Set common paths and the known write payload for this run
+  ansible.builtin.set_fact:
+    mock_servers_dir: "{{ role_path }}/../../mock_servers"
+    runtime_dir: "{{ scratch_dir.path }}/media-runtime"
+    iso_path: "{{ scratch_dir.path }}/boot.iso"
+    floppy_path: "{{ scratch_dir.path }}/answer.img"
+    # Exactly 512 bytes (one floppy sector), ASCII only so slurp/b64decode round-trips
+    # cleanly through Jinja without any binary-encoding concerns in the assertions below.
+    write_payload_b64: "{{ ('AMT-INTEGRATION-TEST-PAYLOAD-' + ('Z' * 600))[:512] | b64encode }}"
+
+- name: Create the backing images (must be a multiple of 512 bytes -- see ider.MediaImage)
+  ansible.builtin.command: "dd if=/dev/zero of={{ item.path }} bs=512 count={{ item.count }}"
+  loop:
+    - {path: "{{ iso_path }}", count: 8} # 4096 bytes = 2 CD sectors
+    - {path: "{{ floppy_path }}", count: 4} # 2048 bytes = 4 floppy sectors
+  delegate_to: localhost
+  changed_when: true
+
+# --------------------------------------------------------------------------------
+# (A) Plaintext: attach both slots, prove a read and a (multi-frame) write, detach.
+# --------------------------------------------------------------------------------
+- name: Scenario A -- plaintext read and write proof
+  block:
+    - name: Start the mock IDE-R server, driving a read (cdrom) and a write (floppy)
+      ansible.builtin.shell: |
+        set -e
+        nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_ider_mock.py \
+          --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ scratch_dir.path }}/ider_a_ready.json \
+          --read-device cdrom --read-sectors 1 \
+          --write-payload-b64 {{ write_payload_b64 }} --write-frame-size 128 \
+          > {{ scratch_dir.path }}/ider_a.log 2>&1 &
+        echo $!
+      args:
+        executable: /bin/bash
+      register: ider_a_start
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Wait for the mock IDE-R server to report ready
+      ansible.builtin.wait_for:
+        path: "{{ scratch_dir.path }}/ider_a_ready.json"
+        state: present
+        timeout: 15
+      delegate_to: localhost
+
+    - name: Read the mock IDE-R server's connection info and pid
+      ansible.builtin.set_fact:
+        ider_a_info: "{{ lookup('ansible.builtin.file', scratch_dir.path + '/ider_a_ready.json') | from_json }}"
+        ider_a_pid: "{{ ider_a_start.stdout | trim }}"
+
+    - name: Attach the bootable ISO and the writable answer image in one session
+      james_crowley.intel_amt.amt_media:
+        host: 127.0.0.1
+        port: "{{ ider_a_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        cdrom: "{{ iso_path }}"
+        floppy: "{{ floppy_path }}"
+        floppy_writable: true
+        start_mode: immediate
+        state: attached
+        runtime_dir: "{{ runtime_dir }}"
+        attach_timeout: 15
+      delegate_to: localhost
+      no_log: true
+      register: media_attach
+
+    - name: Assert the attach reports changed=true and an attached session
+      ansible.builtin.assert:
+        that:
+          - media_attach.changed == true
+          - media_attach.session_state == 'attached'
+          - media_attach.session_id | length > 0
+          - "'cdrom' in media_attach.devices"
+          - "'floppy' in media_attach.devices"
+          - media_attach.devices.cdrom.writable == false
+          - media_attach.devices.floppy.writable == true
+
+    - name: Idempotence -- re-attaching the same session_id reports changed=false
+      james_crowley.intel_amt.amt_media:
+        host: 127.0.0.1
+        port: "{{ ider_a_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        cdrom: "{{ iso_path }}"
+        floppy: "{{ floppy_path }}"
+        floppy_writable: true
+        session_id: "{{ media_attach.session_id }}"
+        state: attached
+        runtime_dir: "{{ runtime_dir }}"
+      delegate_to: localhost
+      no_log: true
+      register: media_attach_again
+
+    - name: Assert re-attaching the live session is a no-op
+      ansible.builtin.assert:
+        that:
+          - media_attach_again.changed == false
+          - media_attach_again.session_id == media_attach.session_id
+          - media_attach_again.session_state == 'attached'
+
+    - name: Wait for the mock's scripted read+write sequence to finish
+      ansible.builtin.set_fact:
+        ider_a_result: "{{ lookup('ansible.builtin.file', scratch_dir.path + '/ider_a_ready.json') | from_json }}"
+      until: (ider_a_result.read_ok is not none) and (ider_a_result.write_ok is not none)
+      retries: 30
+      delay: 1
+      delegate_to: localhost
+
+    - name: Assert the read and the (multi-frame) write both succeeded
+      ansible.builtin.assert:
+        that:
+          - ider_a_result.error is none
+          - ider_a_result.read_ok == true
+          - ider_a_result.read_bytes_len == ider_a_result.read_bytes_expected_len == 2048
+          - ider_a_result.write_ok == true
+
+    - name: Independently read the floppy image back off disk
+      ansible.builtin.slurp:
+        src: "{{ floppy_path }}"
+      delegate_to: localhost
+      register: floppy_on_disk
+
+    - name: Assert the exact write payload landed at the expected offset on disk
+      ansible.builtin.assert:
+        that:
+          - (floppy_on_disk.content | b64decode)[:512] == (write_payload_b64 | b64decode)
+
+    - name: Detach the session
+      james_crowley.intel_amt.amt_media:
+        host: 127.0.0.1
+        session_id: "{{ media_attach.session_id }}"
+        password: test-password-not-real
+        state: detached
+        runtime_dir: "{{ runtime_dir }}"
+        detach_timeout: 15
+      delegate_to: localhost
+      no_log: true
+      register: media_detach
+
+    - name: Assert the detach reports changed=true
+      ansible.builtin.assert:
+        that:
+          - media_detach.changed == true
+
+    - name: Idempotence -- detaching an already-detached session reports changed=false
+      james_crowley.intel_amt.amt_media:
+        host: 127.0.0.1
+        session_id: "{{ media_attach.session_id }}"
+        password: test-password-not-real
+        state: detached
+        runtime_dir: "{{ runtime_dir }}"
+      delegate_to: localhost
+      no_log: true
+      register: media_detach_again
+
+    - name: Assert re-detaching is a safe no-op
+      ansible.builtin.assert:
+        that:
+          - media_detach_again.changed == false
+          - media_detach_again.session_state == 'unknown'
+
+    - name: Check mode previews a fresh attach without spawning anything
+      james_crowley.intel_amt.amt_media:
+        host: 127.0.0.1
+        port: "{{ ider_a_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        floppy: "{{ floppy_path }}"
+        session_id: check-mode-preview-session
+        state: attached
+        runtime_dir: "{{ runtime_dir }}"
+      delegate_to: localhost
+      no_log: true
+      check_mode: true
+      register: media_check
+
+    - name: Assert check mode reports the intended change but spawned no process
+      ansible.builtin.assert:
+        that:
+          - media_check.changed == true
+          - media_check.pid is none
+
+    - name: Confirm check mode left no state file behind
+      ansible.builtin.stat:
+        path: "{{ runtime_dir }}/check-mode-preview-session.json"
+      delegate_to: localhost
+      register: check_mode_state_file
+
+    - name: Assert the check-mode state file truly does not exist
+      ansible.builtin.assert:
+        that:
+          - check_mode_state_file.stat.exists == false
+  always:
+    - name: Stop the mock IDE-R server (scenario A)
+      ansible.builtin.command: "kill {{ ider_a_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup; the assertions above are what must pass.
+      changed_when: false
+      when: ider_a_pid is defined
+
+# --------------------------------------------------------------------------------
+# (B) TLS with a pinned fingerprint -- attach, confirm, detach. No drive sequence
+# needed here; the read/write plumbing was already proven in scenario A.
+# --------------------------------------------------------------------------------
+- name: Scenario B -- TLS with a pinned fingerprint
+  block:
+    - name: Start the mock IDE-R server over TLS
+      ansible.builtin.shell: |
+        set -e
+        nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_ider_mock.py \
+          --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ scratch_dir.path }}/ider_b_ready.json --use-tls \
+          > {{ scratch_dir.path }}/ider_b.log 2>&1 &
+        echo $!
+      args:
+        executable: /bin/bash
+      register: ider_b_start
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Wait for the mock IDE-R server to report ready
+      ansible.builtin.wait_for:
+        path: "{{ scratch_dir.path }}/ider_b_ready.json"
+        state: present
+        timeout: 15
+      delegate_to: localhost
+
+    - name: Read the mock IDE-R server's connection info and pid
+      ansible.builtin.set_fact:
+        ider_b_info: "{{ lookup('ansible.builtin.file', scratch_dir.path + '/ider_b_ready.json') | from_json }}"
+        ider_b_pid: "{{ ider_b_start.stdout | trim }}"
+
+    - name: Attach the writable image over TLS with the mock's fingerprint pinned
+      james_crowley.intel_amt.amt_media:
+        host: 127.0.0.1
+        port: "{{ ider_b_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: true
+        tls_fingerprint: "{{ ider_b_info.cert_fingerprint }}"
+        floppy: "{{ floppy_path }}"
+        floppy_writable: true
+        state: attached
+        runtime_dir: "{{ runtime_dir }}"
+        attach_timeout: 15
+      delegate_to: localhost
+      no_log: true
+      register: media_tls_attach
+
+    - name: Assert the TLS attach succeeded
+      ansible.builtin.assert:
+        that:
+          - media_tls_attach.changed == true
+          - media_tls_attach.session_state == 'attached'
+
+    - name: Detach the TLS session
+      james_crowley.intel_amt.amt_media:
+        host: 127.0.0.1
+        session_id: "{{ media_tls_attach.session_id }}"
+        password: test-password-not-real
+        state: detached
+        runtime_dir: "{{ runtime_dir }}"
+        detach_timeout: 15
+      delegate_to: localhost
+      no_log: true
+      register: media_tls_detach
+
+    - name: Assert the TLS session detached cleanly
+      ansible.builtin.assert:
+        that:
+          - media_tls_detach.changed == true
+  always:
+    - name: Stop the mock IDE-R server (scenario B)
+      ansible.builtin.command: "kill {{ ider_b_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
+      changed_when: false
+      when: ider_b_pid is defined
+
+# --------------------------------------------------------------------------------
+# (C) Fault injection -- wrong password is refused with error_class=authentication.
+# --------------------------------------------------------------------------------
+- name: Scenario C -- wrong-password fault injection
+  block:
+    - name: Start the mock IDE-R server
+      ansible.builtin.shell: |
+        set -e
+        nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_ider_mock.py \
+          --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ scratch_dir.path }}/ider_c_ready.json \
+          > {{ scratch_dir.path }}/ider_c.log 2>&1 &
+        echo $!
+      args:
+        executable: /bin/bash
+      register: ider_c_start
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Wait for the mock IDE-R server to report ready
+      ansible.builtin.wait_for:
+        path: "{{ scratch_dir.path }}/ider_c_ready.json"
+        state: present
+        timeout: 15
+      delegate_to: localhost
+
+    - name: Read the mock IDE-R server's connection info and pid
+      ansible.builtin.set_fact:
+        ider_c_info: "{{ lookup('ansible.builtin.file', scratch_dir.path + '/ider_c_ready.json') | from_json }}"
+        ider_c_pid: "{{ ider_c_start.stdout | trim }}"
+
+    - name: Attach with the wrong password
+      james_crowley.intel_amt.amt_media:
+        host: 127.0.0.1
+        port: "{{ ider_c_info.port }}"
+        username: admin
+        password: definitely-the-wrong-password
+        use_tls: false
+        allow_insecure_transport: true
+        floppy: "{{ floppy_path }}"
+        state: attached
+        runtime_dir: "{{ runtime_dir }}"
+        attach_timeout: 15
+      delegate_to: localhost
+      no_log: true
+      register: media_bad_password
+      ignore_errors: true
+
+    - name: Assert the wrong-password attach failed with error_class=authentication
+      ansible.builtin.assert:
+        that:
+          - media_bad_password.failed == true
+          - media_bad_password.error_class == 'authentication'
+  always:
+    - name: Stop the mock IDE-R server (scenario C)
+      ansible.builtin.command: "kill {{ ider_c_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
+      changed_when: false
+      when: ider_c_pid is defined
+
+- name: Remove the scratch directory
+  ansible.builtin.file:
+    path: "{{ scratch_dir.path }}"
+    state: absent
+  delegate_to: localhost

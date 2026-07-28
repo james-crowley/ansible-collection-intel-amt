@@ -1,0 +1,199 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Drives the real amt_boot module against the local mock WS-Man server.
+#
+# The mock's Put handler rejects AMT_BootSettingData.Put calls that echo back any
+# READONLY_BOOT_FIELDS property (docs/protocol-notes.md s2.5), and that rejection is
+# *on by default* (FaultConfig.reject_boot_readonly_fields=True) -- this target never
+# turns it off. That means the plain "arm a PXE boot" task below only succeeds at all
+# if amt_boot.py's DELETE_BEFORE_PUT_FIELDS list actually stripped those fields before
+# Put; a regression in that list fails this task, not a separate one. amt_boot is not
+# idempotent by contract (every successful arm reports changed=true, per its own RETURN
+# documentation), so there is no idempotence assertion here to match.
+
+- name: Create a scratch directory for this target's runtime files
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: amt_boot_integration_
+  register: scratch_dir
+  delegate_to: localhost
+
+- name: Set mock-server paths for this run
+  ansible.builtin.set_fact:
+    mock_servers_dir: "{{ role_path }}/../../mock_servers"
+    plain_ready_file: "{{ scratch_dir.path }}/wsman_plain_ready.json"
+    tls_ready_file: "{{ scratch_dir.path }}/wsman_tls_ready.json"
+
+- name: Start the plaintext mock WS-Man server
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ plain_ready_file }} \
+      > {{ scratch_dir.path }}/wsman_plain.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: plain_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Start the TLS mock WS-Man server
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ tls_ready_file }} --use-tls \
+      > {{ scratch_dir.path }}/wsman_tls.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: tls_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Wait for both mock servers to report ready
+  ansible.builtin.wait_for:
+    path: "{{ item }}"
+    state: present
+    timeout: 15
+  loop:
+    - "{{ plain_ready_file }}"
+    - "{{ tls_ready_file }}"
+  delegate_to: localhost
+
+- name: Read mock server connection info and pids
+  ansible.builtin.set_fact:
+    plain_info: "{{ lookup('ansible.builtin.file', plain_ready_file) | from_json }}"
+    tls_info: "{{ lookup('ansible.builtin.file', tls_ready_file) | from_json }}"
+    plain_pid: "{{ plain_start.stdout | trim }}"
+    tls_pid: "{{ tls_start.stdout | trim }}"
+
+- name: Exercise amt_boot against the mock server
+  block:
+    - name: Preview a PXE boot arm in check mode
+      james_crowley.intel_amt.amt_boot:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        device: pxe
+        action_token: preview-only-not-a-secret
+      delegate_to: localhost
+      no_log: true
+      check_mode: true
+      register: boot_check
+
+    - name: Assert check mode reports the plan but performs no mutation
+      ansible.builtin.assert:
+        that:
+          - boot_check.changed == true
+          - boot_check.device == 'pxe'
+          - boot_check.observed == boot_check.previous
+
+    - name: Arm a one-time PXE boot for real -- exercises the read-only-field delete-list
+      james_crowley.intel_amt.amt_boot:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        device: pxe
+        action_token: real-arm-not-a-secret
+      delegate_to: localhost
+      no_log: true
+      register: boot_pxe
+
+    - name: Assert the Put through the mock's read-only-field rejection succeeded
+      ansible.builtin.assert:
+        that:
+          - boot_pxe.changed == true
+          - boot_pxe.device == 'pxe'
+          - boot_pxe.observed.UseIDER == 'false'
+          - 'boot_pxe.boot_source_selector.InstanceID == "Intel(r) AMT: Force PXE Boot"'
+
+    - name: Arm IDE-R floppy redirection over TLS with the mock's fingerprint pinned
+      james_crowley.intel_amt.amt_boot:
+        host: 127.0.0.1
+        port: "{{ tls_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: true
+        tls_fingerprint: "{{ tls_info.cert_fingerprint }}"
+        device: ider_floppy
+        action_token: ider-arm-not-a-secret
+      delegate_to: localhost
+      no_log: true
+      register: boot_ider
+
+    - name: Assert the IDE-R arm over TLS succeeded and named no native boot source
+      ansible.builtin.assert:
+        that:
+          - boot_ider.changed == true
+          - boot_ider.device == 'ider_floppy'
+          - boot_ider.boot_source_selector is none
+          - boot_ider.observed.UseIDER == 'true'
+
+    - name: Empty action_token is rejected before any mutation
+      james_crowley.intel_amt.amt_boot:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        device: pxe
+        action_token: ""
+      delegate_to: localhost
+      no_log: true
+      register: boot_empty_token
+      ignore_errors: true
+
+    - name: Assert the empty-token call failed with error_class=invalid_state
+      ansible.builtin.assert:
+        that:
+          - boot_empty_token.failed == true
+          - boot_empty_token.error_class == 'invalid_state'
+
+    - name: Fault injection -- wrong password is refused with error_class=authentication
+      james_crowley.intel_amt.amt_boot:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: definitely-the-wrong-password
+        use_tls: false
+        allow_insecure_transport: true
+        device: pxe
+        action_token: irrelevant-not-a-secret
+      delegate_to: localhost
+      no_log: true
+      register: boot_bad_password
+      ignore_errors: true
+
+    - name: Assert the wrong-password call failed with error_class=authentication
+      ansible.builtin.assert:
+        that:
+          - boot_bad_password.failed == true
+          - boot_bad_password.error_class == 'authentication'
+  always:
+    - name: Stop the plaintext mock WS-Man server
+      ansible.builtin.command: "kill {{ plain_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup; the assertions above are what must pass.
+      changed_when: false
+
+    - name: Stop the TLS mock WS-Man server
+      ansible.builtin.command: "kill {{ tls_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
+      changed_when: false
+
+    - name: Remove the scratch directory
+      ansible.builtin.file:
+        path: "{{ scratch_dir.path }}"
+        state: absent
+      delegate_to: localhost
