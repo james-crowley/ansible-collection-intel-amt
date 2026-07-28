@@ -14,6 +14,7 @@ endpoint on the wire, not just that its Python happens to be self-consistent.
 from __future__ import annotations
 
 import hashlib
+import shutil
 import socket
 import ssl
 import threading
@@ -192,6 +193,10 @@ class TestDigestAuth:
         assert ok is False
 
 
+@pytest.mark.skipif(
+    shutil.which("openssl") is None,
+    reason="TLS mode generates a throw-away self-signed certificate via the openssl CLI, which is absent on this host",
+)
 class TestTls:
     def test_tls_serves_the_fingerprint_it_reports(self):
         with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD, use_tls=True) as srv:
