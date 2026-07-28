@@ -1,0 +1,3 @@
+---
+bugfixes:
+  - "tests/hardware/qualify_power.yml - restore the starting power state using ``previous_state``, the key ``amt_power`` actually returns. It referenced a non-existent ``power_state`` key, so the guard always evaluated to ``unknown``, the restore silently skipped on every run, and the stage reported that it had left the machine as-is. An assertion now fails loudly if the starting state cannot be read."
