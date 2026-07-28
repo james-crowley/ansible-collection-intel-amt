@@ -1,0 +1,55 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Phase flow: validate -> probe -> attach media -> arm one-time boot -> reset
+# (the destructive boundary) -> observe -> wait for hand-off -> detach.
+#
+# block/rescue/always is the mechanism that guarantees the "always detach"
+# requirement: whatever fails inside the block, the always section still runs
+# and stops any media daemon left holding the target's boot device open.
+
+- name: Validate role preconditions (fan-out guard, confirmation gate, required vars)
+  ansible.builtin.include_tasks: validate.yml
+
+- name: Load and reconcile prior run state for this target
+  ansible.builtin.include_tasks: state.yml
+
+- name: Run the install lifecycle
+  block:
+    - name: Probe firmware capabilities and state before any mutation
+      ansible.builtin.include_tasks: probe.yml
+
+    - name: Attach installer media over IDE-R
+      ansible.builtin.include_tasks: attach_media.yml
+      when: amt_baremetal_install_boot_provider == 'ider_cdrom'
+
+    - name: Arm the one-time boot selection
+      ansible.builtin.include_tasks: arm_boot.yml
+
+    - name: Reset -- the destructive boundary
+      ansible.builtin.include_tasks: reset.yml
+
+    - name: Observe the post-reset power state
+      ansible.builtin.include_tasks: observe.yml
+
+    - name: Wait for hand-off to the installed/booted OS
+      ansible.builtin.include_tasks: wait_for_handoff.yml
+      when: amt_baremetal_install_wait_for_handoff | bool
+  rescue:
+    - name: Record the failure for the next resumption attempt
+      ansible.builtin.include_tasks: record_failure.yml
+
+    - name: Re-raise -- this role never swallows a failure to keep going
+      ansible.builtin.fail:
+        msg: >-
+          amt_baremetal_install failed for {{ amt_baremetal_install_host }}:
+          {{ amt_baremetal_install_fail_msg | default('see previous task output') }}.
+          Re-running this role resumes from the last confirmed step rather
+          than starting over blindly; see this role's README.md#resumability
+          before retrying against a boot/reset of uncertain outcome.
+  always:
+    - name: Always detach media, even on failure, so no daemon is left holding the boot device open
+      ansible.builtin.include_tasks: detach_media.yml
+      when: amt_baremetal_install_run_state is defined

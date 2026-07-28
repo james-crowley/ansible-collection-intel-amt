@@ -1,0 +1,63 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Only ever included when amt_baremetal_install_boot_provider == 'ider_cdrom' (see tasks/main.yml).
+#
+# Passing amt_baremetal_install_run_state.session_id through to amt_media's session_id option is
+# what makes this idempotent across resumed runs: if tasks/state.yml carried a
+# live session id forward (prior run got interrupted after attaching but
+# before arming boot), amt_media confirms it instead of starting a second one
+# -- IDE-R is a single-session protocol, firmware only has one connection to
+# give, and amt_media's own contract guarantees this (see its DOCUMENTATION).
+
+- name: Ensure the IDE-R redirection service is enabled before attaching media
+  james_crowley.intel_amt.amt_redirection:
+    host: "{{ amt_baremetal_install_host }}"
+    port: "{{ amt_baremetal_install_port }}"
+    username: "{{ amt_baremetal_install_username }}"
+    password: "{{ amt_baremetal_install_password }}"
+    use_tls: "{{ amt_baremetal_install_use_tls }}"
+    allow_insecure_transport: "{{ amt_baremetal_install_allow_insecure_transport }}"
+    validate_certs: "{{ amt_baremetal_install_validate_certs }}"
+    ca_path: "{{ amt_baremetal_install_ca_path }}"
+    tls_fingerprint: "{{ amt_baremetal_install_tls_fingerprint }}"
+    timeout: "{{ amt_baremetal_install_timeout }}"
+    connect_timeout: "{{ amt_baremetal_install_connect_timeout }}"
+    state: ider
+  delegate_to: localhost
+  no_log: true
+  register: amt_baremetal_install_redirection_result
+
+- name: Attach installer media over IDE-R
+  james_crowley.intel_amt.amt_media:
+    host: "{{ amt_baremetal_install_host }}"
+    username: "{{ amt_baremetal_install_username }}"
+    password: "{{ amt_baremetal_install_password }}"
+    use_tls: "{{ amt_baremetal_install_use_tls }}"
+    allow_insecure_transport: "{{ amt_baremetal_install_allow_insecure_transport }}"
+    validate_certs: "{{ amt_baremetal_install_validate_certs }}"
+    tls_fingerprint: "{{ amt_baremetal_install_tls_fingerprint }}"
+    cdrom: "{{ amt_baremetal_install_iso_path }}"
+    floppy: "{{ amt_baremetal_install_answer_image_path }}"
+    floppy_writable: "{{ (amt_baremetal_install_answer_image_writable | bool) if amt_baremetal_install_answer_image_path else false }}"
+    start_mode: "{{ amt_baremetal_install_media_start_mode }}"
+    allowed_directory: "{{ amt_baremetal_install_media_allowed_directory }}"
+    runtime_dir: "{{ amt_baremetal_install_media_runtime_dir }}"
+    attach_timeout: "{{ amt_baremetal_install_media_attach_timeout }}"
+    session_id: "{{ amt_baremetal_install_run_state.session_id }}"
+    state: attached
+  delegate_to: localhost
+  no_log: true
+  register: amt_baremetal_install_media_attach_result
+
+- name: Record the media session id and attached status
+  ansible.builtin.set_fact:
+    amt_baremetal_install_run_state: >-
+      {{ amt_baremetal_install_run_state
+         | combine({'media_attached': true,
+                     'session_id': amt_baremetal_install_media_attach_result.session_id}) }}
+
+- name: Persist run state after attaching media
+  ansible.builtin.include_tasks: save_state.yml

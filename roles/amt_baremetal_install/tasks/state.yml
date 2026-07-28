@@ -1,0 +1,86 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Resumability core. A separate ansible-playbook invocation has no memory of a
+# prior, interrupted run of this role, so that memory has to live somewhere
+# durable: one small JSON file per target, keyed by amt_baremetal_install_host, on the
+# controller. This mirrors the pattern amt_media itself uses for its
+# session-state file (plugins/module_utils/media_session.py) for the same
+# reason -- separate process invocations need a channel between them.
+#
+# What this file protects against: a run that armed a one-time boot selection
+# and/or issued a reset, then got interrupted (Ctrl-C, controller crash,
+# network partition) before confirming the outcome. amt_boot must never be
+# silently re-armed, and amt_power's reset is never retried automatically --
+# so a naive re-run that ignored this history could double-arm or
+# double-reset a machine whose first attempt may have already succeeded.
+
+- name: Ensure the run-state directory exists
+  ansible.builtin.file:
+    path: "{{ amt_baremetal_install_state_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+
+- name: Compute this target's run-state file path
+  ansible.builtin.set_fact:
+    amt_baremetal_install_state_file: "{{ amt_baremetal_install_state_dir }}/{{ amt_baremetal_install_host | replace(':', '_') | replace('/', '_') }}.json"
+
+- name: Check whether a prior run left state behind
+  ansible.builtin.stat:
+    path: "{{ amt_baremetal_install_state_file }}"
+  delegate_to: localhost
+  register: amt_baremetal_install_state_stat
+
+- name: Load prior run state
+  ansible.builtin.include_vars:
+    file: "{{ amt_baremetal_install_state_file }}"
+    name: amt_baremetal_install_prior_state
+  when: amt_baremetal_install_state_stat.stat.exists
+
+- name: Default run state when no prior state file exists
+  ansible.builtin.set_fact:
+    amt_baremetal_install_prior_state: "{{ amt_baremetal_install_prior_state | default(amt_baremetal_install_default_state) }}"
+
+- name: Start from a clean slate when the prior run fully completed
+  ansible.builtin.set_fact:
+    amt_baremetal_install_run_state: >-
+      {{ amt_baremetal_install_default_state
+         if (amt_baremetal_install_prior_state.reset_confirmed | default(false) | bool)
+         else amt_baremetal_install_prior_state }}
+
+- name: Refuse to silently resume past an uncertain boot/reset without operator acknowledgement
+  ansible.builtin.assert:
+    that:
+      - amt_baremetal_install_force_resume | bool
+    fail_msg: >-
+      A prior run for {{ amt_baremetal_install_host }} left state indicating
+      boot_armed={{ amt_baremetal_install_run_state.boot_armed }} and
+      reset_issued={{ amt_baremetal_install_run_state.reset_issued }} with
+      reset_confirmed={{ amt_baremetal_install_run_state.reset_confirmed }}
+      (state file: {{ amt_baremetal_install_state_file }}). This role never silently re-arms
+      one-time boot or re-issues a reset of uncertain outcome. Use the manual
+      recovery path in tests/hardware/README.md (KVM console / MEBx) to
+      confirm the machine's actual boot state, then re-run with
+      -e amt_baremetal_install_force_resume=true to proceed -- a fresh action_token is always
+      generated; the previous one is never reused. If the machine is already
+      confirmed installed and only needs its media detached, include this
+      role's tasks/detach_media.yml directly rather than the whole role.
+  when:
+    - amt_baremetal_install_run_state.boot_armed | default(false) | bool
+    - not (amt_baremetal_install_run_state.reset_confirmed | default(false) | bool)
+
+- name: Clear armed/reset flags before an acknowledged resume attempt
+  ansible.builtin.set_fact:
+    amt_baremetal_install_run_state: >-
+      {{ amt_baremetal_install_run_state
+         | combine({'boot_armed': false, 'reset_issued': false, 'action_token_issued_at': None}) }}
+  when:
+    - amt_baremetal_install_run_state.boot_armed | default(false) | bool
+    - not (amt_baremetal_install_run_state.reset_confirmed | default(false) | bool)
+    - amt_baremetal_install_force_resume | bool
+
+- name: Persist the reconciled starting state
+  ansible.builtin.include_tasks: save_state.yml

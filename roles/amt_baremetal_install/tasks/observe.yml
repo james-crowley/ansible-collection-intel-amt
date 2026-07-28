@@ -1,0 +1,51 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# A bounded read-only postcondition probe, never a retry of the reset itself
+# -- state=query only ever reads. reset_confirmed only becomes true once this
+# probe actually observes power_state=on; that flag is what lets a future
+# resumed run treat the boot/reset as settled and start from a clean slate
+# (see tasks/state.yml).
+
+- name: Bounded postcondition probe of power state after the reset
+  james_crowley.intel_amt.amt_power:
+    host: "{{ amt_baremetal_install_host }}"
+    port: "{{ amt_baremetal_install_port }}"
+    username: "{{ amt_baremetal_install_username }}"
+    password: "{{ amt_baremetal_install_password }}"
+    use_tls: "{{ amt_baremetal_install_use_tls }}"
+    allow_insecure_transport: "{{ amt_baremetal_install_allow_insecure_transport }}"
+    validate_certs: "{{ amt_baremetal_install_validate_certs }}"
+    ca_path: "{{ amt_baremetal_install_ca_path }}"
+    tls_fingerprint: "{{ amt_baremetal_install_tls_fingerprint }}"
+    timeout: "{{ amt_baremetal_install_timeout }}"
+    connect_timeout: "{{ amt_baremetal_install_connect_timeout }}"
+    state: query
+  delegate_to: localhost
+  no_log: true
+  register: amt_baremetal_install_observe_result
+  until: amt_baremetal_install_observe_result.previous_state.normalized == 'on'
+  retries: "{{ amt_baremetal_install_observe_retries }}"
+  delay: "{{ amt_baremetal_install_observe_delay }}"
+  failed_when: false
+
+- name: Mark the reset as confirmed once the endpoint reports power on
+  ansible.builtin.set_fact:
+    amt_baremetal_install_run_state: "{{ amt_baremetal_install_run_state | combine({'reset_confirmed': true}) }}"
+  when: (amt_baremetal_install_observe_result.previous_state.normalized | default('')) == 'on'
+
+- name: Persist run state after the postcondition probe
+  ansible.builtin.include_tasks: save_state.yml
+
+- name: Warn when the postcondition probe never observed the endpoint powered on
+  ansible.builtin.debug:
+    msg: >-
+      Postcondition probe did not observe power_state=on for {{ amt_baremetal_install_host }}
+      within {{ amt_baremetal_install_observe_retries }} retries. This does not necessarily
+      mean the reset failed -- this probe only reads, it never retries the
+      reset itself -- but reset_confirmed remains false, so a later re-run of
+      this role requires -e amt_baremetal_install_force_resume=true. Verify the machine
+      manually before retrying.
+  when: (amt_baremetal_install_observe_result.previous_state.normalized | default('')) != 'on'

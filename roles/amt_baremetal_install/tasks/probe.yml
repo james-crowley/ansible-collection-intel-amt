@@ -1,0 +1,52 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Preflight capability checks, before any mutation. amt_info never mutates
+# firmware state (its own DOCUMENTATION guarantees changed=false always), so
+# everything in this file is safe to run even against a machine this role
+# will ultimately refuse to touch.
+
+- name: Read firmware capabilities and state
+  james_crowley.intel_amt.amt_info:
+    host: "{{ amt_baremetal_install_host }}"
+    port: "{{ amt_baremetal_install_port }}"
+    username: "{{ amt_baremetal_install_username }}"
+    password: "{{ amt_baremetal_install_password }}"
+    use_tls: "{{ amt_baremetal_install_use_tls }}"
+    allow_insecure_transport: "{{ amt_baremetal_install_allow_insecure_transport }}"
+    validate_certs: "{{ amt_baremetal_install_validate_certs }}"
+    ca_path: "{{ amt_baremetal_install_ca_path }}"
+    tls_fingerprint: "{{ amt_baremetal_install_tls_fingerprint }}"
+    timeout: "{{ amt_baremetal_install_timeout }}"
+    connect_timeout: "{{ amt_baremetal_install_connect_timeout }}"
+  delegate_to: localhost
+  no_log: true
+  register: amt_baremetal_install_probe
+
+- name: Require the endpoint to be reachable
+  ansible.builtin.assert:
+    that:
+      - amt_baremetal_install_probe.amt.reachable
+    fail_msg: "amt_info reports {{ amt_baremetal_install_host }} unreachable; refusing to proceed."
+
+- name: Require native one-time PXE boot support for the pxe provider
+  ansible.builtin.assert:
+    that:
+      - amt_baremetal_install_probe.amt.capabilities.boot_once_pxe
+    fail_msg: >-
+      amt_baremetal_install_boot_provider=pxe requires AMT_BootCapabilities.ForcePXEBoot
+      support, which {{ amt_baremetal_install_host }} does not advertise. Refusing to arm a
+      boot selection the firmware cannot honour.
+  when: amt_baremetal_install_boot_provider == 'pxe'
+
+- name: Require IDE-R (storage redirection) support for the ider_cdrom provider
+  ansible.builtin.assert:
+    that:
+      - amt_baremetal_install_probe.amt.capabilities.storage_redirection
+    fail_msg: >-
+      amt_baremetal_install_boot_provider=ider_cdrom requires AMT_BootCapabilities.IDER
+      support, which {{ amt_baremetal_install_host }} does not advertise. Refusing to attach
+      media the firmware cannot boot from.
+  when: amt_baremetal_install_boot_provider == 'ider_cdrom'

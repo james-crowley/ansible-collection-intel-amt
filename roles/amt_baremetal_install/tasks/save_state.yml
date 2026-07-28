@@ -1,0 +1,15 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Written after every phase that changes amt_baremetal_install_run_state, not just at the end,
+# so a controller crash mid-run still leaves an accurate account of what
+# actually happened -- the whole point of tasks/state.yml's reconciliation.
+
+- name: Persist run state for {{ amt_baremetal_install_host }}
+  ansible.builtin.copy:
+    content: "{{ amt_baremetal_install_run_state | to_nice_json }}\n"
+    dest: "{{ amt_baremetal_install_state_file }}"
+    mode: "0600"
+  delegate_to: localhost
