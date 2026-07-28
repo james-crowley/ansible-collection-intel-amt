@@ -7,10 +7,35 @@
 # populated inside a rescue block, and only once amt_baremetal_install_run_state exists (i.e.
 # tasks/state.yml already ran) is there anywhere useful to record it --
 # a failure during validate.yml itself has nothing to persist.
+#
+# Surfacing the redacted failure detail here (not just a bare msg) matters because this role
+# is the thing tests/hardware/qualify_media_attach.yml and qualify_pxe.yml delegate their
+# entire arm/reset lifecycle to: without this, a real firmware failure inside the role would
+# be re-raised by tasks/main.yml's rescue as a single generic "see previous task output"
+# ansible.builtin.fail, which has no error_class/endpoint/operation for the calling
+# playbook's own rescue to report -- exactly the "censored failure is undiagnosable" problem
+# tests/hardware/qualify_readonly.yml's rescue exists to avoid. no_log hides the whole result
+# on the failing task itself, including the parts that are deliberately safe to show; every
+# message and diagnostic this collection produces has already been through errors.py's
+# redaction, so the failure detail below carries no credential.
+
+- name: Report the redacted failure detail
+  ansible.builtin.debug:
+    msg:
+      error_class: "{{ ansible_failed_result.error_class | default('(none reported)') }}"
+      endpoint: "{{ ansible_failed_result.endpoint | default('(none reported)') }}"
+      operation: "{{ ansible_failed_result.operation | default('(none reported)') }}"
+      indeterminate: "{{ ansible_failed_result.indeterminate | default(false) }}"
+      message: "{{ ansible_failed_result.msg | default('(no message)') }}"
+      diagnostic: "{{ ansible_failed_result.diagnostic | default('(none)') }}"
+  when: amt_baremetal_install_run_state is defined
 
 - name: Record the failure reason for the next resumption attempt
   ansible.builtin.set_fact:
-    amt_baremetal_install_fail_msg: "{{ ansible_failed_result.msg | default('unknown failure') }}"
+    amt_baremetal_install_fail_msg: >-
+      {{ ansible_failed_result.msg | default('unknown failure') }}
+      (error_class={{ ansible_failed_result.error_class | default('unknown') }},
+      indeterminate={{ ansible_failed_result.indeterminate | default(false) }})
     amt_baremetal_install_run_state: "{{ amt_baremetal_install_run_state | combine({'last_failure': ansible_failed_result.msg | default('unknown failure')}) }}"
   when: amt_baremetal_install_run_state is defined
 
