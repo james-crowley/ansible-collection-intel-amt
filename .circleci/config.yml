@@ -231,19 +231,66 @@ jobs:
             - dist
 
   # -------------------------------------------------------------------------
-  # Hardware-in-the-loop. Runs on a self-hosted machine runner inside the lab
-  # network. Requires both an explicit pipeline parameter and a human approval.
+  # Hardware-in-the-loop. Runs on a self-hosted machine runner sitting inside the
+  # lab network, with access to real AMT endpoints. Four independent controls
+  # stand in front of it, because a job here can power-cycle and reimage physical
+  # machines and reaches into a private network:
+  #
+  #   1. the `run-hardware-tests` pipeline parameter, false by default, so an
+  #      ordinary push cannot reach this workflow at all;
+  #   2. a manual approval job, so a human confirms before anything is touched;
+  #   3. the `amt-lab-runner` context, restricted to this project only, so no
+  #      other project in the org can borrow the lab credentials;
+  #   4. a branch filter, so only main can target the runner.
+  #
+  # CircleCI additionally refuses to run self-hosted runner jobs for forked-PR
+  # builds, which matters if this repository is ever made public.
   hardware-tests:
     machine: true
-    resource_class: james-crowley/amt-lab
+    resource_class: crowley/amt-runner
     steps:
       - checkout
+      # The lab inventory and credentials come from the restricted context, never
+      # from the repository -- tests/hardware/inventory.yml is gitignored and only
+      # an .example is committed. The context must supply:
+      #
+      #   AMT_HOSTS            comma-separated AMT endpoint addresses
+      #   AMT_USERNAME         AMT account (usually "admin")
+      #   AMT_PASSWORD         AMT password
+      #   AMT_TLS_FINGERPRINT  reviewed SHA-256 leaf fingerprint, or empty when
+      #                        the endpoint is Small Business Mode and has no TLS
+      #   AMT_ALLOW_INSECURE   "true" only for endpoints that cannot do TLS
+      #
+      # Env vars are used rather than a committed vault because the runner host
+      # is the trust boundary here, and a vault password would itself need to
+      # come from the context anyway.
+      - run:
+          name: Verify the lab credentials were injected
+          command: |
+            missing=""
+            for var in AMT_HOSTS AMT_USERNAME AMT_PASSWORD; do
+              eval "val=\${$var:-}"
+              [ -n "$val" ] || missing="$missing $var"
+            done
+            if [ -n "$missing" ]; then
+              echo "Missing required context variables:$missing" >&2
+              echo "Add them to the amt-lab-runner context:" >&2
+              echo "  circleci context store-secret amt-lab-runner --org gh/james-crowley <NAME>" >&2
+              exit 1
+            fi
+            echo "Lab credentials present for $(echo "$AMT_HOSTS" | tr ',' '\n' | wc -l) endpoint(s)."
       - run:
           name: Install ansible-core
           command: |
             python3 -m pip install --user --upgrade pip
             python3 -m pip install --user "ansible-core~=2.19.0"
             python3 -m pip install --user -r tests/unit/requirements.txt
+      - run:
+          name: Render the lab inventory from the context
+          command: |
+            ./tests/hardware/render-inventory.sh > tests/hardware/inventory.yml
+            # Never cat the file: it holds the AMT password.
+            echo "Inventory rendered ($(wc -l < tests/hardware/inventory.yml) lines)."
       - run:
           name: Read-only AMT qualification
           command: |
@@ -254,6 +301,10 @@ jobs:
           command: |
             ansible-playbook tests/hardware/qualify_checkmode.yml \
               -i tests/hardware/inventory.yml --check -v
+      - run:
+          name: Remove the rendered inventory
+          when: always
+          command: rm -f tests/hardware/inventory.yml
       - store_artifacts:
           path: tests/hardware/output
           destination: hardware-evidence
@@ -341,13 +392,28 @@ workflows:
               ignore: /.*/
 
   # -------------------------------------------------------------------------
-  # Opt-in only. Never runs on a normal push.
+  # Opt-in only. Never runs on a normal push. See the hardware-tests job for the
+  # full list of controls in front of the lab runner.
   hardware:
     when: << pipeline.parameters.run-hardware-tests >>
     jobs:
-      - lint
+      # Lint first: no reason to wake a human for an approval on a branch that
+      # cannot even pass static checks.
+      - lint:
+          filters:
+            branches:
+              only: main
       - hardware-approval:
           type: approval
           requires: [lint]
+          filters:
+            branches:
+              only: main
       - hardware-tests:
           requires: [hardware-approval]
+          # Restricted to this project only, so no other project in the org can
+          # use the lab credentials it carries.
+          context: amt-lab-runner
+          filters:
+            branches:
+              only: main

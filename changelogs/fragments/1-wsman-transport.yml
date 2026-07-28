@@ -1,7 +1,0 @@
----
-minor_changes:
-  - WS-Man transport layer with SOAP envelope construction, HTTP Digest authentication, Enumerate/Pull paging, and WS-Addressing endpoint references (https://github.com/james-crowley/ansible-collection-intel-amt/pull/12).
-  - TLS trust policy with two mutually exclusive modes -- CA chain plus hostname verification, or exact SHA-256 leaf-certificate pinning implemented via urllib3's ``assert_fingerprint`` so the pin authenticates the handshake itself (https://github.com/james-crowley/ansible-collection-intel-amt/pull/12).
-  - Typed result models including CIM power-state normalisation and the ``intel-amt-operation/v1`` operation receipt (https://github.com/james-crowley/ansible-collection-intel-amt/pull/12).
-security_fixes:
-  - The insecure-transport gate is enforced in the ``WsmanClient`` constructor rather than only in the convenience classmethod, so plaintext WS-Man cannot be selected without explicitly setting ``allow_insecure_transport=true`` regardless of which entry point is used (https://github.com/james-crowley/ansible-collection-intel-amt/pull/12).

@@ -1,3 +1,0 @@
----
-bugfixes:
-  - "amt_info - report the AMT firmware version from ``CIM_SoftwareIdentity`` (the instance whose ``InstanceID`` is ``AMT``, read from ``VersionString``). It was previously read from ``AMT_GeneralSettings.Version`` and ``AMT_SetupAndConfigurationService.VersionsSupported``, neither of which exists, so the reported version was always null (https://github.com/james-crowley/ansible-collection-intel-amt/issues/18)."
