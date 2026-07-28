@@ -43,15 +43,22 @@ reference this implementation is built against.
 
 ## Project status
 
-**Pre-release, and honest about it.** The protocol implementation is written
-against Intel's documentation and the Apache-2.0 MeshCentral implementation, and
-is covered by unit and mock-integration tests. It has **not yet been qualified
-against physical hardware** — a self-hosted CircleCI runner inside the lab
-network will do that, and the gated workflow for it is already wired up
-(`run-hardware-tests` pipeline parameter → manual approval → runner).
+**Pre-release, and now hardware-qualified.** All five modules and the
+bare-metal install role have been exercised end to end against a real Intel AMT
+**16.1.30** machine, on a self-hosted CircleCI runner inside the lab network,
+through all seven qualification stages: read-only facts, check-mode plans,
+attended power on/off, IDE-R media attach and boot, a writable image, native
+one-time PXE, and an idempotent re-probe.
 
-Treat every capability below as protocol-complete and test-covered, but
-hardware-unverified, until this section says otherwise.
+That qualification found six real defects that the unit and mock-integration
+tiers could not have found, including one that made IDE-R and BIOS boot
+impossible against real firmware. See [`docs/capability-matrix.md`](docs/capability-matrix.md)
+for exactly what is verified, what is only mock-tested, and what remains
+unproven — the distinction matters and is kept current.
+
+Still pre-1.0: the module return shape is not yet consistent across modules
+(tracked in issue #22), and a genuinely non-zero IDE-R **write** has not been
+observed, because that needs an operating system on the target that writes.
 
 ## Requirements
 
