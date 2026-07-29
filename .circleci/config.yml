@@ -632,6 +632,34 @@ jobs:
           at: .
       - install-ansible:
           ansible-core-version: "2.19"
+      # A Galaxy version is IMMUTABLE once published: it cannot be replaced,
+      # only superseded by a higher version. So the one mistake this job must
+      # make impossible is publishing under a version nobody intended -- tagging
+      # v0.2.0 while galaxy.yml still says 0.1.0 would either burn 0.1.0 a second
+      # time or ship 0.2.0's contents as 0.1.0, irrecoverably, and the tag and
+      # the release notes would forever disagree with what Galaxy serves. The tag
+      # is what a human deliberately chose; galaxy.yml's version is what the
+      # artifact actually claims to be. They must agree before anything is
+      # uploaded, and this check has to be here rather than in `build` because
+      # `build` also runs on untagged branches where CIRCLE_TAG is empty.
+      #
+      # `import yaml` below is satisfied by the install-ansible step above, NOT
+      # by the executor image: cimg/python:3.12 ships no PyYAML (verified), while
+      # ansible-core hard-depends on it. Keep this step after install-ansible.
+      - run:
+          name: Tag must match galaxy.yml version
+          command: |
+            want="${CIRCLE_TAG#v}"
+            have="$(python -c 'import yaml,sys;print(yaml.safe_load(open("galaxy.yml"))["version"])')"
+            if [ "$want" != "$have" ]; then
+              echo "git tag ${CIRCLE_TAG} implies version ${want}, but galaxy.yml declares ${have}" >&2
+              exit 1
+            fi
+            # Pin the artifact by exact filename rather than publishing a
+            # ./dist/*.tar.gz glob: the glob would happily upload whatever single
+            # tarball happened to be in the attached workspace, which is the same
+            # class of mistake one step later.
+            ls ./dist/james_crowley-intel_amt-"${have}".tar.gz
       - run:
           name: Publish to Ansible Galaxy
           command: |
@@ -639,7 +667,8 @@ jobs:
               echo "GALAXY_API_KEY is not set; is the galaxy-publish context attached?" >&2
               exit 1
             }
-            ansible-galaxy collection publish ./dist/*.tar.gz \
+            ansible-galaxy collection publish \
+              "./dist/james_crowley-intel_amt-${CIRCLE_TAG#v}.tar.gz" \
               --api-key "${GALAXY_API_KEY}" -v
 
 workflows:
