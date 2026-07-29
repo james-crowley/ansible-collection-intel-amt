@@ -84,6 +84,26 @@ Out of scope: vulnerabilities in Intel AMT firmware itself (report those to
 [Intel](https://www.intel.com/content/www/us/en/security-center/default.html)),
 in `ansible-core`, or in `requests`.
 
+### One out-of-scope advisory worth stating plainly
+
+`meta/runtime.yml` declares `requires_ansible: '>=2.17.0'`. That is a **minimum**,
+not a recommendation, and the oldest versions satisfying it are not patched.
+
+`GHSA-w8p5-mx5w-cpqj` (HIGH) — argument injection in `ansible-galaxy role install`
+leading to arbitrary code execution — affects ansible-core `>= 2.17.0b1, < 2.18.18rc1`
+and is **first fixed in 2.18.18**. There is no fix in the 2.17 line; that branch
+is end-of-life and will not receive one.
+
+So satisfying this collection's floor with ansible-core 2.17.x means running an
+ansible-core that will never be patched for that advisory. The floor stays at
+2.17 because the collection genuinely works there and raising it would drop
+Python 3.10 support without protecting anyone already on a patched release — but
+if you are choosing a controller version now, **choose 2.18.18 or newer.**
+
+This is a vulnerability in `ansible-core`, not in this collection, and nothing in
+this collection invokes `ansible-galaxy role install`. Report it to the
+[Ansible project](https://github.com/ansible/ansible/security), not here.
+
 ## Supported versions
 
 Pre-1.0. Only the latest commit on `main` receives fixes; there are no
