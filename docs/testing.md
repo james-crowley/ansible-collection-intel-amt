@@ -167,12 +167,36 @@ resource_class: crowley/amt-runner
 
 ### Runner Python version
 
-The lab runner ships **Python 3.10**, so the hardware jobs pin
-`ansible-core~=2.17.0` — 2.19 requires 3.11+ on the controller. This is also the
-collection's declared floor, so hardware qualification exercises the oldest
-version we claim to support. Two 3.11-only APIs (`enum.StrEnum`, `datetime.UTC`)
-reached `main` before this was discovered, because the unit matrix started at
-3.11; it now includes 3.10.
+**What the hardware jobs run now.** The lab runner host has Python 3.12
+installed alongside its system Python 3.10, and the hardware jobs pin
+`ansible-core~=2.18.18` in a workspace virtualenv built from **Python 3.12
+explicitly**. 2.18.18 is the first release that fixes GHSA-w8p5-mx5w-cpqj
+[HIGH] (argument injection in `ansible-galaxy role install`); the 2.17 line is
+EOL and has no fix, so staying on it was not an option. 3.12 rather than the
+newest available Python for two reasons: ansible-core 2.18's supported
+controller range ends at 3.13, and 3.12 is the newest version that can still run
+ansible-core 2.17 — the collection's `requires_ansible` floor — so the same
+interpreter can reproduce a floor run by hand on that host.
+
+The system `python3` is still 3.10 and stays that way, so
+`install-lab-ansible-venv` never uses it. The command probes for `python3.12`,
+falls back to `python3.11`/`python3.13`, and **fails immediately** — naming what
+it looked for and what it found — if none exists, rather than letting pip
+produce a confusing resolution error. It echoes the interpreter it chose, so
+every job log records which one actually ran. `python3.14` is deliberately not a
+candidate: ansible-core 2.18 does not support it.
+
+**What the recorded qualification ran on.** The Tier 3 evidence in
+`docs/capability-matrix.md` was gathered on **Python 3.10 with ansible-core
+2.17**, and that record is not retroactively edited — it states the environment
+the run actually used. Do not read it as the current configuration; the two
+differ, and the next hardware run will re-record under the versions above.
+
+The collection still supports a 3.10 controller for consumers
+(`requires_ansible: '>=2.17.0'` is unchanged, and the unit matrix still covers
+3.10). Two 3.11-only APIs (`enum.StrEnum`, `datetime.UTC`) reached `main` before
+that was noticed, because the unit matrix once started at 3.11; the matrix is
+what guards 3.10 now, not the lab runner.
 
 ### Inventory and credentials
 

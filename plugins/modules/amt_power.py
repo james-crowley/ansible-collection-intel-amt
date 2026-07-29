@@ -283,7 +283,7 @@ def main() -> None:
     module = AnsibleModule(argument_spec=argument_spec(), supports_check_mode=True)
 
     if not HAS_REQUESTS:
-        module.fail_json(msg=missing_required_lib("requests", reason=REQUESTS_IMPORT_ERROR))
+        module.fail_json(msg=missing_required_lib("requests"), exception=REQUESTS_IMPORT_ERROR)
 
     state = module.params["state"]
 

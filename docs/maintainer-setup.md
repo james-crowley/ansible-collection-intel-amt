@@ -100,7 +100,7 @@ evaluating the surfaces `renovate.json` configures.
 
 - **Does:** `requirements.txt`, `tests/unit/requirements.txt`,
   `tests/integration/requirements.txt`, the `cimg/python` images in CI, and the
-  `ansible-core~=2.17.0` pin the hardware job uses.
+  `ansible-core~=2.18.18` pin the hardware job uses.
 - **Does not:** the sanity/unit *matrices*, because those are comma-separated
   lists of supported versions rather than single pins — there is no "current
   version" to bump. Widening or narrowing the support matrix is a policy decision.

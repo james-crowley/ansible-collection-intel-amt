@@ -123,19 +123,78 @@ commands:
 
   install-lab-ansible-venv:
     description: >-
-      Install ansible-core 2.17 into a workspace virtualenv -- the runner is rootless with a
-      read-only root filesystem and ships Python 3.10 -- and build+install this collection
-      from the checkout, so qualification runs against the code under test, on the oldest
-      ansible-core series the collection claims to support.
+      Install ansible-core 2.18.18+ into a workspace virtualenv -- the runner is rootless with
+      a read-only root filesystem, so nothing may be installed system-wide -- and build+install
+      this collection from the checkout, so qualification runs against the code under test.
+      The interpreter is chosen at runtime, not assumed: bare `python3` on this host is still
+      the system Python 3.10, which ansible-core 2.18 cannot run on at all.
     steps:
       - run:
           name: Install ansible-core into a workspace virtualenv
           command: |
-            python3 --version
-            python3 -m venv .venv
+            # ansible-core 2.18.18 is the first release that fixes
+            # GHSA-w8p5-mx5w-cpqj [HIGH] (argument injection in `ansible-galaxy role
+            # install`); the whole 2.17 line is EOL and will never be fixed, so the pin
+            # has to sit at >= 2.18.18. ~=2.18.18 takes 2.18.x patches but not 2.19,
+            # keeping hardware qualification on one deliberately chosen series.
+            #
+            # 2.18 requires Python 3.11+ on the controller, so the venv must NOT be
+            # built from bare `python3`: that is the host's system Python 3.10, which
+            # stays where it is. 3.12 is the target rather than the newest available:
+            # 2.18's supported controller range ends at 3.13, and 3.12 is also the
+            # newest version that can still run ansible-core 2.17 -- the collection's
+            # requires_ansible floor -- so one interpreter can reproduce a floor run by
+            # hand on this host. 3.14 is deliberately not a candidate: 2.18 does not
+            # support it. 3.11 and 3.13 are accepted fallbacks so a reinstalled runner
+            # does not silently block qualification.
+            #
+            # Nobody can log into this host from CI, so failing here with the full
+            # inventory of what was looked for and what exists beats a dependency
+            # resolver error forty lines later.
+            for candidate in python3.12 python3.11 python3.13; do
+              if command -v "$candidate" >/dev/null 2>&1; then
+                LAB_PYTHON="$(command -v "$candidate")"
+                break
+              fi
+            done
+            if [ -z "${LAB_PYTHON:-}" ]; then
+              # Pure-bash discovery on purpose: this branch has to be able to report
+              # what it found even on a host whose PATH is itself part of the problem.
+              available=""
+              IFS=':' read -r -a lab_path_dirs <<< "$PATH"
+              for dir in "${lab_path_dirs[@]}"; do
+                for exe in "$dir"/python3*; do
+                  if [ -x "$exe" ] && [ ! -d "$exe" ]; then
+                    name="${exe##*/}"
+                    case " $available " in
+                      *" $name "*) ;;
+                      *) available="$available $name" ;;
+                    esac
+                  fi
+                done
+              done
+              [ -n "$available" ] || available=" (no python3* executable at all)"
+              echo "ERROR: no usable Python interpreter for the lab virtualenv." >&2
+              echo "Looked for, in order: python3.12 (preferred), python3.11, python3.13." >&2
+              echo "Found on PATH:${available}" >&2
+              echo "Bare 'python3' is not a candidate: it is this host's system Python 3.10." >&2
+              echo "ansible-core 2.18+ requires Python 3.11+ on the controller, so no venv" >&2
+              echo "built from 3.10 can install the pinned version. Install python3.12 (and" >&2
+              echo "its matching venv package) on the runner host, then re-run." >&2
+              exit 1
+            fi
+            echo "Selected interpreter: ${LAB_PYTHON}"
+            "$LAB_PYTHON" --version
+            if ! "$LAB_PYTHON" -m venv .venv; then
+              echo "ERROR: '${LAB_PYTHON} -m venv' failed. On Debian/Ubuntu the stdlib venv" >&2
+              echo "module ships separately -- install the matching python3.X-venv package" >&2
+              echo "on the runner host." >&2
+              exit 1
+            fi
             . .venv/bin/activate
+            python --version
             python -m pip install --upgrade pip
-            python -m pip install "ansible-core~=2.17.0" -r requirements.txt
+            python -m pip install "ansible-core~=2.18.18" -r requirements.txt
             ansible --version
       - run:
           name: Install the collection from this checkout
@@ -210,8 +269,17 @@ jobs:
       - install-ansible:
           ansible-core-version: "2.19"
       - run:
-          name: Install linters
-          command: python -m pip install ansible-lint yamllint ruff
+          # From requirements-dev.txt, not a bare `pip install ansible-lint
+          # yamllint ruff`: unpinned linters make a lint result a function of the
+          # day it ran. ruff in particular adds and widens rules continuously --
+          # 0.15.5 reports three S603 findings in the unit tests that 0.16.0 does
+          # not -- so an unpinned install can turn main red with no code change,
+          # or disagree with what a contributor ran locally. This file is the
+          # single place those versions are declared, which is what makes
+          # "install the dev requirements" in CONTRIBUTING.md a truthful
+          # instruction rather than an approximation.
+          name: Install pinned linters (same file contributors install)
+          command: python -m pip install -r requirements-dev.txt
       - run:
           name: yamllint
           command: yamllint -c .yamllint .
@@ -314,14 +382,13 @@ jobs:
             COLLECTION_PATH="$(./scripts/setup-collection-tree.sh)"
             echo "export COLLECTION_PATH=${COLLECTION_PATH}" >> "$BASH_ENV"
             cd "${COLLECTION_PATH}"
-            # ansible-test exits fatally when no targets exist at all, which
-            # would hold main red while the mock fixture servers are still being
-            # built (issue #8). Skip loudly rather than failing, and drop this
-            # guard once targets land -- it becomes a no-op then anyway.
-            if ! find tests/integration/targets -mindepth 1 -maxdepth 1 -type d 2>/dev/null | read -r _; then
-              echo "WARNING: no integration targets present yet (see issue #8); skipping."
-              exit 0
-            fi
+            # No skip-guard here on purpose. There used to be one, from the era
+            # when tests/integration/targets was empty (issue #8) and a fatal
+            # "no targets" exit would have held main red. All five targets are
+            # committed now, so the guard was dead code whose only remaining
+            # effect would be to exit 0 -- green -- if the targets ever silently
+            # disappeared from the staged tree, which is precisely the failure it
+            # should report.
             ansible-test integration --venv --python 3.12 --color -v
       - collect-test-results:
           label: integration-mock
@@ -623,6 +690,34 @@ jobs:
           at: .
       - install-ansible:
           ansible-core-version: "2.19"
+      # A Galaxy version is IMMUTABLE once published: it cannot be replaced,
+      # only superseded by a higher version. So the one mistake this job must
+      # make impossible is publishing under a version nobody intended -- tagging
+      # v0.2.0 while galaxy.yml still says 0.1.0 would either burn 0.1.0 a second
+      # time or ship 0.2.0's contents as 0.1.0, irrecoverably, and the tag and
+      # the release notes would forever disagree with what Galaxy serves. The tag
+      # is what a human deliberately chose; galaxy.yml's version is what the
+      # artifact actually claims to be. They must agree before anything is
+      # uploaded, and this check has to be here rather than in `build` because
+      # `build` also runs on untagged branches where CIRCLE_TAG is empty.
+      #
+      # `import yaml` below is satisfied by the install-ansible step above, NOT
+      # by the executor image: cimg/python:3.12 ships no PyYAML (verified), while
+      # ansible-core hard-depends on it. Keep this step after install-ansible.
+      - run:
+          name: Tag must match galaxy.yml version
+          command: |
+            want="${CIRCLE_TAG#v}"
+            have="$(python -c 'import yaml,sys;print(yaml.safe_load(open("galaxy.yml"))["version"])')"
+            if [ "$want" != "$have" ]; then
+              echo "git tag ${CIRCLE_TAG} implies version ${want}, but galaxy.yml declares ${have}" >&2
+              exit 1
+            fi
+            # Pin the artifact by exact filename rather than publishing a
+            # ./dist/*.tar.gz glob: the glob would happily upload whatever single
+            # tarball happened to be in the attached workspace, which is the same
+            # class of mistake one step later.
+            ls ./dist/james_crowley-intel_amt-"${have}".tar.gz
       - run:
           name: Publish to Ansible Galaxy
           command: |
@@ -630,7 +725,8 @@ jobs:
               echo "GALAXY_API_KEY is not set; is the galaxy-publish context attached?" >&2
               exit 1
             }
-            ansible-galaxy collection publish ./dist/*.tar.gz \
+            ansible-galaxy collection publish \
+              "./dist/james_crowley-intel_amt-${CIRCLE_TAG#v}.tar.gz" \
               --api-key "${GALAXY_API_KEY}" -v
 
 workflows:

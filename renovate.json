@@ -1,5 +1,8 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "There is deliberately NO packageRule for cimg/python. The circleci manager is enabled (so a future orb or a literally-pinned image is picked up), but the one image reference this repository has is `cimg/python:<< parameters.python-version >>` -- a CircleCI parameter substitution, not a version string. Renovate cannot resolve it, so any rule targeting cimg/python would match nothing while reading as though the images were managed. The Python versions actually under test are the matrix lists in the `sanity` and `units` workflow entries, and widening those is a support-policy decision a human makes, exactly like ansible-core below."
+  ],
   "extends": [
     "config:recommended",
     ":dependencyDashboard",
@@ -20,21 +23,23 @@
     "custom.regex"
   ],
   "pip_requirements": {
-    "fileMatch": [
-      "^requirements\\.txt$",
-      "^tests/unit/requirements\\.txt$",
-      "^tests/integration/requirements\\.txt$"
+    "description": "managerFilePatterns, not the deprecated fileMatch. Note the /.../ delimiters: managerFilePatterns treats a bare string as a MINIMATCH GLOB and only an explicitly delimited value as a regular expression, so dropping them here would silently stop matching (^ and \\. are not glob syntax). requirements-dev.txt is included because CI installs the linters from it, so a stale pin there is a stale pin in CI.",
+    "managerFilePatterns": [
+      "/^requirements\\.txt$/",
+      "/^requirements-dev\\.txt$/",
+      "/^tests/unit/requirements\\.txt$/",
+      "/^tests/integration/requirements\\.txt$/"
     ]
   },
   "customManagers": [
     {
       "customType": "regex",
-      "description": "The single ansible-core pin used by the hardware job, which must stay compatible with the lab runner's Python 3.10. This is the only ansible-core version Renovate can meaningfully manage here: the sanity and unit matrices are comma-separated LISTS of supported versions, not single pins, so there is no 'current version' for Renovate to bump. Widening or narrowing that support matrix is a deliberate policy decision -- the Dependency Dashboard will still surface new ansible-core releases for a human to act on.",
-      "fileMatch": [
-        "^\\.circleci/config\\.yml$"
+      "description": "The single ansible-core pin used by the hardware qualification job -- the `install-lab-ansible-venv` command in .circleci/config.yml, currently `ansible-core~=2.18.18`. This is the only ansible-core version Renovate can meaningfully manage here: the sanity and unit matrices are comma-separated LISTS of supported versions, not single pins, so there is no 'current version' for Renovate to bump. Widening or narrowing that support matrix is a deliberate policy decision no bot can make. There is no longer an allowedVersions cap on ansible-core, so updates to this pin are raised normally and do appear on the Dependency Dashboard; they still never automerge -- see the ansible-core packageRule below. Two things matchStrings must keep doing. It must match the pin's ACTUAL shape, which is a full three-part version: the previous pattern `ansible-core~=(?<currentValue>\\d+\\.\\d+)\\.0` assumed a trailing literal `.0` and matched NOTHING once the pin became 2.18.18, which would have silently un-managed it with no error anywhere. Do not reintroduce a fixed digit count. It must also keep NOT matching `ansible-core~=<< parameters.ansible-core-version >>.0` in the sanity and units jobs, which is a CircleCI parameter substitution rather than a version string -- the leading `\\d+` is what excludes it, so keep the value anchored to a digit.",
+      "managerFilePatterns": [
+        "/^\\.circleci/config\\.yml$/"
       ],
       "matchStrings": [
-        "ansible-core~=(?<currentValue>\\d+\\.\\d+)\\.0"
+        "ansible-core~=(?<currentValue>\\d+\\.\\d+(?:\\.\\d+)*)"
       ],
       "depNameTemplate": "ansible-core",
       "datasourceTemplate": "pypi",
@@ -43,7 +48,12 @@
   ],
   "packageRules": [
     {
-      "description": "ansible-core is the collection's compatibility contract, not an ordinary dependency. meta/runtime.yml declares a floor, the sanity/unit matrices enumerate versions, and the hardware job is constrained by the lab runner's Python. A bump here is a deliberate support-policy decision, so it gets its own PR and never automerges.",
+      "description": [
+        "ansible-core is the collection's compatibility contract, not an ordinary dependency. meta/runtime.yml declares a floor, the sanity/unit matrices enumerate versions, and the hardware job carries a single pin of its own. A bump here is a deliberate support-policy decision, so it gets its own PR and never automerges.",
+        "There is deliberately no allowedVersions cap. There used to be one, '<2.18', because the self-hosted lab runner host had only Python 3.10 and ansible-core 2.18+ requires Python 3.11+ on the controller, which made the upgrade impossible rather than merely unwanted. That is history: the host now has Python 3.12, install-lab-ansible-venv builds its virtualenv from an explicitly versioned interpreter instead of bare `python3`, and the pin is `ansible-core~=2.18.18`. Nothing holds this package below 2.18 any more, and nothing should.",
+        "What replaced the cap is a per-bump check, not a static bound: whatever version this pin moves to must support the Python the lab virtualenv is actually built from. That is 3.12, with 3.11 and 3.13 accepted as fallbacks. ansible-core 2.20+ requires Python 3.12+, so a fallback-3.11 runner would not satisfy it. Confirm the pairing in the PR rather than assuming the runner can host any release.",
+        "meta/runtime.yml's `requires_ansible: '>=2.17.0'` is a consumer-facing minimum, not a pin, and must not be dragged along to match the hardware pin. Raising it would drop Python 3.10 support for everyone consuming this collection, which is a separate and far larger decision than choosing what the lab runner qualifies on."
+      ],
       "matchPackageNames": [
         "ansible-core"
       ],
@@ -59,22 +69,8 @@
         "priority:high"
       ],
       "prBodyNotes": [
-        ":warning: Raising or dropping an ansible-core version is a support-policy change. Before merging, check: `meta/runtime.yml` requires_ansible floor; the sanity and unit matrices in `.circleci/config.yml`; whether `tests/sanity/ignore-*.txt` files need adding or removing; and whether the module boilerplate requirement changed (it changed incompatibly at 2.17). The hardware job is separately constrained by the lab runner's Python version."
-      ]
-    },
-    {
-      "description": "cimg/python images in the CI matrix. Safe to group, but a new Python minor still needs a matrix entry to actually be tested, so review rather than automerge.",
-      "matchManagers": [
-        "circleci"
-      ],
-      "matchPackageNames": [
-        "cimg/python"
-      ],
-      "groupName": "cimg/python",
-      "automerge": false,
-      "labels": [
-        "dependencies",
-        "ci"
+        ":warning: Raising or dropping an ansible-core version is a support-policy change. Before merging, check: `meta/runtime.yml` requires_ansible floor; the sanity and unit matrices in `.circleci/config.yml`; whether `tests/sanity/ignore-*.txt` files need adding or removing; and whether the module boilerplate requirement changed (it changed incompatibly at 2.17). The hardware job is separately constrained by the lab runner's Python version.",
+        ":snake: If this PR touches the hardware pin in `install-lab-ansible-venv`, confirm the proposed version supports the Python that command actually selects on the lab runner -- `python3.12` preferred, `python3.11`/`python3.13` as fallbacks, never the host's system Python 3.10. The job prints the interpreter it chose, so check a recent hardware run's log rather than guessing. A pin the runner cannot install fails at dependency resolution, not at review."
       ]
     },
     {
@@ -103,6 +99,18 @@
       "automerge": true,
       "automergeType": "pr",
       "platformAutomerge": true
+    },
+    {
+      "description": "Linters and release tooling, pinned exactly in requirements-dev.txt and installed by the lint job. Deliberately NOT automerged, unlike test dependencies: a new ruff or ansible-lint release routinely adds or widens rules, so the honest outcome of one of these bumps is often 'and here are the code changes it demands' -- which a bot cannot author. Grouped so it is one review a week rather than six.",
+      "matchFileNames": [
+        "requirements-dev.txt"
+      ],
+      "groupName": "dev tooling",
+      "automerge": false,
+      "labels": [
+        "dependencies",
+        "ci"
+      ]
     }
   ],
   "ignorePaths": [

@@ -35,20 +35,35 @@ documentation: https://github.com/james-crowley/ansible-collection-intel-amt/tre
 homepage: https://github.com/james-crowley/ansible-collection-intel-amt
 issues: https://github.com/james-crowley/ansible-collection-intel-amt/issues
 
+# What is deliberately NOT ignored: CODE_OF_CONDUCT.md and SECURITY.md ship with
+# the collection, the way community.general and community.docker ship theirs. A
+# consumer who has only ever run `ansible-galaxy collection install` should still
+# be able to find the vulnerability-reporting policy without first locating the
+# source repository -- the whole point of SECURITY.md is to be reachable at the
+# moment someone needs it.
 build_ignore:
   - .circleci
   - .github
-  # Repository tooling, not collection content. Shipping these to Galaxy
-  # would put maintainer-only config in every consumer's install.
+  # Repository tooling and maintainer-only material, not collection content.
+  # Shipping these to Galaxy would put files a consumer can neither use nor act
+  # on into every install.
   - renovate.json
-  - CODE_OF_CONDUCT.md
-  - SECURITY.md
   - .gitignore
   - .yamllint
+  - .ansible-lint
   - .ruff_cache
   - .pytest_cache
   - pyproject.toml
+  - requirements-dev.txt
   - scripts
+  # Release-process instructions for this repository's maintainer (Galaxy API
+  # key, tagging, context setup). Meaningless to a consumer.
+  - docs/maintainer-setup.md
+  # antsibull-changelog working state. CHANGELOG.md/CHANGELOG.rst are the
+  # rendered artefacts consumers want; the generated plugin cache and the
+  # unreleased fragments that feed the next render are not.
+  - changelogs/.plugin-cache.yaml
+  - changelogs/fragments
   - dist
   - .venv
   - '*.tar.gz'
