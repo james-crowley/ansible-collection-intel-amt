@@ -75,7 +75,26 @@ oldest series CI tests.
 ## Local verification sequence
 
 Run this before opening a PR — it is the same sequence CI runs, minus the
-version/Python matrix:
+version/Python matrix.
+
+> **One trap first: run the integration suite against ansible-core 2.19, not the
+> 2.17 the setup step installs.** The `integration-mock` CI job pins **2.19**, and
+> the two lines differ in ways that change test results. On 2.19 the *controller*
+> attaches an `exception` key to every failed task result; on 2.17 it appears only
+> at `-vvv`. So a target asserting on that key's presence or absence passes locally
+> on 2.17 and fails in CI on 2.19. That has already happened once and got through
+> review, because nothing in this file said which core the job used.
+>
+> ```bash
+> python3.12 -m venv /tmp/v219
+> /tmp/v219/bin/pip install "ansible-core~=2.19.0" -r requirements.txt
+> # then re-run only the integration suite from the staged tree using that venv
+> ```
+>
+> When you mean "the module failed cleanly rather than crashed", assert on
+> `error_class`, not on `exception`. A genuine crash on 2.19 produces **no**
+> `error_class` at all, and produces neither `MODULE FAILURE` nor
+> `module_stdout`/`module_stderr` — so asserting on those alone is vacuous.
 
 ```bash
 # From the repository root:

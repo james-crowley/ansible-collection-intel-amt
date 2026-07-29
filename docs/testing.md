@@ -89,6 +89,13 @@ fixture servers that speak both protocol planes:
 ansible-test integration --venv --python 3.12
 ```
 
+**The `integration-mock` CI job pins ansible-core 2.19.** Run the integration suite
+against 2.19 as well as whatever you have installed: on 2.19 the controller attaches
+an `exception` key to every failed task result, while on 2.17 it appears only at
+`-vvv`, so a target asserting on that key passes on one line and fails on the other.
+Prefer asserting on `error_class` — a real crash on 2.19 emits no `error_class` at all.
+
+
 These must pass with no network access and no hardware. The timeout-classification
 and multi-frame-write paths in particular can only be tested this way — they are
 invisible to unit tests of pure functions and impractical to trigger on demand
