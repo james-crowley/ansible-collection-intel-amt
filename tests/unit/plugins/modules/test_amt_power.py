@@ -67,9 +67,28 @@ def _fake_client_at(power_normalized: str) -> Mock:
     return client
 
 
-def _run(args: dict) -> dict:
+def _run_ok(args: dict) -> dict:
+    """Run the module and require that it *succeeded*.
+
+    Split out from a single helper that accepted either outcome, which left the assertions
+    downstream of it unable to say *which* outcome they got. `assert "msg" in result` on top of
+    that helper does require the failure path (a successful result here carries no msg), but it
+    does not say which failure: a module that began failing for a reason the test never intended
+    -- an option that became required, a fixture that stopped matching -- satisfied it just as
+    well, so the test kept passing while no longer exercising what it was named for. Which of
+    the two paths a module took is usually the most important thing a test here asserts, so it
+    is asserted by construction.
+    """
     _set_module_args(args)
-    with pytest.raises((AnsibleExitJson, AnsibleFailJson)) as excinfo:
+    with pytest.raises(AnsibleExitJson) as excinfo:
+        amt_power.main()
+    return excinfo.value.args[0]
+
+
+def _run_fail(args: dict) -> dict:
+    """Run the module and require that it *failed* via fail_json."""
+    _set_module_args(args)
+    with pytest.raises(AnsibleFailJson) as excinfo:
         amt_power.main()
     return excinfo.value.args[0]
 
@@ -97,8 +116,15 @@ class TestArgumentSpec:
         _wire_fake_client(monkeypatch, Mock())
         args = dict(BASE_ARGS)
         args["state"] = "explode"
-        result = _run(args)
-        assert "msg" in result  # AnsibleModule's own choice-validation failure
+        # `assert "msg" in result` used to stand here. It could not say *which* failure it got,
+        # so it kept passing for failures that had nothing to do with the state option -- verified
+        # by adding an un-coercible `port` to these same args: the module then fails on the port
+        # instead, never reaching the choice check, and the old assertion still held. Now the
+        # failure is required by construction and the message must name both the offending value
+        # and the legal ones, since an operator who mistyped a state needs to see which exist.
+        result = _run_fail(args)
+        assert "explode" in result["msg"]
+        assert "reset" in result["msg"]
 
 
 class TestBuildWsmanClient:
@@ -191,7 +217,7 @@ class TestConvergence:
 
         args = dict(BASE_ARGS)
         args["state"] = "on"
-        result = _run(args)
+        result = _run_ok(args)
 
         assert result["changed"] is False
         fake_client.request_power_state.assert_not_called()
@@ -202,7 +228,7 @@ class TestConvergence:
 
         args = dict(BASE_ARGS)
         args["state"] = "off"
-        result = _run(args)
+        result = _run_ok(args)
 
         assert result["changed"] is False
         fake_client.request_power_state.assert_not_called()
@@ -215,8 +241,8 @@ class TestConvergence:
         args = dict(BASE_ARGS)
         args["state"] = "on"
 
-        first = _run(args)
-        second = _run(args)
+        first = _run_ok(args)
+        second = _run_ok(args)
 
         assert first["changed"] is False
         assert second["changed"] is False
@@ -237,7 +263,7 @@ class TestConvergence:
 
         args = dict(BASE_ARGS)
         args["state"] = "on"
-        result = _run(args)
+        result = _run_ok(args)
 
         assert result["changed"] is True
         assert result["desired_state"] == "on"
@@ -262,7 +288,7 @@ class TestImperativeActions:
 
         args = dict(BASE_ARGS)
         args["state"] = state
-        result = _run(args)
+        result = _run_ok(args)
 
         assert result["changed"] is True
         fake_client.request_power_state.assert_called_once_with(action)
@@ -275,7 +301,7 @@ class TestQuery:
 
         args = dict(BASE_ARGS)
         args["state"] = "query"
-        result = _run(args)
+        result = _run_ok(args)
 
         assert result["changed"] is False
         assert result["desired_state"] is None
@@ -291,7 +317,7 @@ class TestCheckMode:
         args = dict(BASE_ARGS)
         args["state"] = state
         args["_ansible_check_mode"] = True
-        result = _run(args)
+        result = _run_ok(args)
 
         assert result["changed"] is True
         # The whole point of check mode: the mutating call is never made.
@@ -320,7 +346,7 @@ class TestCheckMode:
         args = dict(BASE_ARGS)
         args["state"] = state
         args["_ansible_check_mode"] = True
-        result = _run(args)
+        result = _run_ok(args)
 
         assert result["changed"] is True
         fake_client.request_power_state.assert_not_called()
@@ -332,7 +358,7 @@ class TestCheckMode:
         args = dict(BASE_ARGS)
         args["state"] = "on"
         args["_ansible_check_mode"] = True
-        result = _run(args)
+        result = _run_ok(args)
 
         assert result["changed"] is False
         fake_client.request_power_state.assert_not_called()
@@ -351,7 +377,7 @@ class TestErrorHandling:
 
         args = dict(BASE_ARGS)
         args["state"] = "on"
-        result = _run(args)
+        result = _run_fail(args)
 
         assert result["error_class"] == "remote_operation"
         assert result["return_value"] == 2
@@ -365,7 +391,7 @@ class TestErrorHandling:
 
         args = dict(BASE_ARGS)
         args["state"] = "reset"
-        result = _run(args)
+        result = _run_fail(args)
 
         assert result["error_class"] == "timeout"
         assert result["indeterminate"] is True
@@ -375,18 +401,25 @@ class TestErrorHandling:
         monkeypatch.setattr(amt_power, "REQUESTS_IMPORT_ERROR", "No module named 'requests'")
         args = dict(BASE_ARGS)
         args["state"] = "query"
-        result = _run(args)
+        result = _run_fail(args)
         assert "requests" in result["msg"]
 
 
 class TestNoCredentialLeakage:
-    def test_no_credential_in_a_successful_result(self, monkeypatch):
-        fake_client = _fake_client_at("on")
-        _wire_fake_client(monkeypatch, fake_client)
-        args = dict(BASE_ARGS)
-        args["state"] = "on"
-        result = _run(args)
-        assert PASSWORD not in json.dumps(result)
+    """What survives here is the part a stubbed ``fail_json`` can still prove.
+
+    The companion test that asserted the password was absent from a *successful* result was
+    deleted: nothing in the success path ever puts the credential into the kwargs a module
+    hands to ``exit_json``, so the assertion could not fail. The place a credential really
+    enters a result is ``invocation.module_args``, injected by the real ``exit_json``, which
+    the autouse fixture in this file replaces -- see
+    tests/unit/plugins/modules/test_credential_contract.py, which runs the real one.
+
+    The failure case below is different and does have teeth: the credential is genuinely
+    present in the text handed to ``RemoteOperationError``, and it is ``errors.redact`` --
+    this collection's own code, not ansible-core's ``no_log`` machinery -- that has to remove
+    it. That is worth asserting exactly here.
+    """
 
     def test_no_credential_in_a_failure_result(self, monkeypatch):
         fake_client = _fake_client_at("off")
@@ -396,5 +429,8 @@ class TestNoCredentialLeakage:
         _wire_fake_client(monkeypatch, fake_client)
         args = dict(BASE_ARGS)
         args["state"] = "on"
-        result = _run(args)
+        result = _run_fail(args)
         assert PASSWORD not in json.dumps(result)
+        # ...and the surrounding diagnosis survives, so redaction is not just truncation.
+        assert result["msg"].startswith("rejected password=")
+        assert "[REDACTED]" in result["msg"]

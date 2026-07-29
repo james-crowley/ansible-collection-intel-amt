@@ -321,18 +321,18 @@ class TestMainReadOnly:
         result = excinfo.value.args[0]
         assert result["error_class"] == "authentication"
         assert PASSWORD not in json.dumps(result)
+        # Redacted, not truncated: an operator still sees that it was the password that was
+        # rejected. This one is a real test of errors.redact, which is why it survives while the
+        # successful-result variant did not -- see the note below.
+        assert result["msg"] == "rejected password=[REDACTED]"
 
-    def test_no_credential_appears_anywhere_in_a_successful_result(self, monkeypatch):
-        _set_module_args(BASE_ARGS)
-        fake_client = Mock()
-        fake_client.get_facts.return_value = _full_facts()
-        monkeypatch.setattr(amt_info, "build_wsman_client", lambda params: _fake_wsman())
-        monkeypatch.setattr(amt_info, "AmtClient", lambda wsman: fake_client)
-
-        with pytest.raises(AnsibleExitJson) as excinfo:
-            amt_info.main()
-
-        assert PASSWORD not in json.dumps(excinfo.value.args[0])
+    # The successful-result password assertion that used to sit here was deleted rather than
+    # repaired: with exit_json replaced by the bare raiser in the autouse fixture above, the
+    # credential could not be in those kwargs, because the real exit_json is what injects
+    # invocation.module_args and what applies no_log censoring. That invariant now runs against
+    # the real serializer in tests/unit/plugins/modules/test_credential_contract.py. The
+    # AuthenticationError test above stays: there the credential really is in the message being
+    # handled, and it is this collection's own errors.redact that has to remove it.
 
     def test_gains_a_non_secret_operation_receipt(self, monkeypatch):
         # issue #22: amt_info previously had neither shape at all. It now gets the same
