@@ -1,0 +1,11 @@
+---
+bugfixes:
+  - "tests/hardware/qualify_checkmode.yml - write the stage-3 evidence file. The playbook runs under C(--check) by design
+    (it asserts C(ansible_check_mode)), which also made its own C(copy) task a no-op, so stage 3 was the one stage that
+    left no reviewable record of the plans it computed. C(check_mode: false) on that task fixes it; the endpoint is still
+    never touched, because every AMT task in the playbook carries check mode of its own."
+  - "README - the C(amt_power) row omitted V(sleep-light), V(sleep-deep) and V(hibernate), which have been selectable
+    since they were exposed in 0.2.0."
+  - "docs/maintainer-setup.md - record that machine 1 was re-run and the v0.2.0 facts are confirmed on both firmware
+    generations. It still listed that re-run as a remaining action and stated the facts had only ever been read on one
+    generation, both of which contradicted the capability matrix."

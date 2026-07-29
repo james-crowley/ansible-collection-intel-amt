@@ -172,10 +172,15 @@ approvals included, so power, media, writable-image and PXE are no longer a
 single-machine result. That run was triggered with `hardware-limit=amt-lab-02`, so
 machine 1 was untouched.
 
-**Remaining action: re-run machine 1.** Its recorded evidence is from 2026-07-28
-and predates v0.2.0's network and system-state facts, which have therefore only
-ever been read on 19.0.5. A machine-1 run (`hardware-limit=amt-lab-01`) is what
-closes that gap. See [`capability-matrix.md`](capability-matrix.md) Tier 4.
+**Done — machine 1 was re-run on 2026-07-29** (`hardware-limit=amt-lab-01`, stages 1,
+3 and 8), and it returned every one of v0.2.0's network and system-state facts
+populated. Those facts are therefore confirmed on both 16.1.30 and 19.0.5, and the
+generation gap that used to sit here is closed. See
+[`capability-matrix.md`](capability-matrix.md) Tier 3.
+
+That run also produced the first live exercise of
+[`redact-evidence.py`](../tests/hardware/redact-evidence.py), whose output is what
+makes publishing evidence artifacts safe at all.
 
 ---
 
@@ -251,5 +256,5 @@ what the `hardware-observe` job prints — and the wrong tool for identity.
 | `galaxy-publish` context | Exists, holds `GALAXY_API_KEY`, project-restricted | Nothing |
 | Renovate | Installed, dashboard open | Config migration PR; one errored update |
 | Public repo + branch protection | Public, 12 required checks, enforced | Keep the check list in step with CI |
-| Second lab machine | Provisioned; all eight stages done | Nothing; re-run machine 1 for the v0.2.0 facts |
+| Second lab machine | Provisioned; all eight stages done | Nothing |
 | UUID identity guard | Live for machine 2, matched on 2026-07-29 | One `dmidecode` comparison per machine, for independent identity |

@@ -146,7 +146,7 @@ ansible-galaxy collection install git+https://github.com/james-crowley/ansible-c
 | Module | Purpose | Mutates? |
 |---|---|---|
 | `amt_info` | Capability and state discovery; canonical fact schema | No |
-| `amt_power` | Convergent `on`/`off`, imperative `reset`/`reboot`/`cycle` | Yes |
+| `amt_power` | Convergent `on`/`off`/`hibernate`, imperative `reset`/`reboot`/`cycle`/`sleep-light`/`sleep-deep` | Yes |
 | `amt_boot` | One-time boot device selection, no permanent boot-order change | Yes |
 | `amt_redirection` | Inspect, and optionally configure, SOL/IDE-R service state | Optional |
 | `amt_media` | Attach boot media over IDE-R (bootable ISO + writable image) | Yes |
