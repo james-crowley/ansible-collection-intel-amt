@@ -193,8 +193,24 @@ commands:
               # Pure-bash discovery on purpose: this branch has to be able to report
               # what it found even on a host whose PATH is itself part of the problem.
               available=""
-              IFS=':' read -r -a lab_path_dirs <<< "$PATH"
-              for dir in "${lab_path_dirs[@]}"; do
+              # Split $PATH without a bash here-string. A here-string's triple
+              # angle bracket cannot appear anywhere in this file: CircleCI treats a
+              # double angle bracket as the opening of a parameter tag before the
+              # shell ever sees it, and the resulting "Unclosed tag" is a CONFIG
+              # error -- the whole workflow fails to launch, rather than this step
+              # failing. Note `circleci config validate` does NOT catch it: it
+              # passed on the commit that introduced exactly this bug, and the
+              # breakage only surfaced when the hardware workflow was first
+              # invoked afterwards. Avoid the character sequence in prose here too,
+              # for the same reason. Setting IFS around a bare `for` keeps this
+              # pure-bash, which this branch needs since it must report what it
+              # found on a host whose PATH is itself the problem.
+              lab_old_ifs="$IFS"
+              IFS=':'
+              # shellcheck disable=SC2086 # word splitting on IFS is the point here
+              set -- $PATH
+              IFS="$lab_old_ifs"
+              for dir in "$@"; do
                 for exe in "$dir"/python3*; do
                   if [ -x "$exe" ] && [ ! -d "$exe" ]; then
                     name="${exe##*/}"
@@ -312,6 +328,16 @@ jobs:
           # instruction rather than an approximation.
           name: Install pinned linters (same file contributors install)
           command: python -m pip install -r requirements-dev.txt
+      - run:
+          # Runs first, and deliberately not via `circleci config validate`, which
+          # reports this config valid while CircleCI itself refuses to launch the
+          # workflow. A stray double angle bracket -- a bash here-string is the
+          # usual way one arrives -- is an "Unclosed tag" CONFIG error. Because the
+          # hardware workflow is only reachable via a pipeline parameter, such a
+          # break can merge and sit undetected until someone triggers hardware.
+          # That already happened once; this is the guard so it cannot recur.
+          name: CircleCI parameter-tag guard
+          command: ./scripts/check-circleci-tags.sh .circleci/config.yml
       - run:
           name: yamllint
           command: yamllint -c .yamllint .
