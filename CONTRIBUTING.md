@@ -51,6 +51,27 @@ Two things about this that will cost you time if you miss them:
    COLLECTION_PATH="$(./scripts/setup-collection-tree.sh)"
    ```
 
+## Install the tooling
+
+Everything below assumes `ansible-core` plus the pinned linters and release
+tooling are on your `PATH`. There is one file for that, and CI's `lint` job
+installs from the same file, so the ruff that judges your PR is the ruff you ran:
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install "ansible-core~=2.17.0" -r requirements.txt -r requirements-dev.txt
+```
+
+`requirements-dev.txt` pins exact versions on purpose — `ruff` in particular
+changes which findings it reports between patch releases (0.15.5 reports three
+`S603` findings in the unit tests that 0.16.0 does not), so an unpinned install
+makes a lint result depend on the day it ran. Bump the pins in their own PR and
+fix whatever the new version finds there.
+
+`ansible-core~=2.17.0` above is the collection's declared floor; anything in
+`>= 2.17` works locally. Use the floor if you want your local run to match the
+oldest series CI tests.
+
 ## Local verification sequence
 
 Run this before opening a PR — it is the same sequence CI runs, minus the
@@ -62,19 +83,63 @@ export COLLECTION_BUILD_ROOT=/tmp/my-build-root   # see above
 COLLECTION_PATH="$(./scripts/setup-collection-tree.sh)"
 cd "$COLLECTION_PATH"
 
-ansible-test sanity --venv --python 3.13
-ansible-test units  --venv --python 3.13
-ansible-test integration --venv --python 3.13   # against local mock servers only
+ansible-test sanity --venv --python 3.12
+ansible-test units  --venv --python 3.12
+ansible-test integration --venv --python 3.12   # against local mock servers only
 
 # Back at the repository root:
 cd -
 yamllint -c .yamllint .
 ruff check plugins tests
 ruff format --check plugins tests
+
+# ansible-lint resolves `james_crowley.intel_amt.*` FQCNs by looking in the
+# collections path, and unlike ansible-test it does not stage the tree itself.
+# Without this symlink every module reference in tests/hardware/*.yml fails
+# syntax-check[unknown-module], a rule that cannot be silenced with a `# noqa`.
+# CI does exactly this in the lint job.
+mkdir -p ~/.ansible/collections/ansible_collections/james_crowley
+ln -sfn "$(pwd)" ~/.ansible/collections/ansible_collections/james_crowley/intel_amt
 ansible-lint --offline
 
 ansible-galaxy collection build --output-path /tmp/dbuild --force
 ```
+
+`3.12`, not `3.13`: CI runs sanity and the mock integration suite on 3.12, and
+`docs/testing.md` and the README use 3.12 throughout. `ansible-test` will happily
+run on 3.13 — the units matrix covers it — but if you are reproducing a CI
+failure, match the version CI used.
+
+### Running `pytest` directly, for a fast inner loop
+
+`ansible-test units` builds a fresh virtualenv every invocation, which is the
+right thing for CI and far too slow when you are iterating on one test. You can
+run `pytest` yourself, but **not from the repository root** — every test imports
+its subject as `ansible_collections.james_crowley.intel_amt.plugins.…`, which
+only resolves if the collection is sitting inside an `ansible_collections/`
+directory that is itself on `sys.path`. From the root you get:
+
+```
+ModuleNotFoundError: No module named 'ansible_collections'
+```
+
+That is not a missing dependency and installing something will not fix it. It
+needs the staged tree, run from inside it, with `PYTHONPATH` pointing at the tree
+*root* (the directory containing `ansible_collections/`, i.e. two levels above
+the collection):
+
+```bash
+export COLLECTION_BUILD_ROOT=/tmp/my-build-root
+COLLECTION_PATH="$(./scripts/setup-collection-tree.sh)"
+cd "$COLLECTION_PATH"
+PYTHONPATH="${COLLECTION_BUILD_ROOT}" pytest tests/unit -q      # 559 passed
+```
+
+`pytest tests/unit/plugins/modules/test_amt_boot.py -k some_name` narrows it from
+there. Two reminders that follow from the staging being a **copy**: re-run
+`setup-collection-tree.sh` after every source edit, and remember you are editing
+files in the repository while running files in `/tmp` — a "my fix had no effect"
+moment here is almost always a stale tree.
 
 `ansible-test sanity` is currently 24/24 exit 0 — it must stay exit 0. If your change
 adds a sanity finding, fix it or get an explicit, justified entry in
@@ -134,16 +199,24 @@ unconditionally is harmless across the whole supported range. Forgetting it only
 breaks on the newest `ansible-core` in the test matrix, which makes it easy to miss
 locally if you are not pinned to that version.
 
-### `E402` is already ignored for `plugins/modules/*.py` — do not also add `# noqa: E402`
+### Never add an inline `# noqa` for a rule `pyproject.toml` already ignores per-file
 
-`pyproject.toml`'s `[tool.ruff.lint.per-file-ignores]` already ignores `E402` project-wide
-for `plugins/modules/*.py`, because Ansible's module convention requires the
-`DOCUMENTATION`/`EXAMPLES`/`RETURN` string literals at the top of the file, before any
-import — `ansible-doc` and the sanity toolchain both depend on that ordering. If you
-add an inline `# noqa: E402` comment on an import in a module file on top of that,
-`ruff`'s `RUF100` (unused `noqa` directive) fails instead, because the warning it
-would have suppressed is already suppressed at the config level. Do not add the
-inline comment; the per-file ignore already covers it.
+`ruff`'s `RUF100` (unused `noqa` directive) is enabled, so a `# noqa: X` whose finding
+was already suppressed at config level is itself an error. Check
+`[tool.ruff.lint.per-file-ignores]` before reaching for an inline comment. The two that
+have actually bitten:
+
+- **`E402` in `plugins/modules/*.py`.** Ansible's module convention requires the
+  `DOCUMENTATION`/`EXAMPLES`/`RETURN` string literals at the top of the file, before any
+  import — `ansible-doc` and the sanity toolchain both depend on that ordering — so
+  `E402` is ignored for those files project-wide.
+- **`S603` (subprocess-without-shell-check) anywhere under `tests/**`.** Several tests
+  spawn a helper process with a fully-controlled literal argv. Note this one is
+  version-sensitive: `ruff` 0.15.5 reports `S603` in the unit tests and 0.16.0 does not,
+  which is part of why `requirements-dev.txt` pins `ruff` exactly.
+
+Whichever direction you hit it from, the fix is the same: one suppression, at one level,
+not both.
 
 ### Bare `_` as a variable name is rejected by `ansible-test`'s `pylint` sanity config
 
@@ -160,7 +233,13 @@ one logical change per commit, with a real body explaining *why*, not just *what
 
 **Every user-facing change needs a changelog fragment** in `changelogs/fragments/`,
 following the `antsibull-changelog` format configured in `changelogs/config.yaml`.
-Look at an existing fragment for the shape, e.g. `changelogs/fragments/18-firmware-version-source.yml`:
+Name it after your change (`changelogs/fragments/<something-descriptive>.yml`) — the
+filename is not load-bearing, only the contents are. This document deliberately does
+not point you at a specific existing fragment as an example: `changelogs/config.yaml`
+sets `keep_fragments: false`, so `antsibull-changelog release` **deletes** every
+fragment once it has folded it into `CHANGELOG.md`/`CHANGELOG.rst`. Any filename named
+here would be a dead link after the next release. Look in `changelogs/fragments/` for
+whatever is currently unreleased, or at a released entry in `CHANGELOG.md`. The shape:
 
 ```yaml
 ---
