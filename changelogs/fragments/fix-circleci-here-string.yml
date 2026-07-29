@@ -1,0 +1,9 @@
+---
+bugfixes:
+  - "CI - the hardware workflow could not launch at all. A bash here-string in the lab virtualenv command was parsed by
+    CircleCI as the opening of a parameter tag, producing an \"Unclosed tag\" config error that fails the whole workflow
+    rather than the step. It merged undetected because C(circleci config validate) reports the config valid, and the
+    hardware workflow is only reachable via a pipeline parameter, so nothing exercised it until a run was triggered."
+  - "CI - add C(scripts/check-circleci-tags.sh), run first in the lint job, failing on any double-angle-bracket sequence
+    in C(.circleci/config.yml) that is not a parameter tag -- including inside comments, where it is equally fatal. This
+    is the regression guard for the above, since the tool that ought to catch it does not."
