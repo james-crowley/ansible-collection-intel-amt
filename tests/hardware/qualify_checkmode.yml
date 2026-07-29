@@ -68,3 +68,9 @@
         dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_checkmode.json"
         mode: "0600"
       delegate_to: localhost
+      # This whole playbook runs under --check (asserted above), which without this
+      # would make writing the evidence a no-op too -- so stage 3 was the one stage
+      # that produced no reviewable record of what it computed. Writing a local file
+      # is not the mutation check mode exists to prevent; the endpoint is still never
+      # touched, because every AMT task above carries check mode of its own.
+      check_mode: false

@@ -1,0 +1,16 @@
+---
+bugfixes:
+  - "tests/hardware/qualify_checkmode.yml - write the stage-3 evidence file. The playbook runs under C(--check) by design
+    (it asserts C(ansible_check_mode)), which also made its own C(copy) task a no-op, so stage 3 was the one stage that
+    left no reviewable record of the plans it computed. C(check_mode: false) on that task fixes it; the endpoint is still
+    never touched, because every AMT task in the playbook carries check mode of its own."
+  - "README - the C(amt_power) row omitted V(sleep-light), V(sleep-deep) and V(hibernate), which have been selectable
+    since they were exposed in 0.2.0."
+  - "docs/maintainer-setup.md - record that machine 1 was re-run and the v0.2.0 facts are confirmed on both firmware
+    generations. It still listed that re-run as a remaining action and stated the facts had only ever been read on one
+    generation, both of which contradicted the capability matrix."
+  - "CONTRIBUTING / docs/testing.md - state that the C(integration-mock) CI job pins ansible-core 2.19, and that the
+    integration suite must be run against 2.19 rather than the 2.17 the setup step installs. On 2.19 the controller adds
+    an C(exception) key to every failed task result while on 2.17 it appears only at C(-vvv), so a target asserting on
+    that key passes locally and fails in CI. Nothing in the repository stated which core the job used, which is exactly
+    how one such target reached review."
