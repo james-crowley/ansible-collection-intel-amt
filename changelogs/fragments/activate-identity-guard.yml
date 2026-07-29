@@ -1,0 +1,10 @@
+---
+minor_changes:
+  - "tests/hardware/render-inventory.sh - emit C(amt_expected_uuid) from C(AMT_EXPECTED_UUID{,_N}) when set, activating the
+    stage-2 identity cross-check that had been a no-op because nothing ever supplied a value. Still optional: absent the
+    variable the playbook prints the observed UUID and proceeds, exactly as before. Recorded from an observed value this
+    detects drift -- a reused DHCP lease, a swapped inventory suffix -- rather than independently confirming machine
+    identity, which needs the booted OS's own C(dmidecode -s system-uuid) that CI cannot reach."
+  - "README - restore the live CircleCI status badge. It reports status again now that the project's Free and Open Source
+    flag is back on. The lab platform GUIDs that made public logs a concern are held as C(amt-lab-runner) context values,
+    and CircleCI masks context values in log output, so they are censored rather than hidden by making builds private."
