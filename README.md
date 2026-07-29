@@ -150,8 +150,10 @@ ansible-galaxy collection install git+https://github.com/james-crowley/ansible-c
 | `amt_boot` | One-time boot device selection, no permanent boot-order change | Yes |
 | `amt_redirection` | Inspect, and optionally configure, SOL/IDE-R service state | Optional |
 | `amt_media` | Attach boot media over IDE-R (bootable ISO + writable image) | Yes |
+| `amt_event_log` | Read the firmware event log — why an unattended install failed | No |
+| `amt_log_clear` | Clear the firmware event log (irreversible; needs confirmation) | Yes |
 
-All five accept the same connection options, documented once in the
+All seven accept the same connection options, documented once in the
 `connection` doc fragment. Set them centrally with `module_defaults`:
 
 ```yaml
