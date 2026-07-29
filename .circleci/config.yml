@@ -210,8 +210,17 @@ jobs:
       - install-ansible:
           ansible-core-version: "2.19"
       - run:
-          name: Install linters
-          command: python -m pip install ansible-lint yamllint ruff
+          # From requirements-dev.txt, not a bare `pip install ansible-lint
+          # yamllint ruff`: unpinned linters make a lint result a function of the
+          # day it ran. ruff in particular adds and widens rules continuously --
+          # 0.15.5 reports three S603 findings in the unit tests that 0.16.0 does
+          # not -- so an unpinned install can turn main red with no code change,
+          # or disagree with what a contributor ran locally. This file is the
+          # single place those versions are declared, which is what makes
+          # "install the dev requirements" in CONTRIBUTING.md a truthful
+          # instruction rather than an approximation.
+          name: Install pinned linters (same file contributors install)
+          command: python -m pip install -r requirements-dev.txt
       - run:
           name: yamllint
           command: yamllint -c .yamllint .

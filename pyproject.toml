@@ -38,8 +38,17 @@ ignore = [
 # sanity toolchain both depend on that ordering, so the imports that follow
 # are legitimately not at the top of the file.
 "plugins/modules/*.py" = ["E402"]
-# Tests use asserts and construct fixture data freely.
-"tests/**" = ["S101", "S105", "S106", "S311"]
+# Tests use asserts and construct fixture data freely. S603
+# (subprocess-without-shell-equals-true) is ignored because several tests
+# deliberately spawn a helper process: a throw-away `sys.executable -c ...` child
+# whose liveness stands in for the IDE-R media session daemon, and an `openssl`
+# invocation that mints the mock WS-Man server's self-signed fixture cert. Every
+# one of those builds its argv as a literal list in the test itself, with no
+# shell and no untrusted input -- which is the case S603 exists to distinguish
+# from. Note this ignore is version-sensitive: ruff 0.15.5 raises S603 on these
+# call sites and 0.16.0 does not, which is part of why requirements-dev.txt pins
+# ruff exactly rather than with a floor.
+"tests/**" = ["S101", "S105", "S106", "S311", "S603"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["ansible_collections"]

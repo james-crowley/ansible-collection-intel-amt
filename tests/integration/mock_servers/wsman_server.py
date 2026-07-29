@@ -517,7 +517,11 @@ def generate_self_signed_tls_context(host: str) -> tuple[ssl.SSLContext, str, te
     tmpdir = tempfile.TemporaryDirectory(prefix="amt-mock-wsman-tls-")
     key_path = os.path.join(tmpdir.name, "key.pem")
     cert_path = os.path.join(tmpdir.name, "cert.pem")
-    subprocess.run(  # noqa: S603 -- fixed argv, no shell, no untrusted input
+    # Fixed argv, no shell, no untrusted input. This call used to carry an inline
+    # suppression for ruff's S603; it must not, because pyproject.toml now ignores
+    # S603 for tests/** and RUF100 then fails the redundant inline directive
+    # instead. Same trap CONTRIBUTING.md describes for E402 in plugins/modules/.
+    subprocess.run(
         [
             openssl_bin,
             "req",
