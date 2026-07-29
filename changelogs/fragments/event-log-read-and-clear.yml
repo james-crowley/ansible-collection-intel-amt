@@ -1,0 +1,47 @@
+---
+minor_changes:
+  - "amt_event_log - new module: read the Intel AMT event log via C(AMT_MessageLog) --
+    C(PositionToFirstRecord) then C(GetRecords), following the iteration to completion rather than fetching one batch.
+    This is the only place that records B(why) an unattended bare-metal install failed when the failure happened outside
+    the host OS -- boot failures, agent-watchdog expiry, power events the OS never saw. Read-only, C(changed) always
+    C(false), full check-mode support. Records are returned B(both) decoded and as raw bytes (C(raw_base64), C(raw_hex))
+    including records that failed to decode, because the record layout is decoded from third-party sources rather than
+    from firmware this collection has read -- the raw bytes are what make a wrong decode diagnosable. A C(max_records)
+    bound (default 390, one whole log on the generation the protocol fixtures came from) stops a large log hanging a
+    play, and truncation is reported explicitly via C(truncated)/C(stop_reason) against C(total_records) from
+    C(CurrentNumberOfRecords), never returned as a silent prefix."
+  - "amt_log_clear - new module: clear the Intel AMT event log via C(AMT_MessageLog.ClearLog). Irreversible, and the risk
+    is destroyed forensic evidence rather than lost access -- clearing cannot strand the management path. Requires an
+    explicit C(confirm_destructive=true), mirroring C(amt_baremetal_install_confirm_destructive); an unconfirmed
+    invocation does not touch the endpoint at all, not even to authenticate, and the refusal applies in check mode too.
+    Check mode really reads C(CurrentNumberOfRecords) and reports what would be destroyed. C(CurrentNumberOfRecords) is
+    recorded before B(and) after in the operation receipt, the after value observed from a fresh read rather than assumed
+    from C(ReturnValue == 0). A non-zero C(ReturnValue) raises C(error_class=remote_operation) and is never demoted to a
+    warning: an operator told \"cleared\" about a log that was not cleared will either hunt for evidence that is gone or
+    stop hunting for evidence that is still there. Clearing an already-empty log is a no-op reporting C(changed=false)."
+  - "meta/runtime.yml - add C(amt_event_log) and C(amt_log_clear) to the C(intel_amt) action group, so
+    C(module_defaults) for C(group/james_crowley.intel_amt.intel_amt) reaches both new modules rather than silently
+    skipping them."
+  - "docs - add C(docs/protocol-notes.md) §2.8 recording the C(AMT_MessageLog) protocol B(per fact, with the source
+    that establishes it) -- resource URI, method names and parameters, the two methods' differing C(ReturnValue) maps,
+    the 21-byte little-endian record struct, and the severity/entity/firmware/watchdog value tables. Sources are
+    C(device-management-toolkit/go-wsman-messages) (including its captured B(real firmware response fixtures) under
+    C(pkg/wsman/wsmantesting/responses/amt/messagelog/)) and MeshCentral's C(agents/modules_meshcmd/amt.js). What
+    remains B(inferred) is marked as such, notably the returned C(IterationIdentifier)'s arithmetic, which no source
+    explains and which is therefore treated as an opaque token fed back verbatim."
+  - "docs - record that neither new module has been exercised against real firmware, in both module documentation
+    strings and both C(docs/) pages. No hardware qualification stage covers them."
+  - "tests - extend the mock WS-Man server with C(AMT_MessageLog): C(Get), C(Enumerate)/C(Pull),
+    C(PositionToFirstRecord), C(GetRecords) and C(ClearLog), shaped to match the captured firmware response fixtures
+    rather than this collection's expectations -- including emitting C(IterationIdentifier)/C(NoMoreRecords)/C(RecordArray)
+    B(before) C(ReturnValue) as firmware orders them, serving both C(Get) and C(Enumerate) because the real fixture set
+    contains responses for both, and using the two methods' B(different) empty-log return values (2 and 3) so a client
+    that conflated them fails in CI rather than on hardware. C(GetRecords) batches at 2 records regardless of
+    C(MaxReadRecords), so following the iteration is exercised over a real socket."
+  - "tests - add integration targets for both modules and unit coverage for the record decode (a truncated record, an
+    unknown severity value, an empty log, sentinel timestamps), iteration following across batches, truncation
+    reporting, check mode mutating nothing for both modules, the confirmation gate refusing, a non-zero C(ReturnValue)
+    raising C(remote_operation), and graceful degradation to C(unsupported_capability) when C(AMT_MessageLog) is absent.
+    The decode is asserted against the two B(real firmware records) in the upstream C(getrecords.xml) fixture, using the
+    exact decoded values C(go-wsman-messages)' own tests assert for those bytes -- so a drift stops agreeing with
+    published output for real firmware data rather than merely failing an internal expectation."
