@@ -6,11 +6,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 # Ansible Collection: `james_crowley.intel_amt`
 
-[![CircleCI](https://dl.circleci.com/status-badge/img/gh/james-crowley/ansible-collection-intel-amt/tree/main.svg?style=shield)](https://dl.circleci.com/status-badge/redirect/gh/james-crowley/ansible-collection-intel-amt/tree/main)
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![ansible-core](https://img.shields.io/badge/ansible--core-%3E%3D2.17-blue.svg)](https://docs.ansible.com/)
-[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
-[![Status: pre-release](https://img.shields.io/badge/status-pre--release-orange.svg)](#project-status)
+<!-- Badges must stay on ONE line. GitHub renders the soft line break between two
+     badge links as a <br>, which stacks them vertically instead of forming a row. -->
+[![Galaxy](https://img.shields.io/badge/dynamic/json?label=galaxy&query=%24.data.collection.latest_version.version&url=https%3A%2F%2Fgalaxy.ansible.com%2Fapi%2Fv2%2Fcollections%2Fjames_crowley%2Fintel_amt%2F&color=blue)](https://galaxy.ansible.com/ui/repo/published/james_crowley/intel_amt/) [![CircleCI](https://dl.circleci.com/status-badge/img/gh/james-crowley/ansible-collection-intel-amt/tree/main.svg?style=shield)](https://dl.circleci.com/status-badge/redirect/gh/james-crowley/ansible-collection-intel-amt/tree/main) [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE) [![ansible-core](https://img.shields.io/badge/ansible--core-%3E%3D2.17-blue.svg)](https://docs.ansible.com/) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/) [![Status: pre-release](https://img.shields.io/badge/status-pre--release-orange.svg)](#project-status)
 
 Out-of-band management of **Intel AMT / vPro** machines from Ansible — power
 control, one-time boot selection, redirection state, and **native IDE-R virtual
@@ -69,8 +67,10 @@ that needs an operating system on the target that writes.
 
 ## Requirements
 
-- **Controller**: Python 3.11+ with `requests`. Install with
-  `pip install -r requirements.txt`.
+- **Controller**: Python 3.10+ with `requests`. Install with
+  `pip install -r requirements.txt`. The floor is 3.10 because ansible-core 2.17
+  — this collection's own floor — still supports a 3.10 controller, and the lab
+  hardware runner is one; CI's unit matrix covers 3.10, 3.11, 3.12 and 3.13.
 - **ansible-core >= 2.17.** The floor is deliberate: the sanity-test boilerplate
   requirement changed incompatibly at 2.17, and no single module form is
   sanity-clean on both 2.16 and 2.17+.
@@ -101,8 +101,14 @@ An AMT endpoint cannot execute a Python payload, so every task must be delegated
 ## Installation
 
 ```bash
+ansible-galaxy collection install james_crowley.intel_amt
+pip install -r requirements.txt
+```
+
+To track `main` instead of a published release:
+
+```bash
 ansible-galaxy collection install git+https://github.com/james-crowley/ansible-collection-intel-amt.git
-pip install requests
 ```
 
 ## Modules
@@ -325,17 +331,14 @@ Full attribution with per-file provenance is in [NOTICE](NOTICE).
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the local verification sequence and
-the traps worth knowing about, [`SECURITY.md`](SECURITY.md) for why this
-collection warrants unusual care with credentials, and
-[`docs/maintainer-setup.md`](docs/maintainer-setup.md) for the one-time
-account/secret steps a maintainer needs.
-
-
 Issues and PRs welcome. Conventional commits; every change needs a changelog
-fragment in `changelogs/fragments/`; CI must be green. See
-[`CONTRIBUTING.md`](CONTRIBUTING.md) for the local verification sequence and the
-practical traps this project has actually hit.
+fragment in `changelogs/fragments/`; CI must be green.
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the local verification sequence and
+the practical traps this project has actually hit,
+[`SECURITY.md`](SECURITY.md) for why this collection warrants unusual care with
+credentials, and [`docs/maintainer-setup.md`](docs/maintainer-setup.md) for the
+one-time account/secret steps a maintainer needs.
 
 ## Further reading
 
