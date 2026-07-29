@@ -13,6 +13,26 @@
 # Put; a regression in that list fails this task, not a separate one. amt_boot is not
 # idempotent by contract (every successful arm reports changed=true, per its own RETURN
 # documentation), so there is no idempotence assertion here to match.
+#
+# The same tasks now carry a second, independent guard. The mock answers HTTP 400 --
+# "The supplied SOAP violates the corresponding XML schema definition" -- to a
+# ChangeBootOrder whose <Source> element is present but empty, exactly as real AMT
+# 16.1.30 does (s2.5, hardware-observed). Source is typed as an endpoint reference, so
+# it requires Address and ReferenceParameters children; an absent element is legal and
+# an empty one is not. That distinction was load-bearing enough that getting it wrong
+# made IDE-R and BIOS boot *entirely impossible* against real hardware, and until the
+# mock learned to reproduce it the regression was unguarded.
+#
+# So every arm task below -- steps 2 and 5 of the sequence both call ChangeBootOrder --
+# now also proves wsman.py's _append_params() still *omits* a None-valued parameter
+# rather than emitting an empty element. Verified by transiently restoring the old
+# behaviour: the "Arm a one-time PXE boot" task then fails with
+# "CIM_BootConfigSetting.ChangeBootOrder received unexpected HTTP status 400".
+#
+# Likewise the mock now answers ReturnValue=5 (InvalidParameter, per go-wsman-messages'
+# ValueMap for CIM_BootService) rather than 0 when SetBootConfigRole arrives without its
+# required Role parameter, or with it in the wrong XML namespace. Both were verified to
+# fail this target when the client stopped sending Role correctly.
 
 - name: Create a scratch directory for this target's runtime files
   ansible.builtin.tempfile:
@@ -26,6 +46,7 @@
     mock_servers_dir: "{{ role_path }}/../../mock_servers"
     plain_ready_file: "{{ scratch_dir.path }}/wsman_plain_ready.json"
     tls_ready_file: "{{ scratch_dir.path }}/wsman_tls_ready.json"
+    amt10_ready_file: "{{ scratch_dir.path }}/wsman_amt10_ready.json"
 
 - name: Start the plaintext mock WS-Man server
   ansible.builtin.shell: |
@@ -53,7 +74,27 @@
   changed_when: false
   delegate_to: localhost
 
-- name: Wait for both mock servers to report ready
+# A third endpoint that behaves like AMT 10.0.56: Enumerate answers HTTP 400 on
+# AMT_-prefixed classes, while Get with an exact selector works (docs/protocol-notes.md
+# s2.7, hardware-verified). This is a separate process rather than a knob flipped on a
+# running server for the reason run_wsman_mock.py's docstring gives -- it describes what
+# the endpoint *is*, so it must hold for the endpoint's whole lifetime, otherwise a
+# failure is not attributable to a firmware generation.
+- name: Start an AMT 10-era mock WS-Man server (Enumerate is HTTP 400 on AMT_ classes)
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ amt10_ready_file }} \
+      --amt10-no-enumerate \
+      > {{ scratch_dir.path }}/wsman_amt10.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: amt10_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Wait for all three mock servers to report ready
   ansible.builtin.wait_for:
     path: "{{ item }}"
     state: present
@@ -61,14 +102,17 @@
   loop:
     - "{{ plain_ready_file }}"
     - "{{ tls_ready_file }}"
+    - "{{ amt10_ready_file }}"
   delegate_to: localhost
 
 - name: Read mock server connection info and pids
   ansible.builtin.set_fact:
     plain_info: "{{ lookup('ansible.builtin.file', plain_ready_file) | from_json }}"
     tls_info: "{{ lookup('ansible.builtin.file', tls_ready_file) | from_json }}"
+    amt10_info: "{{ lookup('ansible.builtin.file', amt10_ready_file) | from_json }}"
     plain_pid: "{{ plain_start.stdout | trim }}"
     tls_pid: "{{ tls_start.stdout | trim }}"
+    amt10_pid: "{{ amt10_start.stdout | trim }}"
 
 - name: Exercise amt_boot against the mock server
   block:
@@ -187,6 +231,50 @@
         that:
           - boot_bad_password.failed == true
           - boot_bad_password.error_class == 'authentication'
+
+    # This is a CHARACTERIZATION test: it pins a known, documented limitation, not
+    # desired behaviour.
+    #
+    # docs/protocol-notes.md s2.7 records that AMT 10.0.56 answers HTTP 400 to Enumerate
+    # on AMT_-prefixed classes. plugins/module_utils/boot.py's discover_and_validate()
+    # reaches AMT_BootCapabilities via Enumerate+Pull with no Get-with-selector fallback,
+    # so amt_boot cannot work against that firmware generation at all. s2.7 accepts this
+    # deliberately -- the Enumerate call sites are hardware-verified on 16.1.30 and
+    # 19.0.5, and swapping a verified verb for an unverified one would be a bad trade --
+    # and says a fallback should be *added* if a 10.x endpoint ever needs it.
+    #
+    # Until now that limitation existed only as prose. This makes it executable: the
+    # module fails closed (error_class=protocol) rather than, say, silently arming a boot
+    # it could not confirm was supported. If someone later adds the Get-with-selector
+    # fallback s2.7 recommends, THIS TASK WILL FAIL -- and that failure is the correct
+    # signal to come here and assert success instead.
+    - name: AMT 10-era firmware -- Enumerate is HTTP 400, so discovery cannot complete
+      james_crowley.intel_amt.amt_boot:
+        host: 127.0.0.1
+        port: "{{ amt10_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        device: pxe
+        action_token: amt10-probe-not-a-secret
+      delegate_to: localhost
+      no_log: true
+      register: boot_amt10
+      ignore_errors: true
+
+    - name: Assert amt_boot fails closed on AMT 10-era firmware rather than guessing
+      ansible.builtin.assert:
+        that:
+          - boot_amt10.failed == true
+          # protocol, not unsupported_capability: the client never got an answer it could
+          # read a capability out of. A 400 from Enumerate is a transport-level refusal of
+          # the verb, which is genuinely a protocol-layer fact.
+          - boot_amt10.error_class == 'protocol'
+        fail_msg: >-
+          amt_boot no longer fails on AMT 10-era firmware. If a Get-with-selector fallback
+          for AMT_BootCapabilities was added (docs/protocol-notes.md s2.7 recommends
+          exactly that), this task should now assert success -- update it deliberately.
   always:
     - name: Stop the plaintext mock WS-Man server
       ansible.builtin.command: "kill {{ plain_pid }}"
@@ -196,6 +284,12 @@
 
     - name: Stop the TLS mock WS-Man server
       ansible.builtin.command: "kill {{ tls_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
+      changed_when: false
+
+    - name: Stop the AMT 10-era mock WS-Man server
+      ansible.builtin.command: "kill {{ amt10_pid }}"
       delegate_to: localhost
       ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
       changed_when: false

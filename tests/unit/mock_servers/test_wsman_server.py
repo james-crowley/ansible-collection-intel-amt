@@ -762,3 +762,489 @@ class TestCleanShutdown:
 
         with pytest.raises(OSError):
             socket.create_connection(("127.0.0.1", port), timeout=1)
+
+
+# --------------------------------------------------------------------------
+# Firmware rejections the mock reproduces unconditionally
+#
+# Distinct from TestFaultInjection above: nothing here is armed by a test. These
+# are requests real firmware refuses, so the mock refuses them too, and each one
+# exists because a client that sends it would fail against real hardware. See
+# wsman_server.py's "Rejections" docstring section.
+# --------------------------------------------------------------------------
+
+
+def _change_boot_order_xml(source_inner_xml: str | None) -> str:
+    """A ChangeBootOrder request whose ``Source`` body is given verbatim.
+
+    ``None`` omits the ``Source`` element entirely -- which is what "pass a null
+    Source" means on the wire and what this collection and go-wsman-messages both do.
+    """
+    source = f"<r:Source>{source_inner_xml}</r:Source>" if source_inner_xml is not None else ""
+    body = f'<r:ChangeBootOrder_INPUT xmlns:r="{CIM_BOOT_CONFIG_SETTING}">{source}</r:ChangeBootOrder_INPUT>'
+    return _envelope(f"{CIM_BOOT_CONFIG_SETTING}/ChangeBootOrder", CIM_BOOT_CONFIG_SETTING, body)
+
+
+#: A well-formed endpoint reference naming one CIM_BootSourceSetting, in the exact
+#: nesting and namespaces docs/protocol-notes.md 2.5 records and go-wsman-messages'
+#: pkg/wsman/cim/boot/configsetting.go emits.
+_VALID_EPR_INNER = (
+    '<a:Address xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing">'
+    "http://schemas.xmlsoap.org/ws/2004/08/addressing</a:Address>"
+    '<a:ReferenceParameters xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing">'
+    f'<w:ResourceURI xmlns:w="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd">{CIM_BOOT_SOURCE_SETTING}</w:ResourceURI>'
+    '<w:SelectorSet xmlns:w="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd">'
+    '<w:Selector Name="InstanceID">Intel(r) AMT: Force PXE Boot</w:Selector>'
+    "</w:SelectorSet></a:ReferenceParameters>"
+)
+
+
+class TestEmptySourceIsRejected:
+    """The single highest-value guard in this file.
+
+    An empty ``<Source/>`` on ``ChangeBootOrder`` is schema-invalid -- ``Source`` is
+    typed as an endpoint reference, so it requires ``Address`` and
+    ``ReferenceParameters`` children -- and real AMT 16.1.30 answers the whole request
+    with HTTP 400 (docs/protocol-notes.md 2.5). That defect made IDE-R and BIOS boot
+    entirely impossible against real hardware. The mock used to answer ReturnValue 0
+    for it, so mock and client agreed while both were wrong and the regression was
+    unguarded.
+    """
+
+    def test_empty_source_element_is_http_400(self, server):
+        resp = _post(server, _change_boot_order_xml(""))
+        assert resp.status_code == 400
+
+    def test_the_400_carries_the_firmware_reason(self, server):
+        resp = _post(server, _change_boot_order_xml(""))
+        assert "violates the corresponding XML schema definition" in resp.text
+
+    def test_a_rejected_request_mutates_nothing(self, server):
+        server.state.boot_order_source = "Intel(r) AMT: Force PXE Boot"
+        _post(server, _change_boot_order_xml(""))
+        # Firmware never reached the method: the request failed schema validation. A
+        # mock that rejected the request but applied the side effect anyway would be a
+        # different lie from the one being fixed.
+        assert server.state.boot_order_source == "Intel(r) AMT: Force PXE Boot"
+
+    def test_a_self_closed_source_is_rejected_identically(self, server):
+        # <Source/> and <Source></Source> are the same element to any XML parser; this
+        # pins that the guard is about child elements, not about literal text.
+        body = f'<r:ChangeBootOrder_INPUT xmlns:r="{CIM_BOOT_CONFIG_SETTING}"><r:Source /></r:ChangeBootOrder_INPUT>'
+        xml = _envelope(f"{CIM_BOOT_CONFIG_SETTING}/ChangeBootOrder", CIM_BOOT_CONFIG_SETTING, body)
+        assert _post(server, xml).status_code == 400
+
+    def test_an_absent_source_is_valid_and_clears_the_boot_order(self, server):
+        """The whole point of the distinction: absent is legal, empty is not.
+
+        These method parameters are optional (``minOccurs=0``), so omitting the element
+        is how the boot order is cleared -- step 2 of 2.5, and step 5 for the IDE-R and
+        BIOS targets. If this ever starts returning 400, IDE-R boot is broken.
+        """
+        server.state.boot_order_source = "Intel(r) AMT: Force PXE Boot"
+        resp = _post(server, _change_boot_order_xml(None))
+        assert resp.status_code == 200
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _find_text(root, "ReturnValue") == "0"
+        assert server.state.boot_order_source is None
+
+    def test_a_well_formed_epr_source_is_accepted(self, server):
+        resp = _post(server, _change_boot_order_xml(_VALID_EPR_INNER))
+        assert resp.status_code == 200
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _find_text(root, "ReturnValue") == "0"
+        assert server.state.boot_order_source == "Intel(r) AMT: Force PXE Boot"
+
+    def test_a_source_missing_its_address_child_is_rejected(self, server):
+        """Half an endpoint reference is still schema-invalid.
+
+        ``Address`` and ``ReferenceParameters`` are both required by the EPR type, so a
+        Source carrying only one of them fails validation for the same reason an empty
+        one does.
+        """
+        reference_parameters_only = _VALID_EPR_INNER[_VALID_EPR_INNER.index("<a:ReferenceParameters") :]
+        assert _post(server, _change_boot_order_xml(reference_parameters_only)).status_code == 400
+
+    def test_a_source_carrying_only_text_is_rejected(self, server):
+        # A client that "passed null" by stringifying None into the element body would
+        # send this. It has no child elements, so it is the empty case.
+        assert _post(server, _change_boot_order_xml("None")).status_code == 400
+
+    def test_the_same_rule_guards_set_boot_config_role(self, server):
+        # BootConfigSetting is EPR-typed too, validated by the same firmware schema
+        # validator, so the observed rejection generalises rather than being invented.
+        body = f'<r:SetBootConfigRole_INPUT xmlns:r="{CIM_BOOT_SERVICE}"><r:BootConfigSetting /><r:Role>1</r:Role></r:SetBootConfigRole_INPUT>'
+        xml = _envelope(f"{CIM_BOOT_SERVICE}/SetBootConfigRole", CIM_BOOT_SERVICE, body)
+        assert _post(server, xml).status_code == 400
+
+    def test_the_same_rule_guards_request_power_state_change(self, server):
+        body = (
+            f'<r:RequestPowerStateChange_INPUT xmlns:r="{CIM_POWER_MANAGEMENT_SERVICE}">'
+            "<r:PowerState>8</r:PowerState><r:ManagedElement /></r:RequestPowerStateChange_INPUT>"
+        )
+        xml = _envelope(f"{CIM_POWER_MANAGEMENT_SERVICE}/RequestPowerStateChange", CIM_POWER_MANAGEMENT_SERVICE, body)
+        assert _post(server, xml).status_code == 400
+        assert server.state.power_state == 2  # unchanged: the request never ran
+
+
+class TestRequiredParametersAreRequired:
+    def test_set_boot_config_role_without_role_is_invalid_parameter(self, server):
+        """Was ReturnValue 0. Firmware cannot assign a role it was not given."""
+        resp = _post(server, _method_xml(CIM_BOOT_SERVICE, "SetBootConfigRole", {}))
+        assert resp.status_code == 200
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _find_text(root, "ReturnValue") == "5"
+        assert server.state.boot_config_role == 0  # untouched
+
+    def test_set_boot_config_role_with_a_non_numeric_role_is_invalid_parameter(self, server):
+        resp = _post(server, _method_xml(CIM_BOOT_SERVICE, "SetBootConfigRole", {"Role": "IsNextSingleUse"}))
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _find_text(root, "ReturnValue") == "5"
+
+    def test_power_state_change_without_power_state_is_invalid_parameter(self, server):
+        resp = _post(server, _method_xml(CIM_POWER_MANAGEMENT_SERVICE, "RequestPowerStateChange", {}))
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _find_text(root, "ReturnValue") == "5"
+
+    def test_redirection_state_change_without_requested_state_is_invalid_parameter(self, server):
+        resp = _post(server, _method_xml(AMT_REDIRECTION_SERVICE, "RequestStateChange", {}))
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _find_text(root, "ReturnValue") == "5"
+
+    def test_invalid_parameter_is_5_and_not_2(self, server):
+        """5 is InvalidParameter; 2 is Unknown/Unspecified Error.
+
+        All three of go-wsman-messages' relevant ValueMaps agree
+        (``pkg/wsman/cim/boot/decoder.go``, ``pkg/wsman/cim/power/decoder.go``,
+        ``pkg/wsman/amt/redirection/decoder.go``). This mock used to answer 2 for every
+        malformed parameter, which is a different condition -- and one a client could
+        reasonably treat as retryable, where an invalid parameter never is.
+        """
+        resp = _post(server, _method_xml(CIM_POWER_MANAGEMENT_SERVICE, "RequestPowerStateChange", {"PowerState": "9999"}))
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _find_text(root, "ReturnValue") == "5"
+
+
+class TestParameterLookupIsNamespaceAndDepthAware:
+    """A parameter in the wrong namespace or wrongly nested must not satisfy the mock.
+
+    Lookup used to be an ``.iter()`` walk matching bare local names at any depth in any
+    namespace, so both of these passed here and then failed schema validation on real
+    firmware -- the same "mock accepts what firmware rejects" class as the empty
+    ``<Source/>``. Both now read as *absent*, which is the honest reading: the required
+    element is not where the schema says it must be.
+    """
+
+    def test_a_parameter_in_the_wrong_namespace_does_not_count(self, server):
+        body = (
+            f'<r:SetBootConfigRole_INPUT xmlns:r="{CIM_BOOT_SERVICE}"><Role xmlns="http://example.invalid/wrong-namespace">1</Role></r:SetBootConfigRole_INPUT>'
+        )
+        xml = _envelope(f"{CIM_BOOT_SERVICE}/SetBootConfigRole", CIM_BOOT_SERVICE, body)
+        root = ET.fromstring(_post(server, xml).content)  # noqa: S314
+        assert _find_text(root, "ReturnValue") == "5"
+        assert server.state.boot_config_role == 0
+
+    def test_an_unnamespaced_parameter_does_not_count(self, server):
+        body = f'<r:SetBootConfigRole_INPUT xmlns:r="{CIM_BOOT_SERVICE}"><Role>1</Role></r:SetBootConfigRole_INPUT>'
+        xml = _envelope(f"{CIM_BOOT_SERVICE}/SetBootConfigRole", CIM_BOOT_SERVICE, body)
+        root = ET.fromstring(_post(server, xml).content)  # noqa: S314
+        assert _find_text(root, "ReturnValue") == "5"
+
+    def test_a_parameter_nested_one_level_too_deep_does_not_count(self, server):
+        body = (
+            f'<r:RequestPowerStateChange_INPUT xmlns:r="{CIM_POWER_MANAGEMENT_SERVICE}">'
+            "<r:Wrapper><r:PowerState>8</r:PowerState></r:Wrapper>"
+            "</r:RequestPowerStateChange_INPUT>"
+        )
+        xml = _envelope(f"{CIM_POWER_MANAGEMENT_SERVICE}/RequestPowerStateChange", CIM_POWER_MANAGEMENT_SERVICE, body)
+        root = ET.fromstring(_post(server, xml).content)  # noqa: S314
+        assert _find_text(root, "ReturnValue") == "5"
+        assert server.state.power_state == 2  # not powered off
+
+    def test_a_correctly_placed_parameter_still_works(self, server):
+        # The guard above must not have been achieved by breaking the happy path.
+        resp = _post(server, _method_xml(CIM_POWER_MANAGEMENT_SERVICE, "RequestPowerStateChange", {"PowerState": "8"}))
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _find_text(root, "ReturnValue") == "0"
+        assert server.state.power_state == 8
+
+    def test_an_instance_id_selector_in_the_wrong_namespace_is_not_read(self, server):
+        # The EPR is structurally valid (Address + ReferenceParameters present), so this
+        # is not a 400 -- but the selector is not where the schema puts it, so no
+        # InstanceID is read and the boot order records None.
+        inner = (
+            '<a:Address xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing">x</a:Address>'
+            '<a:ReferenceParameters xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing">'
+            '<SelectorSet xmlns="http://example.invalid/wrong">'
+            '<Selector Name="InstanceID">Intel(r) AMT: Force PXE Boot</Selector>'
+            "</SelectorSet></a:ReferenceParameters>"
+        )
+        resp = _post(server, _change_boot_order_xml(inner))
+        assert resp.status_code == 200
+        assert server.state.boot_order_source is None
+
+
+class TestPowerActionCodesMatchWhatIsAdvertised:
+    """A mock that advertises a power state and then refuses it is a bad fixture."""
+
+    def test_available_requested_power_states_matches_the_firmware_fixture(self, server):
+        resp = _post(server, _get_xml(CIM_ASSOCIATED_POWER_MANAGEMENT_SERVICE))
+        root = ET.fromstring(resp.content)  # noqa: S314
+        advertised = _find_all_text(root, "AvailableRequestedPowerStates")
+        # Verbatim from responses/cim/associatedpower/managementservice/get.xml, in its
+        # order -- the values are a set and reordering them would invent a promise.
+        assert advertised == ["10", "8", "5", "11", "4", "7", "14", "12"]
+
+    @pytest.mark.parametrize("code", [10, 8, 5, 11, 4, 7, 14, 12])
+    def test_every_advertised_code_is_accepted(self, server, code):
+        resp = _post(server, _method_xml(CIM_POWER_MANAGEMENT_SERVICE, "RequestPowerStateChange", {"PowerState": str(code)}))
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _find_text(root, "ReturnValue") == "0", f"code {code} is advertised but refused"
+
+    def test_graceful_off_lands_in_the_same_state_as_hard_off(self, server):
+        # 12 = Off - Soft Graceful, the graceful counterpart of 8.
+        _post(server, _method_xml(CIM_POWER_MANAGEMENT_SERVICE, "RequestPowerStateChange", {"PowerState": "12"}))
+        assert server.state.power_state == 8
+
+    def test_graceful_reset_lands_powered_on(self, server):
+        # 14 = Master Bus Reset Graceful, the graceful counterpart of 10.
+        server.state.power_state = 8
+        _post(server, _method_xml(CIM_POWER_MANAGEMENT_SERVICE, "RequestPowerStateChange", {"PowerState": "14"}))
+        assert server.state.power_state == 2
+
+    def test_diagnostic_interrupt_is_accepted_but_changes_no_state(self, server):
+        """11 = Diagnostic Interrupt (NMI): it interrupts the OS, it is not a transition.
+
+        What PowerState firmware reports afterwards is not established, so the mock
+        leaves it alone rather than inventing one.
+        """
+        server.state.power_state = 2
+        resp = _post(server, _method_xml(CIM_POWER_MANAGEMENT_SERVICE, "RequestPowerStateChange", {"PowerState": "11"}))
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _find_text(root, "ReturnValue") == "0"
+        assert server.state.power_state == 2
+
+    def test_power_on_is_still_accepted_although_the_fixture_omits_it(self, server):
+        """Code 2 (On) is absent from the fixture's list *because the machine was on*.
+
+        The class definition says the advertised values "are a function of the current
+        power state", and that fixture was captured at PowerState 2. Rejecting 2 would
+        break amt_power's power-on path while asserting something the evidence does not
+        support -- so it stays accepted, deliberately. Same for 3 (Sleep - Light).
+        """
+        server.state.power_state = 8
+        for code in ("2", "3"):
+            server.state.power_state = 8
+            resp = _post(server, _method_xml(CIM_POWER_MANAGEMENT_SERVICE, "RequestPowerStateChange", {"PowerState": code}))
+            root = ET.fromstring(resp.content)  # noqa: S314
+            assert _find_text(root, "ReturnValue") == "0"
+
+
+class TestUnbackedPropertiesAreGone:
+    """Each of these was a property name with no backing in the class it hung on.
+
+    Verified against ``device-management-toolkit/go-wsman-messages``' own ``types.go``
+    and its recorded response fixtures. None of them was read by this collection's
+    parser, so removing them changes no client behaviour -- what it removes is the
+    chance of a future reader citing the mock as evidence firmware sends them.
+    """
+
+    def test_boot_source_setting_has_no_boot_source_index(self, server):
+        # pkg/wsman/cim/boot/types.go's BootSourceSetting declares ElementName,
+        # InstanceID, StructuredBootString, BIOSBootString, BootString and
+        # FailThroughSupported -- and no index property of any name.
+        resp = _post(server, _enumerate_xml(CIM_BOOT_SOURCE_SETTING))
+        context = _find_text(ET.fromstring(resp.content), "EnumerationContext")  # noqa: S314
+        root = ET.fromstring(_post(server, _pull_xml(CIM_BOOT_SOURCE_SETTING, context)).content)  # noqa: S314
+        assert not _has_element(root, "BootSourceIndex")
+
+    def test_associated_power_management_service_has_no_element_name(self, server):
+        # Absent from pkg/wsman/cim/associatedpower/types.go and from the fixture.
+        root = ET.fromstring(_post(server, _get_xml(CIM_ASSOCIATED_POWER_MANAGEMENT_SERVICE)).content)  # noqa: S314
+        assert not _has_element(root, "ElementName")
+        assert _find_text(root, "PowerState") is not None  # the class is still served
+
+    def test_setup_and_configuration_service_has_no_instance_id(self, server):
+        # That class is keyed by Name / CreationClassName / SystemName /
+        # SystemCreationClassName, all four of which the fixture carries.
+        root = ET.fromstring(_post(server, _get_xml(AMT_SETUP_AND_CONFIGURATION_SERVICE)).content)  # noqa: S314
+        assert not _has_element(root, "InstanceID")
+        assert _find_text(root, "Name") == "Intel(r) AMT Setup and Configuration Service"
+        assert _find_text(root, "CreationClassName") == "AMT_SetupAndConfigurationService"
+        assert _find_text(root, "SystemName") == "Intel(r) AMT"
+
+    def test_the_properties_the_collection_actually_reads_survived(self, server):
+        # The removals must not have taken a fact amt_info reports with them.
+        root = ET.fromstring(_post(server, _get_xml(AMT_SETUP_AND_CONFIGURATION_SERVICE)).content)  # noqa: S314
+        assert _find_text(root, "ProvisioningMode") == "1"
+        assert _find_text(root, "ProvisioningState") == "2"
+
+
+class TestStructuredBootStringShape:
+    """``StructuredBootString`` was set equal to the instance label, which is client-visible.
+
+    Firmware sends ``"<OrgID>:<identifier>:<index>"``; the fixture
+    ``responses/cim/boot/sourcesetting/pull.xml`` shows ``CIM:Hard-Disk:1``,
+    ``CIM:Network:1`` and ``CIM:CD/DVD:1`` verbatim.
+    """
+
+    @staticmethod
+    def _instances(server):
+        resp = _post(server, _enumerate_xml(CIM_BOOT_SOURCE_SETTING))
+        context = _find_text(ET.fromstring(resp.content), "EnumerationContext")  # noqa: S314
+        instances = {}
+        while context:
+            root = ET.fromstring(_post(server, _pull_xml(CIM_BOOT_SOURCE_SETTING, context)).content)  # noqa: S314
+            for elem in root.iter():
+                if elem.tag.rsplit("}", 1)[-1] == "CIM_BootSourceSetting":
+                    fields = {child.tag.rsplit("}", 1)[-1]: child.text for child in elem}
+                    instances[fields["InstanceID"]] = fields
+            context = None if _has_element(root, "EndOfSequence") else _find_text(root, "EnumerationContext")
+        return instances
+
+    def test_the_three_fixture_backed_sources_carry_the_firmware_shape(self, server):
+        instances = self._instances(server)
+        assert instances["Intel(r) AMT: Force PXE Boot"]["StructuredBootString"] == "CIM:Network:1"
+        assert instances["Intel(r) AMT: Force Hard-drive Boot"]["StructuredBootString"] == "CIM:Hard-Disk:1"
+        assert instances["Intel(r) AMT: Force CD/DVD Boot"]["StructuredBootString"] == "CIM:CD/DVD:1"
+
+    def test_no_instance_carries_its_own_label_as_a_structured_boot_string(self, server):
+        for instance_id, fields in self._instances(server).items():
+            assert fields.get("StructuredBootString") != instance_id
+
+    def test_diagnostic_boot_carries_no_structured_boot_string_at_all(self, server):
+        """The DMTF identifier set has no diagnostic member, so there is nothing to derive.
+
+        Omitting the property is a legitimate shape (it is ``omitempty`` in the class
+        definition); inventing an identifier would be the error this file exists to avoid.
+        """
+        assert "StructuredBootString" not in self._instances(server)["Intel(r) AMT: Force Diagnostic Boot"]
+
+    def test_every_instance_shares_one_element_name_as_firmware_sends_it(self, server):
+        """Firmware distinguishes boot sources by ``InstanceID`` only.
+
+        All three fixture instances report ``ElementName`` = "Intel(r) AMT: Boot Source".
+        The mock used to vary it per instance, so a client keying off ``ElementName``
+        would have passed here and matched every instance on real firmware.
+        """
+        element_names = {fields["ElementName"] for fields in self._instances(server).values()}
+        assert element_names == {"Intel(r) AMT: Boot Source"}
+
+    def test_fail_through_supported_is_served(self, server):
+        # On the fixture for all three instances; 2 = NotSupported.
+        assert self._instances(server)["Intel(r) AMT: Force PXE Boot"]["FailThroughSupported"] == "2"
+
+
+class TestElementOrdering:
+    """Fixtures order an instance's properties strictly alphabetically; the mock now does too.
+
+    This collection's parser is *not* order-sensitive for distinct property names
+    (``plugins/module_utils/wsman.py``'s ``_element_to_value()`` keys a dict by local
+    name), so this is fidelity insurance against a future parser that cares -- not a bug
+    fix. Asserted here so it cannot silently regress.
+    """
+
+    @staticmethod
+    def _property_names(resp) -> list[str]:
+        root = ET.fromstring(resp.content)  # noqa: S314
+        body = root.find(f"{{{NS_S}}}Body")
+        instance = next(iter(body))
+        return [child.tag.rsplit("}", 1)[-1] for child in instance]
+
+    @pytest.mark.parametrize(
+        "resource_uri",
+        [
+            CIM_ASSOCIATED_POWER_MANAGEMENT_SERVICE,
+            AMT_BOOT_CAPABILITIES,
+            AMT_REDIRECTION_SERVICE,
+            AMT_GENERAL_SETTINGS,
+            AMT_SETUP_AND_CONFIGURATION_SERVICE,
+            CIM_COMPUTER_SYSTEM,
+            CIM_BIOS_ELEMENT,
+            AMT_MESSAGE_LOG,
+        ],
+    )
+    def test_get_emits_properties_alphabetically(self, server, resource_uri):
+        # AMT_EthernetPortSettings is absent from the list above because it is the one
+        # class that requires a SelectorSet; it has its own test immediately below.
+        names = self._property_names(_post(server, _get_xml(resource_uri)))
+        assert names == sorted(names), f"{resource_uri} is not alphabetical: {names}"
+
+    def test_ethernet_port_settings_is_alphabetical_too(self, server):
+        names = self._property_names(_post(server, _get_xml(AMT_ETHERNET_PORT_SETTINGS, {"InstanceID": ETHERNET_PORT_0_INSTANCE_ID})))
+        assert names == sorted(names)
+
+    def test_repeated_array_elements_keep_their_own_order(self, server):
+        """Sorting is by property *name*: an array's values must not be reordered.
+
+        ``AvailableRequestedPowerStates`` is the strongest case -- its fixture order is
+        not sorted, and sorting it would invent a bookkeeping firmware never promised.
+        """
+        root = ET.fromstring(_post(server, _get_xml(CIM_ASSOCIATED_POWER_MANAGEMENT_SERVICE)).content)  # noqa: S314
+        assert _find_all_text(root, "AvailableRequestedPowerStates") == ["10", "8", "5", "11", "4", "7", "14", "12"]
+
+    def test_method_output_ordering_is_unaffected(self, server):
+        """AMT_MessageLog's _OUTPUT fixtures are *not* alphabetical -- ReturnValue is last.
+
+        Instance ordering and method-output ordering are separate rules and the
+        alphabetical sort must not have leaked into the second one.
+        """
+        resp = _post(server, _method_xml(AMT_MESSAGE_LOG, "GetRecords", {"IterationIdentifier": "1", "MaxReadRecords": "2"}))
+        root = ET.fromstring(resp.content)  # noqa: S314
+        output = next(elem for elem in root.iter() if elem.tag.rsplit("}", 1)[-1] == "GetRecords_OUTPUT")
+        names = [child.tag.rsplit("}", 1)[-1] for child in output]
+        assert names[0] == "IterationIdentifier"
+        assert names[-1] == "ReturnValue"
+
+
+class TestAmt10EnumerateFaultMode:
+    """Opt-in AMT 10-era firmware: ``Enumerate`` is HTTP 400 on ``AMT_``-prefixed classes.
+
+    Hardware-verified on AMT 10.0.56 (docs/protocol-notes.md 2.7). Deliberately **not**
+    unconditional: the same section records this collection's ``Enumerate`` call sites as
+    working on 16.1.30 and 19.0.5, both hardware-verified, so a mock that always rejected
+    the verb would assert something false about modern firmware and break correct code.
+    """
+
+    def test_enumerate_on_amt_classes_works_by_default(self, server):
+        # Modern firmware is the default. Nothing about this mode changes that.
+        assert _post(server, _enumerate_xml(AMT_BOOT_CAPABILITIES)).status_code == 200
+
+    def test_armed_it_answers_400_not_a_soap_fault(self, server):
+        server.faults.enumerate_faults_for_amt_classes = True
+        resp = _post(server, _enumerate_xml(AMT_BOOT_CAPABILITIES))
+        assert resp.status_code == 400
+
+    def test_get_with_an_exact_selector_still_works_on_that_firmware(self, server):
+        """The point of the AMT 10 finding: selective instance access only.
+
+        A degradation path that used ``Get`` with a selector would keep working, which is
+        what 2.7 tells implementers to add. This asserts the mock actually models that
+        rather than making the class unreachable.
+        """
+        server.faults.enumerate_faults_for_amt_classes = True
+        resp = _post(server, _get_xml(AMT_ETHERNET_PORT_SETTINGS, {"InstanceID": ETHERNET_PORT_0_INSTANCE_ID}))
+        assert resp.status_code == 200
+        assert _find_text(ET.fromstring(resp.content), "MACAddress") is not None  # noqa: S314
+
+    def test_cim_prefixed_classes_are_unaffected(self, server):
+        # 2.7 is explicit: "CIM_-prefixed classes are not affected by this finding."
+        server.faults.enumerate_faults_for_amt_classes = True
+        assert _post(server, _enumerate_xml(CIM_BOOT_SOURCE_SETTING)).status_code == 200
+        assert _post(server, _enumerate_xml(CIM_BIOS_ELEMENT)).status_code == 200
+
+    def test_message_log_is_exempt_because_its_enumerate_is_evidenced(self, server):
+        """Unusually for an ``AMT_`` class, ``AMT_MessageLog``'s Enumerate is documented.
+
+        ``responses/amt/messagelog/`` ships ``enumerate.xml`` and ``pull.xml`` alongside
+        ``get.xml``, and 2.7's finding lists five classes, none of them this one.
+        Sweeping it in would extend a hardware finding past what it covers.
+        """
+        server.faults.enumerate_faults_for_amt_classes = True
+        assert _post(server, _enumerate_xml(AMT_MESSAGE_LOG)).status_code == 200
+
+    def test_disarming_restores_the_modern_behaviour(self, server):
+        server.faults.enumerate_faults_for_amt_classes = True
+        assert _post(server, _enumerate_xml(AMT_BOOT_CAPABILITIES)).status_code == 400
+        server.faults.enumerate_faults_for_amt_classes = False
+        assert _post(server, _enumerate_xml(AMT_BOOT_CAPABILITIES)).status_code == 200

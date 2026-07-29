@@ -36,6 +36,47 @@ Design notes for reviewers:
   dispatches concurrent requests onto separate threads and the whole point of
   the boot-settings/power-state fixtures is that they are observable
   cross-request state, not per-request scratch data.
+
+Provenance convention
+---------------------
+
+A mock that accepts what firmware rejects is worse than no mock, and a mock
+whose response bodies are this project's own guesses is worse still, because a
+later reader cites them as evidence. Every response-producing handler here
+therefore carries **exactly one** of these three markers in its docstring or a
+comment immediately above it:
+
+``FIRMWARE-DERIVED``
+    The field set and values are copied from a recorded real-firmware response.
+    The citation is mandatory and names the fixture path, e.g.
+    ``go-wsman-messages``'s
+    ``pkg/wsman/wsmantesting/responses/amt/messagelog/get.xml``. These may be
+    cited as evidence of what firmware sends.
+
+``NAMES-ONLY``
+    The property *names* are attested -- by a class definition (that library's
+    ``types.go``) or a hardware property dump -- but the *values* served here are
+    this mock's own choice. The names may be cited; the values may not.
+
+``INVENTED``
+    Neither the field set nor the values are attested anywhere. Nothing may cite
+    these as evidence of firmware behaviour. Present only because some client
+    path needs *a* response, and marked so it is never mistaken for the other
+    two.
+
+``_get_message_log`` is the model for a FIRMWARE-DERIVED entry; ``_get_computer_system``
+is the model for an INVENTED one.
+
+Rejections
+----------
+
+Faults this mock injects on request are one thing; rejections it applies
+*unconditionally* because real firmware does are another, and the second kind is
+what keeps the client honest. They are deliberately few and each cites its
+evidence, because inventing a rejection firmware does not perform is the same
+error class as inventing a property value. Where it is genuinely unknown whether
+firmware rejects something, this mock stays permissive and says so in a comment
+rather than guessing.
 """
 
 from __future__ import annotations
@@ -119,9 +160,111 @@ BOOT_SOURCE_NAMES = (
     "Intel(r) AMT: Force USB Boot",
 )
 
+#: ``CIM_BootSourceSetting.ElementName`` -- the **same** value on every instance.
+#: Verbatim from the real firmware response fixture
+#: ``go-wsman-messages``' ``pkg/wsman/wsmantesting/responses/cim/boot/sourcesetting/pull.xml``,
+#: where all three returned instances share it and differ only in ``InstanceID``.
+BOOT_SOURCE_ELEMENT_NAME = "Intel(r) AMT: Boot Source"
+
+#: ``FailThroughSupported`` = 2 = ``NotSupported``
+#: (``pkg/wsman/cim/boot/decoder.go``: 0 Unknown, 1 IsSupported, 2 NotSupported). This is
+#: the value the fixture reports on all three instances.
+FAIL_THROUGH_SUPPORTED_NOT_SUPPORTED = 2
+
+#: ``InstanceID`` -> ``StructuredBootString``.
+#:
+#: The format is ``"<OrgID>:<identifier>:<index>"`` with ``OrgID`` = ``CIM`` and
+#: ``<identifier>`` drawn from the DMTF set ``Floppy``, ``Hard-Disk``, ``CD/DVD``,
+#: ``Network``, ``PCMCIA``, ``USB`` -- documented on ``StructuredBootString`` in
+#: ``pkg/wsman/cim/boot/types.go``. The first three entries are **verbatim from the
+#: fixture** ``responses/cim/boot/sourcesetting/pull.xml``.
+#:
+#: ``Force USB Boot`` uses the DMTF ``USB`` identifier, which is a *names-only*
+#: construction: the identifier is documented but no fixture shows AMT emitting a USB boot
+#: source. ``Force Diagnostic Boot`` is deliberately **absent** -- the DMTF identifier set
+#: has no diagnostic member, so there is nothing to derive and guessing one would be
+#: exactly the invention this file exists to avoid. An instance with no
+#: ``StructuredBootString`` is a legitimate shape: the property is ``omitempty`` in the
+#: class definition.
+BOOT_SOURCE_STRUCTURED_STRINGS: dict[str, str] = {
+    "Intel(r) AMT: Force PXE Boot": "CIM:Network:1",
+    "Intel(r) AMT: Force Hard-drive Boot": "CIM:Hard-Disk:1",
+    "Intel(r) AMT: Force CD/DVD Boot": "CIM:CD/DVD:1",
+    "Intel(r) AMT: Force USB Boot": "CIM:USB:1",
+}
+
+#: The exact HTTP 400 reason real AMT 16.1.30 returns for a request whose body does
+#: not validate against the resource's XML schema, recorded in
+#: docs/protocol-notes.md §2.5 from a hardware observation:
+#:
+#:   HTTP 400 -- "The supplied SOAP violates the corresponding XML schema definition."
+#:
+#: Only the status code and this message string are established. The *body shape*
+#: firmware wraps it in is not, so this is served as ``text/plain`` exactly like the
+#: mock's pre-existing "malformed SOAP request" 400 rather than inventing a SOAP
+#: fault envelope for it. The collection's client classifies any non-2xx that is not
+#: 401 as ``protocol`` and carries the body through as diagnostic, so the message
+#: reaches the operator either way.
+SCHEMA_VIOLATION_MESSAGE = "The supplied SOAP violates the corresponding XML schema definition."
+
+#: ``ReturnValue`` for "Invalid Parameter" on every method this mock serves that has a
+#: published ValueMap: ``CIM_BootConfigSetting``/``CIM_BootService`` (go-wsman-messages
+#: ``pkg/wsman/cim/boot/decoder.go``), ``CIM_PowerManagementService``
+#: (``pkg/wsman/cim/power/decoder.go``) and ``AMT_RedirectionService``
+#: (``pkg/wsman/amt/redirection/decoder.go``) all define ``5 = InvalidParameter``.
+#:
+#: This mock previously answered ``2`` for every malformed-parameter case. In all three
+#: of those maps ``2`` is *Unknown/Unspecified Error* -- a different condition, and one a
+#: client could reasonably treat as retryable where an invalid parameter never is.
+#: ``AMT_MessageLog``'s methods keep their own values (see ``GET_RECORDS_NO_RECORDS``);
+#: they have a different ValueMap and were already verified against it.
+RETURN_VALUE_INVALID_PARAMETER = 5
+
+#: ``AvailableRequestedPowerStates`` exactly as the real firmware response fixture
+#: ``go-wsman-messages`` ships at
+#: ``pkg/wsman/wsmantesting/responses/cim/associatedpower/managementservice/get.xml``
+#: reports them, in that fixture's order (which is *not* sorted -- the values are a set,
+#: and reordering them would be inventing a bookkeeping firmware does not promise).
+AVAILABLE_REQUESTED_POWER_STATES = (10, 8, 5, 11, 4, 7, 14, 12)
+
 #: RequestPowerStateChange action code -> resulting CIM_AssociatedPowerManagementService.PowerState
 #: (docs/protocol-notes.md §2.4). Codes 5 (power cycle) and 10 (reset) both end powered-on.
-POWER_ACTION_TO_STATE = {2: 2, 3: 3, 4: 4, 5: 2, 7: 7, 8: 8, 10: 2}
+#:
+#: Aligned with ``AVAILABLE_REQUESTED_POWER_STATES`` above, with two deliberate
+#: exceptions that are **kept permissive on purpose**:
+#:
+#: * ``2`` (On) and ``3`` (Sleep - Light) are absent from that fixture's list, but the
+#:   list is explicitly *state-dependent*: the class definition says the advertised
+#:   values "are a function of the current power state of the system", and the fixture
+#:   was captured at ``PowerState = 2`` -- so "On" is missing from it precisely because
+#:   the machine was already on. Rejecting ``2`` would therefore make ``amt_power``'s
+#:   power-on path impossible against this mock while asserting something the evidence
+#:   does not support. ``3`` is left alongside it for the same reason: this collection
+#:   sends it for ``sleep_light`` and nothing establishes that firmware refuses it when
+#:   the machine is on.
+#: * ``11`` (Diagnostic Interrupt / NMI) is advertised by the fixture and now accepted,
+#:   but it maps to **no** power-state change: an NMI interrupts the running OS, it does
+#:   not transition the machine. What ``PowerState`` firmware reports afterwards is not
+#:   established, so this mock leaves the value untouched rather than inventing one.
+#:
+#: Codes ``12`` (Off - Soft Graceful) and ``14`` (Master Bus Reset Graceful) are the
+#: graceful counterparts of ``8`` and ``10`` and land in the same end states. This
+#: collection's client does not currently send ``11``, ``12`` or ``14`` at all
+#: (``plugins/module_utils/client.py``'s ``_POWER_ACTION_CODES``); they are served
+#: because the mock now advertises them, and a mock that advertises a value it then
+#: refuses is a worse fixture than one that never mentioned it.
+POWER_ACTION_TO_STATE: dict[int, int | None] = {
+    2: 2,
+    3: 3,
+    4: 4,
+    5: 2,
+    7: 7,
+    8: 8,
+    10: 2,
+    11: None,  # Diagnostic Interrupt (NMI): accepted, no state transition.
+    12: 8,
+    14: 2,
+}
 
 #: The one ``AMT_EthernetPortSettings`` instance this mock serves
 #: (docs/protocol-notes.md §2.7). Real firmware requires an exact selector for
@@ -218,6 +361,27 @@ class _UnknownResource(Exception):
     """Raised internally when no handler exists for a (ResourceURI, Action) pair."""
 
 
+class _HttpFault(Exception):
+    """Reject a request at the HTTP layer, the way firmware does, instead of answering.
+
+    A SOAP fault is a valid response to a request firmware *understood*; an HTTP 400 is
+    what firmware sends when the request never got that far because its body did not
+    validate. Those are different things and the collection's client classifies them by
+    different code paths, so the mock must be able to produce both. Raised from anywhere
+    inside :meth:`WsmanMockServer.dispatch` and turned into a response by the handler.
+    """
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def _schema_violation() -> _HttpFault:
+    """The HTTP 400 real AMT 16.1.30 returns for a schema-invalid body (§2.5)."""
+    return _HttpFault(400, SCHEMA_VIOLATION_MESSAGE)
+
+
 def _default_boot_setting_data() -> dict[str, object]:
     """The instance a freshly-started mock reports for ``AMT_BootSettingData``.
 
@@ -308,6 +472,29 @@ class FaultConfig:
     #: real firmware does, and turning it off is the exception, not the rule.
     reject_boot_readonly_fields: bool = True
 
+    #: Opt-in: answer **HTTP 400** to ``Enumerate`` on every ``AMT_``-prefixed resource,
+    #: standing in for AMT 10-era firmware.
+    #:
+    #: docs/protocol-notes.md §2.7 records this as hardware-verified on AMT 10.0.56 for
+    #: ``AMT_EthernetPortSettings``, ``AMT_GeneralSettings``, ``AMT_BootCapabilities``,
+    #: ``AMT_BootSettingData`` and ``AMT_TLSSettingData``: that firmware offers selective
+    #: instance access only, so ``Get`` with an exact selector works and ``Enumerate``
+    #: does not.
+    #:
+    #: **Deliberately default-off, and deliberately not unconditional.** The same section
+    #: records that this collection's ``Enumerate`` call sites *do* work on AMT 16.1.30 and
+    #: 19.0.5, both hardware-verified. Making the mock reject ``Enumerate`` always would
+    #: assert something false about modern firmware and break correct code; making it
+    #: unreachable would leave the AMT 10 behaviour untestable. An opt-in knob is the only
+    #: honest option: the mock can be *either* generation, and a test says which.
+    #:
+    #: ``AMT_MessageLog`` is exempt. §2.7's finding lists five classes and that is not one
+    #: of them, and unusually for an ``AMT_`` class its ``Enumerate`` *is* directly
+    #: evidenced -- ``responses/amt/messagelog/`` ships ``enumerate.xml`` and ``pull.xml``
+    #: alongside ``get.xml`` (see ``_message_log_items``). Sweeping it in would be
+    #: extending a hardware finding past what it covers.
+    enumerate_faults_for_amt_classes: bool = False
+
     #: Fault a bare ``Get CIM_BIOSElement``, leaving only the ``Enumerate`` path.
     #: This exists because ``CIM_BIOSElement`` has no obvious singleton selector,
     #: so which verb real firmware accepts for it is genuinely unsettled -- see
@@ -340,29 +527,116 @@ class FaultConfig:
     http_status_for: dict[tuple[str, str], int] = field(default_factory=dict)
 
 
-def _child_text(elem: ET.Element | None, local_name: str) -> str | None:
-    """Find the first descendant whose tag local-name matches, return its text.
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
 
-    WS-Man method INPUT bodies are namespaced by resource URI, which varies
-    per call site, so matching on local name (ignoring the namespace) is far
-    less brittle here than building a namespace map per resource.
+
+def _tag_namespace(tag: str) -> str | None:
+    return tag[1 : tag.index("}")] if tag.startswith("{") else None
+
+
+def _param(elem: ET.Element | None, local_name: str) -> ET.Element | None:
+    """Find one method/enumeration parameter: a **direct child** in the **wrapper's own
+    namespace**.
+
+    This used to be a ``.iter()`` walk matching on local name at any depth in any
+    namespace, which is exactly the "mock accepts what firmware rejects" defect this
+    file exists to prevent: a parameter placed in the wrong namespace, or nested one
+    level too deep inside some other element, sailed through the mock and then failed
+    schema validation on real firmware.
+
+    Both constraints come from the same place. A WS-Man method's input parameters are
+    declared as the children of a ``<Method_INPUT>`` element in a sequence, in the
+    resource's own target namespace -- which is why every implementation emits them that
+    way: MeshCentral's ``amt-wsman.js``, go-wsman-messages'
+    ``pkg/wsman/cim/boot/service.go`` (``<h:SetBootConfigRole_INPUT xmlns:h="...CIM_BootService">``
+    with ``<h:BootConfigSetting>`` / ``<h:Role>`` children), and this collection's own
+    ``plugins/module_utils/wsman.py`` ``_append_params``. Deriving the expected namespace
+    from ``elem``'s own tag rather than taking it as an argument is what makes this work
+    unchanged for ``Pull``, whose ``EnumerationContext`` child sits in the enumeration
+    namespace rather than a resource URI.
+
+    Elements *inside* a parameter -- an endpoint reference's ``Address`` and
+    ``ReferenceParameters`` -- are in the addressing namespace, not the wrapper's, and
+    are read by :func:`_endpoint_reference_instance_id` instead.
     """
     if elem is None:
         return None
-    for child in elem.iter():
-        if child.tag.rsplit("}", 1)[-1] == local_name:
-            return child.text
+    namespace = _tag_namespace(elem.tag)
+    want = f"{{{namespace}}}{local_name}" if namespace else local_name
+    for child in elem:
+        if child.tag == want:
+            return child
     return None
 
 
-def _extract_instance_id(elem: ET.Element | None) -> str | None:
-    """Find a ``<Selector Name="InstanceID">`` inside an endpoint reference."""
-    if elem is None:
+def _param_text(elem: ET.Element | None, local_name: str) -> str | None:
+    """Text of the parameter :func:`_param` finds, or ``None`` if it is absent."""
+    found = _param(elem, local_name)
+    return found.text if found is not None else None
+
+
+def _endpoint_reference_instance_id(param: ET.Element) -> str | None:
+    """Read ``ReferenceParameters/SelectorSet/Selector[@Name="InstanceID"]`` from an EPR.
+
+    Depth- and namespace-aware for the same reason :func:`_param` is. The nesting and
+    namespaces asserted here are the exact ones docs/protocol-notes.md §2.5 records for
+    the ``ChangeBootOrder`` ``Source`` body, and the ones go-wsman-messages emits
+    verbatim in ``pkg/wsman/cim/boot/configsetting.go``: ``ReferenceParameters`` in the
+    addressing namespace, containing ``SelectorSet`` and ``Selector`` in the WS-Man
+    namespace.
+
+    Returns ``None`` when the EPR is well-formed but names no ``InstanceID`` selector --
+    that is a semantic question for the caller, not a schema violation.
+    """
+    reference_parameters = param.find(f"{{{NS_A}}}ReferenceParameters")
+    if reference_parameters is None:
         return None
-    for candidate in elem.iter():
-        if candidate.tag.rsplit("}", 1)[-1] == "Selector" and candidate.attrib.get("Name") == "InstanceID":
-            return candidate.text
+    selector_set = reference_parameters.find(f"{{{NS_W}}}SelectorSet")
+    if selector_set is None:
+        return None
+    for selector in selector_set.findall(f"{{{NS_W}}}Selector"):
+        if selector.attrib.get("Name") == "InstanceID":
+            return selector.text
     return None
+
+
+def _require_endpoint_reference(param: ET.Element) -> None:
+    """Reject an endpoint-reference parameter that is present but carries no children.
+
+    **This is the single highest-value rejection in this file.** ``ChangeBootOrder``'s
+    ``Source`` is typed as an endpoint reference, so the schema requires ``Address`` and
+    ``ReferenceParameters`` children; an empty ``<Source/>`` is schema-invalid and real
+    AMT 16.1.30 answers the whole request with HTTP 400 and
+    :data:`SCHEMA_VIOLATION_MESSAGE` (docs/protocol-notes.md §2.5, hardware-observed).
+    An *absent* element is valid, because these parameters are optional
+    (``minOccurs=0``) -- so "pass a null Source" means send no element at all.
+
+    That defect made IDE-R and BIOS boot entirely impossible against real hardware, and
+    until this check existed the mock reported ``ReturnValue 0`` for it, so mock and
+    client could agree while both were wrong. Corroborated independently by the vendor
+    reference implementation: go-wsman-messages'
+    ``pkg/wsman/cim/boot/configsetting.go`` emits a *completely empty*
+    ``<h:ChangeBootOrder_INPUT>`` when clearing the boot order and never an empty
+    ``<h:Source/>``.
+
+    Applied to every EPR-typed parameter this mock accepts, not only ``Source``: they are
+    the same type, validated by the same firmware schema validator, so generalising the
+    observed rejection is not the same as inventing new ones.
+    """
+    if len(param) == 0:
+        raise _schema_violation()
+    if param.find(f"{{{NS_A}}}Address") is None or param.find(f"{{{NS_A}}}ReferenceParameters") is None:
+        raise _schema_violation()
+
+
+def _optional_endpoint_reference(elem: ET.Element | None, local_name: str) -> ET.Element | None:
+    """Return an EPR parameter if present, validating its shape; ``None`` if absent."""
+    param = _param(elem, local_name)
+    if param is None:
+        return None
+    _require_endpoint_reference(param)
+    return param
 
 
 def _value_to_xml(tag: str, value: object) -> str:
@@ -382,8 +656,36 @@ def _value_to_xml(tag: str, value: object) -> str:
 
 
 def _fields_to_instance_xml(resource_uri: str, fields: dict[str, object]) -> str:
+    """Render one instance, properties in **alphabetical order**.
+
+    Every real firmware response fixture in ``go-wsman-messages``'
+    ``pkg/wsman/wsmantesting/responses/`` orders an instance's properties strictly
+    alphabetically -- ``amt/setupandconfiguration/get.xml``,
+    ``cim/associatedpower/managementservice/get.xml``,
+    ``cim/boot/sourcesetting/pull.xml`` and ``amt/messagelog/get.xml`` all do. This mock
+    previously emitted Python dict-insertion order, which matched for only two of its ten
+    handlers by luck.
+
+    Sorting here rather than by hand-reordering each handler's literal is deliberate: it
+    fixes every handler at once, cannot drift as fields are added, and keeps each
+    handler's dict grouped the way a *reader* wants (identity fields first) while the
+    *wire* gets the order firmware uses. Array properties are unaffected -- sorting is by
+    property name, and :func:`_value_to_xml` emits a list's repeated elements
+    contiguously, so ``AvailableRequestedPowerStates`` / ``OperationalStatus`` /
+    ``LinkPolicy`` keep their own order, which is the only ordering that carries meaning.
+
+    Worth stating plainly so nobody over-reads this change: this collection's parser is
+    **not** order-sensitive for distinct property names. ``plugins/module_utils/wsman.py``
+    ``_element_to_value()`` accumulates children into a dict keyed by local name, so
+    sibling order across different names cannot affect it. This is fidelity insurance
+    against a *future* parser that does care, not a bug fix -- which is why it is one
+    ``sorted()`` and not ten edits.
+
+    Method ``_OUTPUT`` element order is a separate question, handled by
+    ``EXTRA_BEFORE_RETURN_VALUE``, because there the fixtures are *not* alphabetical.
+    """
     class_name = resource_uri.rsplit("/", 1)[-1]
-    inner = "".join(_value_to_xml(k, v) for k, v in fields.items())
+    inner = "".join(_value_to_xml(k, fields[k]) for k in sorted(fields))
     return f'<r:{class_name} xmlns:r="{resource_uri}">{inner}</r:{class_name}>'
 
 
@@ -422,26 +724,68 @@ def _fault_body(subcode: str, reason: str) -> str:
 
 
 def _get_power(state: AmtState) -> dict[str, object]:
+    """``CIM_AssociatedPowerManagementService`` -- **FIRMWARE-DERIVED** field set.
+
+    Both properties come from the real firmware response fixture
+    ``go-wsman-messages`` ships at
+    ``pkg/wsman/wsmantesting/responses/cim/associatedpower/managementservice/get.xml``,
+    with ``PowerState`` made live so a ``RequestPowerStateChange`` is observable here.
+
+    ``ElementName`` was **removed**: it is not on that fixture and not in the class
+    definition (``pkg/wsman/cim/associatedpower/types.go`` declares
+    ``AvailableRequestedPowerStates``, ``PowerState``, ``OtherPowerState``,
+    ``RequestedPowerState``, ``OtherRequestedPowerState``, ``PowerOnTime``,
+    ``TransitioningToPowerState``, ``ServiceProvided``, ``UserOfService`` -- and no
+    ``ElementName``). Serving it invited a future reader to conclude firmware sends it.
+    Nothing in this collection read it: ``plugins/module_utils/client.py`` reads only
+    ``PowerState`` from this class.
+
+    ``ServiceProvided`` / ``UserOfService`` are on the fixture but not served: they are
+    nested endpoint references rather than scalar properties, nothing here reads them, and
+    ``_value_to_xml`` has no way to render them. Their absence is a gap in this mock, not
+    a claim about firmware.
+    """
     return {
+        "AvailableRequestedPowerStates": list(AVAILABLE_REQUESTED_POWER_STATES),
         "PowerState": state.power_state,
-        "ElementName": "ManagedSystem Power Management Service",
     }
 
 
 def _get_boot_capabilities(_state: AmtState) -> dict[str, object]:
+    """``AMT_BootCapabilities`` -- **NAMES-ONLY**.
+
+    Every property name is on the real firmware response fixture
+    ``pkg/wsman/wsmantesting/responses/amt/boot/capabilities/get.xml`` (the same fixture
+    docs/protocol-notes.md §2.5's capability table is verified against). The *values* are
+    this mock's own choice: the mock advertises a permissive machine so the integration
+    targets can arm every boot target, where the fixture's machine happens to have
+    ``ForceDiagnosticBoot`` and the button locks off. Do not cite these values as
+    firmware behaviour -- only the names.
+
+    ``BIOSSecureBoot``, ``ConfigurationDataReset``, ``InstanceID``, ``VerbosityQuiet`` and
+    ``VerbosityVerbose`` are on that fixture and were missing here. A client applying
+    §2.5's "treat a missing field as not supported" rule cannot be exercised against
+    fields the mock never sends, so an incomplete name set quietly narrows what the mock
+    can catch.
+    """
     return {
-        "ElementName": "Intel(r) AMT Boot Capabilities",
+        "InstanceID": "Intel(r) AMT:BootCapabilities 0",
+        "ElementName": "Intel(r) AMT: Boot Capabilities",
         "IDER": True,
         "SOL": True,
         "BIOSReflash": False,
+        "BIOSSecureBoot": True,
         "BIOSSetup": True,
         "BIOSPause": True,
+        "ConfigurationDataReset": False,
         "ForcePXEBoot": True,
         "ForceHardDriveBoot": True,
         "ForceHardDriveSafeModeBoot": False,
         "ForceDiagnosticBoot": True,
         "ForceCDorDVDBoot": True,
+        "VerbosityQuiet": False,
         "VerbosityScreenBlank": True,
+        "VerbosityVerbose": False,
         "PowerButtonLock": True,
         "ResetButtonLock": True,
         "KeyboardLock": True,
@@ -453,10 +797,24 @@ def _get_boot_capabilities(_state: AmtState) -> dict[str, object]:
 
 
 def _get_redirection(state: AmtState) -> dict[str, object]:
+    """``AMT_RedirectionService`` -- **FIRMWARE-DERIVED** field set.
+
+    Every property is on the real firmware response fixture
+    ``pkg/wsman/wsmantesting/responses/amt/redirectionservice/get.xml``, with
+    ``EnabledState`` / ``ListenerEnabled`` made live so a ``RequestStateChange`` is
+    observable. The four key properties (``CreationClassName``, ``Name``,
+    ``SystemCreationClassName``, ``SystemName``) are copied verbatim from it and were
+    missing here; ``SystemName = "Intel(r) AMT"`` in particular is what identifies the
+    scoping system on every AMT service class.
+    """
     return {
+        "CreationClassName": "AMT_RedirectionService",
         "ElementName": "Intel(r) AMT Redirection Service",
         "EnabledState": state.redirection_enabled_state,
         "ListenerEnabled": state.redirection_listener_enabled,
+        "Name": "Intel(r) AMT Redirection Service",
+        "SystemCreationClassName": "CIM_ComputerSystem",
+        "SystemName": "Intel(r) AMT",
     }
 
 
@@ -483,15 +841,25 @@ def _get_general_settings(state: AmtState) -> dict[str, object]:
 
 
 def _get_ethernet_port_settings(state: AmtState) -> dict[str, object]:
-    """``AMT_EthernetPortSettings`` instance 0 (docs/protocol-notes.md §2.7).
+    """``AMT_EthernetPortSettings`` instance 0 -- **NAMES-ONLY** (docs/protocol-notes.md §2.7).
 
-    ``LinkPolicy`` is emitted as a **repeated plain element**, which is how
-    WS-Man renders the ``uint32`` array AMT's schema declares. ``parmstro``'s
-    module code instead expects ``<PolicyValue>`` children inside a wrapper;
-    their hardware notes record only the decoded result (``[1, 14, 16]``), so
-    neither shape is ruled out by evidence. This mock serves the schema-implied
-    shape and the client tolerates both -- see
-    ``plugins/module_utils/models.py`` ``_link_policy_values()``.
+    Names come from the AMT 10.0.56 hardware property dump §2.7 cites and are corroborated
+    by ``pkg/wsman/wsmantesting/responses/amt/ethernetport/get.xml``. Every value is
+    synthetic and from a documentation range (RFC 5737 ``192.0.2.0/24``, RFC 7042
+    documentation MAC) -- never a real address.
+
+    ``LinkPolicy`` is emitted as a **repeated plain element**. That is no longer merely
+    the schema-implied shape: the fixture above settles it, carrying two consecutive
+    ``<g:LinkPolicy>`` elements with no wrapper. ``parmstro``'s module code expects
+    ``<PolicyValue>`` children inside a wrapper instead, and their hardware notes record
+    only the decoded result (``[1, 14, 16]``) -- so that shape now has *no* supporting
+    evidence and the repeated-element shape has direct fixture evidence. This mock serves
+    the evidenced one. ``plugins/module_utils/models.py``'s ``_link_policy_values()``
+    tolerates both, which is harmless leniency in a parser, not a second candidate shape.
+
+    The same fixture independently corroborates §2.7's dash-separated MAC observation:
+    it reports ``MACAddress`` as ``c8-d9-d2-7a-1e-33``. (Note that fixture's addresses are
+    *real-looking* and are not reused here -- see ``AmtState.ethernet_mac_address``.)
     """
     return {
         "ElementName": "Intel(r) AMT Ethernet Port Settings",
@@ -511,6 +879,14 @@ def _get_ethernet_port_settings(state: AmtState) -> dict[str, object]:
 
 
 def _get_bios_element(state: AmtState) -> dict[str, object]:
+    """``CIM_BIOSElement`` -- **NAMES-ONLY**.
+
+    All five names are on the real firmware response fixture
+    ``pkg/wsman/wsmantesting/responses/cim/bios/element/get.xml``. The values are
+    obviously-synthetic on purpose: a BIOS version string is machine-identifying, so this
+    serves an ``EXAMPLE``-prefixed one shaped like a real Intel BIOS ID and an
+    ``example.invalid`` manufacturer.
+    """
     return {
         "ElementName": "Intel(r) AMT: BIOS Element",
         "Name": "MockBIOS",
@@ -521,9 +897,32 @@ def _get_bios_element(state: AmtState) -> dict[str, object]:
 
 
 def _get_setup_and_configuration_service(_state: AmtState) -> dict[str, object]:
+    """``AMT_SetupAndConfigurationService`` -- **NAMES-ONLY**.
+
+    Every name is on the real firmware response fixture
+    ``pkg/wsman/wsmantesting/responses/amt/setupandconfiguration/get.xml`` and in the
+    class definition ``pkg/wsman/amt/setupandconfiguration/types.go``. Values are this
+    mock's own: ``ProvisioningServerOTP`` is emptied rather than carrying the fixture's
+    base64 blob, since an OTP is a credential shape and this mock never serves one.
+
+    ``InstanceID`` was **removed**: this class has no such property. It is keyed by
+    ``Name`` / ``CreationClassName`` / ``SystemName`` / ``SystemCreationClassName``, all
+    four of which the fixture carries and are now served in its place. Nothing in this
+    collection read ``InstanceID`` from here -- ``plugins/module_utils/client.py`` reads
+    ``ProvisioningMode`` and ``ProvisioningState`` only -- so serving it was pure
+    misinformation waiting to be cited.
+
+    ``EnabledState`` and ``RequestedState`` are on the fixture too and are served, because
+    a client that reads state off the wrong class should find the right one populated.
+    """
     return {
+        "CreationClassName": "AMT_SetupAndConfigurationService",
         "ElementName": "Intel(r) AMT Setup and Configuration Service",
-        "InstanceID": "Intel(r) AMT: Setup and Configuration Service",
+        "EnabledState": 5,
+        "Name": "Intel(r) AMT Setup and Configuration Service",
+        "RequestedState": 12,
+        "SystemCreationClassName": "CIM_ComputerSystem",
+        "SystemName": "Intel(r) AMT",
         "ProvisioningState": 2,
         "ZeroTouchConfigurationEnabled": False,
         "ProvisioningMode": 1,
@@ -534,8 +933,31 @@ def _get_setup_and_configuration_service(_state: AmtState) -> dict[str, object]:
 
 
 def _get_computer_system(state: AmtState) -> dict[str, object]:
+    """``CIM_ComputerSystem`` -- **INVENTED**. Do not cite this body as evidence.
+
+    There is **no** ``CIM_ComputerSystem`` response fixture in
+    ``go-wsman-messages``' ``pkg/wsman/wsmantesting/responses/`` -- the class appears
+    there only inside *endpoint references* (as a ``ResourceURI`` plus a ``SelectorSet``),
+    never as a returned instance body. So while the class exists and this collection
+    reads it (``plugins/module_utils/client.py``'s ``get_facts()``, for
+    ``EnabledState`` / ``RequestedState`` / ``OperationalStatus`` / ``ElementName``), the
+    field set and every value below are this project's construction.
+
+    The one traceable part is the **selector**, not the body: the power fixture
+    ``cim/associatedpower/managementservice/get.xml`` addresses this class with
+    ``Selector Name="Name"`` = ``ManagedSystem``, which is where
+    ``SELECTOR_MATCH_FOR_GET``'s entry and ``client.py``'s
+    ``_MANAGED_SYSTEM_SELECTOR`` both come from. ``Name`` here therefore *is* evidenced;
+    ``ElementName``, ``Caption``, and the specific state values are not.
+
+    Marked explicitly because ``tests/integration/targets/amt_info`` asserts
+    ``system_state.element_name == 'ManagedSystem'`` against it, and a later reader could
+    easily mistake a passing assertion for firmware corroboration. It is not. It only
+    proves the client reads what this file writes.
+    """
     return {
         "ElementName": "ManagedSystem",
+        # Evidenced: the power fixture's EPR selects this class by Name=ManagedSystem.
         "Name": "ManagedSystem",
         "Caption": "Computer System",
         "EnabledState": state.enabled_state,
@@ -613,51 +1035,101 @@ GET_HANDLERS: dict[str, Callable[[AmtState], dict[str, object]]] = {
 
 
 def _method_request_power_state_change(state: AmtState, body_elem: ET.Element | None) -> tuple[int, str]:
-    requested = _child_text(body_elem, "PowerState")
+    """``CIM_PowerManagementService.RequestPowerStateChange`` (docs/protocol-notes.md §2.4).
+
+    ``PowerState`` is required: it is the entire content of the request, and firmware
+    cannot transition to a state it was not told. Absent or non-numeric is
+    ``InvalidParameter``, not success. ``ManagedElement`` is an EPR-typed parameter (this
+    collection sends the ``CIM_ComputerSystem`` ``Name=ManagedSystem`` reference) and is
+    shape-checked when present -- an empty ``<ManagedElement/>`` is the same schema
+    violation as an empty ``<Source/>``.
+
+    ``ManagedElement`` being *absent* is left permissive: it is optional in the same
+    ``minOccurs=0`` sense as ``Source`` and nothing establishes that firmware refuses a
+    request that omits it, given there is one managed system.
+    """
+    _optional_endpoint_reference(body_elem, "ManagedElement")
+
+    requested = _param_text(body_elem, "PowerState")
     if requested is None:
-        return 2, ""
+        return RETURN_VALUE_INVALID_PARAMETER, ""
     try:
         code = int(requested)
     except ValueError:
-        return 2, ""
-    new_state = POWER_ACTION_TO_STATE.get(code)
-    if new_state is None:
-        return 2, ""
-    state.power_state = new_state
+        return RETURN_VALUE_INVALID_PARAMETER, ""
+    if code not in POWER_ACTION_TO_STATE:
+        return RETURN_VALUE_INVALID_PARAMETER, ""
+    new_state = POWER_ACTION_TO_STATE[code]
+    if new_state is not None:
+        state.power_state = new_state
     return 0, ""
 
 
 def _method_change_boot_order(state: AmtState, body_elem: ET.Element | None) -> tuple[int, str]:
-    source_elem = None
-    if body_elem is not None:
-        for child in body_elem:
-            if child.tag.rsplit("}", 1)[-1] == "Source":
-                source_elem = child
-                break
-    state.boot_order_source = _extract_instance_id(source_elem)
+    """``CIM_BootConfigSetting.ChangeBootOrder`` (docs/protocol-notes.md §2.5 steps 2 and 5).
+
+    Two distinct requests, and firmware treats them very differently:
+
+    * **No ``Source`` element at all** -- clear the boot order. Valid, ``ReturnValue 0``.
+      This is step 2, and step 5 for the IDE-R and BIOS-setup targets.
+    * **An empty ``<Source/>``** -- **HTTP 400**, schema violation. See
+      :func:`_require_endpoint_reference` for the evidence; this is the regression the
+      capability matrix credits hardware qualification with finding and that this mock
+      previously answered with ``ReturnValue 0``.
+
+    A well-formed ``Source`` that names no ``InstanceID`` selector is *not* rejected: the
+    EPR satisfies the schema, so any complaint would be semantic, and what firmware
+    returns for it is not established. It records ``None``, same as a cleared order, and
+    is called out here rather than guessed at.
+    """
+    source = _optional_endpoint_reference(body_elem, "Source")
+    state.boot_order_source = _endpoint_reference_instance_id(source) if source is not None else None
     return 0, ""
 
 
 def _method_set_boot_config_role(state: AmtState, body_elem: ET.Element | None) -> tuple[int, str]:
-    role_text = _child_text(body_elem, "Role")
-    if role_text is not None:
-        try:
-            state.boot_config_role = int(role_text)
-        except ValueError:
-            return 2, ""
+    """``CIM_BootService.SetBootConfigRole`` (docs/protocol-notes.md §2.5 step 4).
+
+    ``Role`` is required. This mock used to answer ``ReturnValue 0`` when it was absent
+    entirely, which is impossible on any reading: firmware cannot assign a role it was
+    not given, so the only question is *how* it refuses, not whether. It refuses here with
+    ``InvalidParameter`` rather than an HTTP 400, deliberately: §2.5 records these method
+    parameters as ``minOccurs=0`` in the WS-CIM binding, so a missing element is a
+    semantic rejection rather than a schema violation. Both reference implementations
+    always send it (go-wsman-messages' ``pkg/wsman/cim/boot/service.go``, MeshCmd).
+
+    ``BootConfigSetting`` is EPR-typed and shape-checked when present. Absent is left
+    permissive for the same reason as ``ManagedElement`` above -- there is exactly one
+    ``CIM_BootConfigSetting`` instance, and no evidence says firmware insists on being
+    handed a reference to it.
+    """
+    _optional_endpoint_reference(body_elem, "BootConfigSetting")
+
+    role_text = _param_text(body_elem, "Role")
+    if role_text is None:
+        return RETURN_VALUE_INVALID_PARAMETER, ""
+    try:
+        state.boot_config_role = int(role_text)
+    except ValueError:
+        return RETURN_VALUE_INVALID_PARAMETER, ""
     return 0, ""
 
 
 def _method_request_redirection_state_change(state: AmtState, body_elem: ET.Element | None) -> tuple[int, str]:
-    requested = _child_text(body_elem, "RequestedState")
+    """``AMT_RedirectionService.RequestStateChange`` (docs/protocol-notes.md §2.6).
+
+    ``RequestedState`` is required and must be one of the four documented values;
+    anything else is ``InvalidParameter``.
+    """
+    requested = _param_text(body_elem, "RequestedState")
     if requested is None:
-        return 2, ""
+        return RETURN_VALUE_INVALID_PARAMETER, ""
     try:
         value = int(requested)
     except ValueError:
-        return 2, ""
+        return RETURN_VALUE_INVALID_PARAMETER, ""
     if value not in (32768, 32769, 32770, 32771):
-        return 2, ""
+        return RETURN_VALUE_INVALID_PARAMETER, ""
     state.redirection_enabled_state = value
     state.redirection_listener_enabled = value != 32768
     return 0, ""
@@ -709,14 +1181,14 @@ def _method_get_records(state: AmtState, body_elem: ET.Element | None) -> tuple[
         return GET_RECORDS_NO_RECORDS, "<r:IterationIdentifier>1</r:IterationIdentifier><r:NoMoreRecords>true</r:NoMoreRecords>"
 
     identifier = 1
-    raw_identifier = _child_text(body_elem, "IterationIdentifier")
+    raw_identifier = _param_text(body_elem, "IterationIdentifier")
     if raw_identifier is not None:
         try:
             identifier = int(raw_identifier)
         except ValueError:
             return 2, ""  # "Invalid record pointed"
     max_read = MESSAGE_LOG_BATCH_SIZE
-    raw_max = _child_text(body_elem, "MaxReadRecords")
+    raw_max = _param_text(body_elem, "MaxReadRecords")
     if raw_max is not None:
         try:
             max_read = max(1, min(MESSAGE_LOG_BATCH_SIZE, int(raw_max)))
@@ -765,19 +1237,52 @@ METHOD_HANDLERS: dict[tuple[str, str], Callable[[AmtState, ET.Element | None], t
 
 
 def _boot_source_items(state: AmtState) -> list[str]:
+    """``Enumerate`` form of ``CIM_BootSourceSetting`` -- **FIRMWARE-DERIVED** field set.
+
+    Matched to the real firmware response fixture
+    ``pkg/wsman/wsmantesting/responses/cim/boot/sourcesetting/pull.xml``, which returns
+    three instances each carrying exactly ``ElementName``, ``FailThroughSupported``,
+    ``InstanceID``, ``StructuredBootString`` -- alphabetically, as
+    ``_fields_to_instance_xml`` now emits.
+
+    Three corrections, all client-visible:
+
+    * ``BootSourceIndex`` was **removed**. The property does not exist on this class:
+      ``pkg/wsman/cim/boot/types.go``'s ``BootSourceSetting`` declares ``ElementName``,
+      ``InstanceID``, ``StructuredBootString``, ``BIOSBootString``, ``BootString`` and
+      ``FailThroughSupported``, and no index property of any name. Nothing in this
+      collection read it -- ``plugins/module_utils/boot.py``'s ``discover_and_validate()``
+      matches on ``InstanceID`` alone -- so it was inventing a property firmware does not
+      send.
+    * ``StructuredBootString`` was equal to the instance label, which is the wrong shape
+      entirely. Firmware sends ``"<OrgID>:<identifier>:<index>"`` per that class
+      definition, with DMTF identifiers ``Floppy``, ``Hard-Disk``, ``CD/DVD``, ``Network``,
+      ``PCMCIA``, ``USB`` and ``OrgID`` = ``CIM``. The fixture confirms three of them
+      verbatim: ``CIM:Hard-Disk:1``, ``CIM:Network:1``, ``CIM:CD/DVD:1``. See
+      :data:`BOOT_SOURCE_STRUCTURED_STRINGS`.
+    * ``ElementName`` was the instance label. Firmware sends the *same* ``ElementName``
+      for all three instances -- ``"Intel(r) AMT: Boot Source"`` -- and distinguishes them
+      by ``InstanceID`` only. A client keying off ``ElementName`` to tell boot sources
+      apart would have passed here and then matched every instance on real firmware.
+
+    The ``count > len(BOOT_SOURCE_NAMES)`` branch synthesises extra instances so a test
+    can make discovery *ambiguous*; those carry no ``StructuredBootString``, because there
+    is no firmware shape to copy for an instance firmware would never emit.
+    """
     count = state.boot_source_count
     names = [BOOT_SOURCE_NAMES[i % len(BOOT_SOURCE_NAMES)] for i in range(count)]
     items = []
     for idx, name in enumerate(names):
         label = name if idx < len(BOOT_SOURCE_NAMES) else f"{name} ({idx})"
-        items.append(
-            f'<r:CIM_BootSourceSetting xmlns:r="{CIM_BOOT_SOURCE_SETTING}">'
-            f"<r:InstanceID>{escape(label)}</r:InstanceID>"
-            f"<r:ElementName>{escape(label)}</r:ElementName>"
-            f"<r:StructuredBootString>{escape(label)}</r:StructuredBootString>"
-            f"<r:BootSourceIndex>{idx}</r:BootSourceIndex>"
-            "</r:CIM_BootSourceSetting>"
-        )
+        fields: dict[str, object] = {
+            "ElementName": BOOT_SOURCE_ELEMENT_NAME,
+            "FailThroughSupported": FAIL_THROUGH_SUPPORTED_NOT_SUPPORTED,
+            "InstanceID": label,
+        }
+        structured = BOOT_SOURCE_STRUCTURED_STRINGS.get(label)
+        if structured is not None:
+            fields["StructuredBootString"] = structured
+        items.append(_fields_to_instance_xml(CIM_BOOT_SOURCE_SETTING, fields))
     return items
 
 
@@ -1038,7 +1543,14 @@ class _WsmanHandler(http.server.BaseHTTPRequestHandler):
             return
 
         return_override = faults.return_value_for.get(key)
-        status, response_xml = mock.dispatch(action, resource_uri, relates_to, body_elem, return_override, selectors)
+        try:
+            status, response_xml = mock.dispatch(action, resource_uri, relates_to, body_elem, return_override, selectors)
+        except _HttpFault as fault:
+            # Firmware rejected the request before it produced a SOAP body at all --
+            # see _HttpFault. Served as text/plain like the pre-existing malformed-SOAP
+            # 400 above, because no evidence establishes the body shape AMT wraps these in.
+            self._send_plain(fault.status, fault.message.encode("utf-8"))
+            return
         self._send_raw(status, response_xml.encode("utf-8"))
 
     def _hang(self, mock: WsmanMockServer) -> None:
@@ -1212,6 +1724,25 @@ class WsmanMockServer:
                     return self._handle_method(resource_uri, method_name, relates_to, body_elem, return_override)
             except _UnknownResource:
                 pass
+            # An unlisted resource answers **HTTP 500 + a SOAP fault**, and that is
+            # deliberately *not* changed to a 400.
+            #
+            # WS-Management binds SOAP faults to HTTP 500; a 400 is for a request whose
+            # body did not validate (see _HttpFault). "I understood the request and there
+            # is no such resource" is the former, so 500 + wsman:InvalidResourceURI is the
+            # WS-Man-correct shape and the 400 §2.7 records is specific to the
+            # Enumerate-verb case, which is now modelled separately above.
+            #
+            # These are also **not** two different classification paths in this
+            # collection's client, contrary to what one might assume:
+            # ``plugins/module_utils/wsman.py`` ``_handle_response()`` tests
+            # ``response.status_code == 401`` and then ``not response.ok``, so *every*
+            # non-2xx -- 400 and 500 alike -- becomes the same ``ProtocolError`` with the
+            # body carried through as ``diagnostic``. The SOAP-fault parser
+            # (``_raise_for_fault``) only ever runs on a 2xx body, so the fault element
+            # served here is never actually parsed as a fault. Nothing is lost (the reason
+            # text reaches the operator via ``diagnostic``), and both statuses land on the
+            # ``protocol`` error class, which is the right class for both.
             body = _fault_body("UnsupportedCapability", f"No handler for action={action!r} resourceURI={resource_uri!r}")
             return 500, _envelope(ACTION_FAULT, relates_to, body)
 
@@ -1250,7 +1781,7 @@ class WsmanMockServer:
     def _handle_put(self, resource_uri: str, relates_to: str, body_elem: ET.Element | None) -> tuple[int, str]:
         if resource_uri != AMT_BOOT_SETTING_DATA:
             raise _UnknownResource
-        incoming = {child.tag.rsplit("}", 1)[-1]: (child.text or "") for child in (body_elem or [])}
+        incoming = {_local_name(child.tag): (child.text or "") for child in (body_elem or [])}
         if self.faults.reject_boot_readonly_fields:
             offending = sorted(READONLY_BOOT_FIELDS & incoming.keys())
             if offending:
@@ -1264,6 +1795,15 @@ class WsmanMockServer:
         return 200, _envelope(ACTION_PUT_RESPONSE, relates_to, body, resource_uri=resource_uri)
 
     def _handle_enumerate(self, resource_uri: str, relates_to: str) -> tuple[int, str]:
+        # AMT 10-era firmware, when a test asks for it. See
+        # FaultConfig.enumerate_faults_for_amt_classes for why this is opt-in and why
+        # AMT_MessageLog is exempt. Checked before the handler lookup so it applies to
+        # every AMT_ class, including ones this mock does not otherwise serve for
+        # Enumerate -- on that firmware the verb fails for the whole prefix, not just for
+        # the classes this fixture happens to implement.
+        if self.faults.enumerate_faults_for_amt_classes and resource_uri.startswith(AMT_BASE + "/") and resource_uri != AMT_MESSAGE_LOG:
+            raise _HttpFault(400, "Enumerate is not supported for this resource; use Get with a SelectorSet")
+
         handler = ENUMERATE_HANDLERS.get(resource_uri)
         if handler is None:
             raise _UnknownResource
@@ -1280,7 +1820,7 @@ class WsmanMockServer:
         return 200, _envelope(ACTION_ENUMERATE_RESPONSE, relates_to, body)
 
     def _handle_pull(self, _resource_uri: str, relates_to: str, body_elem: ET.Element | None) -> tuple[int, str]:
-        ctx = _child_text(body_elem, "EnumerationContext")
+        ctx = _param_text(body_elem, "EnumerationContext")
         if ctx is None or ctx not in self._contexts:
             body = _fault_body("InvalidEnumerationContext", "Unknown or expired enumeration context")
             return 500, _envelope(ACTION_FAULT, relates_to, body)

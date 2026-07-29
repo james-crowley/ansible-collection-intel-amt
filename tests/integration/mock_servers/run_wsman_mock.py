@@ -28,7 +28,10 @@ bare `Get` so only `Enumerate` answers, and one with no `AMT_MessageLog` class a
 `--empty-message-log` is here for the same reason even though it is state rather than
 capability: an event log is emptied by `ClearLog`, so a server that starts empty is the
 only way to read an empty log *without* first destroying the records another assertion
-in the same target needs. All are start-up flags rather than a control channel -- a
+in the same target needs. `--amt10-no-enumerate` is the same kind of thing one level up:
+it selects a firmware *generation* rather than one class's behaviour, making `Enumerate`
+HTTP 400 on `AMT_`-prefixed classes the way AMT 10.0.56 does. All are start-up flags
+rather than a control channel -- a
 target that needs them starts a second mock process configured that way, which keeps
 every running server's behaviour fixed for its whole lifetime and therefore keeps a
 failure attributable to one endpoint's configuration.
@@ -79,6 +82,15 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Serve an AMT_MessageLog that exists but holds no records (PositionToFirstRecord returns 2)",
     )
+    parser.add_argument(
+        "--amt10-no-enumerate",
+        action="store_true",
+        help=(
+            "Answer HTTP 400 to Enumerate on AMT_-prefixed classes, standing in for AMT 10-era "
+            "firmware which offers selective instance access only (docs/protocol-notes.md 2.7). "
+            "AMT_MessageLog is exempt -- its Enumerate is directly evidenced."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -98,6 +110,10 @@ def main() -> None:
     server.state.ethernet_port_present = not args.no_ethernet_port
     server.faults.bios_element_get_faults = args.bios_get_faults
     server.state.message_log_present = not args.no_message_log
+    # Which firmware *generation* this endpoint is, so it must hold for the whole
+    # lifetime: a server that changed verbs under a running client would make a failure
+    # unattributable.
+    server.faults.enumerate_faults_for_amt_classes = args.amt10_no_enumerate
     if args.empty_message_log:
         # An event log that exists but is empty. Distinct from --no-message-log:
         # "the class is absent" is an unsupported_capability, while "the log holds
