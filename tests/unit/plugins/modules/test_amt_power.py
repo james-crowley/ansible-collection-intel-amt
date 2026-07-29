@@ -80,7 +80,17 @@ class TestArgumentSpec:
 
     def test_state_choices_and_default(self):
         spec = amt_power.argument_spec()["state"]
-        assert set(spec["choices"]) == {"on", "off", "reboot", "reset", "cycle", "query"}
+        assert set(spec["choices"]) == {
+            "on",
+            "off",
+            "reboot",
+            "reset",
+            "cycle",
+            "sleep-light",
+            "sleep-deep",
+            "hibernate",
+            "query",
+        }
         assert spec["default"] == "query"
 
     def test_invalid_state_fails_argument_validation(self, monkeypatch):
@@ -134,6 +144,44 @@ class TestPlan:
         changed, desired = amt_power.plan(state, current)
         assert changed is True
         assert desired == "on"  # every imperative action here converges on "on"
+
+    @pytest.mark.parametrize("current", ["on", "off", "hibernate", "unknown"])
+    def test_hibernate_is_convergent(self, current):
+        # CIM PowerState 7 is the only value that normalizes to "hibernate", so
+        # unlike the sleep depths this reading can be trusted for convergence.
+        changed, desired = amt_power.plan("hibernate", current)
+        assert desired == "hibernate"
+        assert changed == (current != "hibernate")
+
+    @pytest.mark.parametrize("state", ["sleep-light", "sleep-deep"])
+    @pytest.mark.parametrize("current", ["on", "off", "sleep", "hibernate", "unknown"])
+    def test_sleep_depths_are_never_convergent(self, state, current):
+        # The regression this guards: CIM 3 (S1) and CIM 4 (S3) both normalize to
+        # "sleep", so treating sleep as convergent would report changed=False for a
+        # machine sitting at the OTHER depth -- a transition that was never issued.
+        # It must always send, including when already reported as "sleep".
+        changed, desired = amt_power.plan(state, current)
+        assert changed is True
+        assert desired == "sleep"
+
+    def test_every_choice_except_query_maps_to_an_action(self):
+        # Guards the failure mode this change fixed: PowerAction carried
+        # SLEEP_LIGHT/SLEEP_DEEP/HIBERNATE with correct CIM codes for three
+        # releases while argument_spec's choices omitted them, so they were
+        # unreachable. Any future choice added without a mapping fails here.
+        choices = set(amt_power.argument_spec()["state"]["choices"]) - {"query"}
+        assert choices == set(amt_power._STATE_TO_ACTION)
+        for action in amt_power._STATE_TO_ACTION.values():
+            assert action in amt_power._ACTION_EXPECTED_STATE
+
+    def test_expected_states_agree_with_the_client_table(self):
+        # The module keeps its own copy of the expected-state map for check mode.
+        # If it ever disagrees with the client's, check mode would preview a
+        # different outcome than the real run produces.
+        from ansible_collections.james_crowley.intel_amt.plugins.module_utils import client as client_mod
+
+        for action, expected in amt_power._ACTION_EXPECTED_STATE.items():
+            assert client_mod._ACTION_EXPECTED_STATE[action] == expected
 
 
 class TestConvergence:
