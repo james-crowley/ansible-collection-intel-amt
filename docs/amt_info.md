@@ -306,19 +306,26 @@ compare caller-supplied identity.
 - This module is **hardware-qualified against AMT 16.1.30 and AMT 19.0.5** — the two
   lab machines both ran it in stages 1 and 8, and on both the firmware version, all
   four capability flags, redirection state, power state and platform UUID came back
-  from real firmware. It is the only module in the collection verified on more than
-  one generation, and it remains unverified on every generation other than those two
+  from real firmware. It remains unverified on every generation other than those two
   — see the [Capability matrix](capability-matrix.md).
-- **The network and system-state facts are Tier 2, not Tier 3.** `amt.network`,
-  `amt.system_state`, `amt.bios_version` and the five extra `AMT_GeneralSettings`
-  fields are mock-tested here and derived from *someone else's* AMT 10.0.56 hardware
-  dump (`parmstro`, GPL-3.0-or-later). No lab machine has returned any of them: they
-  are **unverified on 16.1.30 and 19.0.5**, the two generations everything else in
-  this module is verified on. See [Capability matrix](capability-matrix.md) Tier 2.
-- `amt.bios_version` is the weakest-evidenced field in the module. The source notes
-  claim `CIM_BIOSElement` works on AMT 10.0.56 but record no dumped value, and the
-  implementation they claim it from swallows failure to `None`, so their result proves
-  nothing either way. Expect `null` and treat a value as a bonus.
+- **The network and system-state facts are hardware-verified on 19.0.5 only.**
+  `amt.network`, `amt.system_state`, `amt.bios_version` and the six extra
+  `AMT_GeneralSettings` fields came back **fully populated** from real AMT 19.0.5
+  firmware on 2026-07-29 — nothing `null`, no class faulted. They are **still
+  unverified on 16.1.30**: that machine has not been re-run since these fields were
+  added in v0.2.0. Their property names were originally derived from *someone else's*
+  AMT 10.0.56 hardware dump (`parmstro`, GPL-3.0-or-later), which the 19.0.5 read
+  confirms resolve on firmware this collection can reach. See
+  [Capability matrix](capability-matrix.md) Tier 3.
+- `amt.system_state.operational_status` is an **array** (`uint16[]`), hardware-
+  confirmed as such by 19.0.5 returning a single-element list. Do not treat it as a
+  scalar even where only one element is present.
+- `amt.bios_version` was the weakest-evidenced field in the module and is only partly
+  still so. The source notes claim `CIM_BIOSElement` works on AMT 10.0.56 but record
+  no dumped value, and the implementation they claim it from swallows failure to
+  `None`, so their result proves nothing either way. AMT 19.0.5 did return a value;
+  16.1.30 has never been asked, and `null` remains legitimate on firmware that does
+  not expose the class.
 - `amt.network` covers `AMT_EthernetPortSettings` **instance 0 only**. Multi-NIC parts
   expose higher indices; this module does not look for them, and an endpoint with no
   instance 0 reports `amt.network: null` rather than failing.

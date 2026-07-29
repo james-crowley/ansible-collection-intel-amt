@@ -173,12 +173,14 @@ turn a successful request into a reported failure — see
 - `delegate_to: localhost` does not protect against inventory fan-out: a play over
   ten hosts still issues ten resets. Constrain the **play** with `serial: 1` and an
   explicit single-target selection — `serial` cannot be set on a task.
-- **Hardware-qualified against AMT 16.1.30 only.** Stage 4 exercised this module
-  against real firmware: convergent `on` reported `changed: false` on an
-  already-on machine, `off` reported `changed: true`, and the starting state was
-  restored afterwards; stages 5 and 7 issued real resets. Check-mode power plans
-  were additionally computed against an AMT 19.0.5 endpoint in stage 3, without
-  mutating it. So the action codes — "as used by MeshCmd, verified against
+- **Hardware-qualified against AMT 16.1.30 and AMT 19.0.5.** Stage 4 exercised this
+  module against real firmware on both lab machines, with the same outcomes on each:
+  convergent `on` reported `changed: false` on an already-on machine, `off` reported
+  `changed: true`, and the starting state was restored afterwards; stages 5 and 7
+  issued real resets. So the action codes — "as used by MeshCmd, verified against
   firmware" per `docs/protocol-notes.md` §2.4 — are now confirmed as this
-  collection implements them, on one firmware generation, and remain unverified on
-  every other. See the [Capability matrix](capability-matrix.md).
+  collection implements them, on two firmware generations, and remain unverified on
+  every other. `sleep-light`, `sleep-deep` and `hibernate` **are** selectable (they
+  were exposed after being implemented-but-unreachable for three releases), but no
+  hardware stage has issued any of them on either machine -- stage 4 exercised only
+  `on` and `off`. See the [Capability matrix](capability-matrix.md).

@@ -146,7 +146,7 @@ depends on the repository being public.
 
 ## 5. The second lab machine
 
-**Partly done.** Two machines are provisioned in the `amt-lab-runner` context, and
+**Done.** Two machines are provisioned in the `amt-lab-runner` context, and
 `tests/hardware/render-inventory.sh` renders both as `amt-lab-01` and
 `amt-lab-02`. Per-machine credentials are already supported: machine 1 uses the
 unsuffixed variables (`AMT_HOST`, `AMT_PASSWORD`, `AMT_TLS_FINGERPRINT`, …) and
@@ -167,23 +167,31 @@ circleci context store-secret amt-lab-runner --org gh/james-crowley AMT_TLS_FING
 Read the new machine's fingerprint from the `hardware-observe` job, which sends no
 credentials and mutates nothing, and review it before storing it.
 
-**Remaining action: approve the mutating stages for machine 2.** Machine 2 has
-completed stages 1, 3 and 8 only — its run stopped at `hardware-power-approval`,
-which was never approved. Until stages 4 through 7 run against it, power, media,
-writable-image and PXE remain a single-machine result. See
-[`capability-matrix.md`](capability-matrix.md) Tier 4.
+**Machine 2 completed all eight stages on 2026-07-29**, its four mutating
+approvals included, so power, media, writable-image and PXE are no longer a
+single-machine result. That run was triggered with `hardware-limit=amt-lab-02`, so
+machine 1 was untouched.
+
+**Remaining action: re-run machine 1.** Its recorded evidence is from 2026-07-28
+and predates v0.2.0's network and system-state facts, which have therefore only
+ever been read on 19.0.5. A machine-1 run (`hardware-limit=amt-lab-01`) is what
+closes that gap. See [`capability-matrix.md`](capability-matrix.md) Tier 4.
 
 ---
 
 ## 6. Cross-check a machine's UUID (optional)
 
 This closes the loop on the stage-2 identity guard, which is what stops a reset
-landing on the wrong machine. It is **optional**: `amt_expected_uuid` is unset by
-default, `tests/hardware/qualify_readonly.yml` proceeds and simply reports that
-there is nothing to cross-check, and the guard only becomes live once a reviewed
-value is recorded. Note also that the guard exists **only in `tests/hardware/`** —
-it is not a module feature, and nothing in `plugins/` or `roles/` compares a UUID
-unless a caller passes one.
+landing on the wrong machine. It is **optional**: where `amt_expected_uuid` is
+unset, `tests/hardware/qualify_readonly.yml` proceeds and simply reports that
+there is nothing to cross-check. Both lab machines now have a value recorded in the
+context, and machine 2's comparison ran and matched on 2026-07-29 — but note what a
+recorded value buys. It was recorded from a UUID this collection itself reported, so
+the automatic check detects **drift** in the inventory-to-endpoint binding; the
+`dmidecode` step below is what makes the recorded value an *independently* confirmed
+identity rather than a self-consistent one. Note also that the guard exists **only
+in `tests/hardware/`** — it is not a module feature, and nothing in `plugins/` or
+`roles/` compares a UUID unless a caller passes one.
 
 1. Run the `hardware-observe` job (or stage 1) and read the `uuid` that `amt_info`
    reports for the machine. The values are not reproduced in this repository,
@@ -243,5 +251,5 @@ what the `hardware-observe` job prints — and the wrong tool for identity.
 | `galaxy-publish` context | Exists, holds `GALAXY_API_KEY`, project-restricted | Nothing |
 | Renovate | Installed, dashboard open | Config migration PR; one errored update |
 | Public repo + branch protection | Public, 12 required checks, enforced | Keep the check list in step with CI |
-| Second lab machine | Provisioned; stages 1, 3, 8 done | Approve stages 4-7 for it |
-| UUID identity guard | Optional, currently unset | One `dmidecode` comparison per machine |
+| Second lab machine | Provisioned; all eight stages done | Nothing; re-run machine 1 for the v0.2.0 facts |
+| UUID identity guard | Live for machine 2, matched on 2026-07-29 | One `dmidecode` comparison per machine, for independent identity |

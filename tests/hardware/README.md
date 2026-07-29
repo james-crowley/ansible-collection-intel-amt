@@ -152,20 +152,33 @@ machine to compare against while recovering the other.
 
 ### Where the lab actually stands
 
-As of 2026-07-28, and stated precisely because the difference matters:
+Stated precisely, because what differs between the two runs still matters:
 
-| Machine | Firmware | Stages completed |
-|---|---|---|
-| `amt-lab-01` | AMT 16.1.30 | **All eight** (1, 2, 3, 4, 5, 6, 7, 8) |
-| `amt-lab-02` | AMT 19.0.5 | **Only 1, 2, 3 and 8** -- the non-mutating ones |
+| Machine | Firmware | Stages completed | Run date |
+|---|---|---|---|
+| `amt-lab-01` | AMT 16.1.30 | **All eight** (1, 2, 3, 4, 5, 6, 7, 8) | 2026-07-28 |
+| `amt-lab-02` | AMT 19.0.5 | **All eight** (1, 2, 3, 4, 5, 6, 7, 8) | 2026-07-29 |
 
-Machine 2's run reached `hardware-power-approval` and stopped there; that
-approval was never given, so stages 4 through 7 never ran against it. Nothing
-about power control, IDE-R media, the writable-image path or native PXE has
-been reproduced on any machine other than `amt-lab-01`. Read-only facts,
-check-mode plans and the idempotent re-probe have -- on a machine of a
-different firmware generation, which is worth more than a second machine of
-the same one.
+Machine 2 cleared its four mutating approvals on 2026-07-29, so power control,
+IDE-R media, the writable-image path and native PXE are reproduced on a second
+machine of a *different* firmware generation -- which is worth more than a
+second machine of the same one. That run was limited to machine 2 alone
+(`hardware-limit=amt-lab-02`), so machine 1 was untouched by it, exactly as the
+"never cut both machines over at once" rule above asks.
+
+Coverage is **not** identical between the two runs, and the difference is not
+about stages: `amt_info`'s network and system-state facts (added in v0.2.0) came
+back populated from 19.0.5, and have never been read on 16.1.30, because machine
+1 has not been re-run since. See
+[`docs/capability-matrix.md`](../../docs/capability-matrix.md) Tier 3 and Tier 4.
+
+Stage 2's automatic comparison is also live now: `amt_expected_uuid` is recorded
+for machine 2, and the 2026-07-29 run matched it. Recorded from a value this
+collection itself observed, that match detects **drift** in the
+inventory-to-endpoint binding -- a reused DHCP lease, a swapped inventory suffix
+-- and is not independent proof of machine identity, which needs a source outside
+this collection's own read path such as the booted OS's `dmidecode -s
+system-uuid`.
 
 Real hostnames, addresses and fingerprints are deliberately absent from this
 repository; `amt-lab-01`/`amt-lab-02` are the neutral names

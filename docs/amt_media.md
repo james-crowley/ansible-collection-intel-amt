@@ -223,13 +223,16 @@ as well as whether the task itself failed.
   but eventually-successful attach that exceeds it is not reported as a failure —
   `session_state` may still read `starting`; poll again with a repeated
   `state=attached` call for the same `session_id`.
-- **Hardware-qualified against AMT 16.1.30 only**, and this module carries the most
-  protocol surface of the five (the entire IDE-R/SCSI emulation in
+- **Hardware-qualified against AMT 16.1.30 and AMT 19.0.5**, and this module carries
+  the most protocol surface of the five (the entire IDE-R/SCSI emulation in
   `plugins/module_utils/ider.py`). In stage 5 the native Python IDE-R engine served
   a real bootable ISO to real firmware; in stage 6 the floppy/USB-R slot was
   presented **writable** (MODE_SENSE write-protect bit `0x00`, not `0x80`) and the
-  session stayed healthy. Neither stage has run against a second machine or any
-  other firmware generation — this is the one module the lab's second endpoint never
-  exercised at all — and a non-zero `bytes_written` has still never been observed.
-  See the [Capability matrix](capability-matrix.md), including the
-  reset-during-write gap noted there.
+  session stayed healthy. Both stages have now run on both lab machines, so this is
+  no longer a single-machine result. **A non-zero `bytes_written` has still never
+  been observed** — both machines reported `bytes_written = 0`, which is the
+  expected unattended outcome (nothing on the target issues a SCSI write), and the
+  agreement across two endpoints is evidence that the zero is a property of the
+  unattended setup rather than of one endpoint. See the
+  [Capability matrix](capability-matrix.md), including the reset-during-write gap
+  noted there.
