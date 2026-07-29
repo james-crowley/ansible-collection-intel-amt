@@ -304,6 +304,194 @@ on some configurations.
 reports what is *enabled*. A TCP connect to 16994/16995 reports what is *reachable*.
 Report all three separately — never collapse them into one boolean.
 
+### 2.7 Network and system-state facts
+
+Everything in this subsection is derived from `parmstro`'s hardware research notes
+(`development/research/AMT_RESOURCE_DISCOVERY.md` and
+`development/research/AMT_10_CAPABILITIES.md`, GPL-3.0-or-later), which record property
+values dumped from a real Intel NUC5i5MYBE running AMT 10.0.56 build 3002. **Protocol
+facts were taken from those notes; no code was taken from that collection**, and their
+module code and user-facing prose are explicitly *not* treated as reliable here — three
+of their ten modules report success while doing nothing, and their power constants map
+`reset` to CIM code 11 (Diagnostic Interrupt / NMI) rather than 10 (Master Bus Reset).
+See `NOTICE`.
+
+#### `Enumerate` is HTTP 400 on `AMT_`-prefixed classes — use `Get` with a selector
+
+Hardware-verified on AMT 10.0.56: `Enumerate` returns **HTTP 400** for
+
+```
+AMT_EthernetPortSettings, AMT_GeneralSettings, AMT_BootCapabilities,
+AMT_BootSettingData, AMT_TLSSettingData
+```
+
+while a `Get` carrying an exact `SelectorSet` works. AMT's WS-Man implementation offers
+**selective instance access only** for most `AMT_` resources: you must already know the
+`InstanceID`.
+
+This cuts against the enumerate-first habit elsewhere in this collection —
+`plugins/module_utils/boot.py` (`discover_and_validate()`) and
+`plugins/module_utils/redirection_service.py` (`get_capabilities()`) both reach
+`AMT_BootCapabilities` via Enumerate+Pull, and that is *known to work on AMT 16.1.30*
+(Tier 3, hardware-verified). Both readings are real: the verb a given class accepts
+varies by firmware generation. So:
+
+- **Every new `AMT_`-prefixed read must use `Get` with an explicit selector.** Never
+  `Enumerate`.
+- The existing `Enumerate` call sites are not changed here. They are hardware-verified
+  on 16.1.30, and switching them would trade a verified path for an unverified one. If a
+  10.x endpoint ever needs them, add a `Get`-with-selector fallback — do not swap the
+  verb outright.
+- `CIM_`-prefixed classes are not affected by this finding.
+
+#### `AMT_GeneralSettings`
+
+```
+ResourceURI  http://intel.com/wbem/wscim/1/amt-schema/1/AMT_GeneralSettings
+Selector     InstanceID = "Intel(r) AMT: General Settings"
+```
+
+Properties dumped from AMT 10.0.56 hardware:
+
+| Property | Type | Notes |
+|---|---|---|
+| `HostName` | str | Firmware-observed hostname |
+| `DomainName` | str | |
+| `IdleWakeTimeout` | int | Minutes |
+| `PingResponseEnabled` | bool | ICMP echo. **This** is the ping toggle |
+| `RmcpPingResponseEnabled` | bool | |
+| `NetworkInterfaceEnabled` | bool | |
+| `DDNSUpdateEnabled` | bool | |
+| `PowerSource` | int | **Not surfaced** — no documented value table |
+| `PrivacyLevel` | int | **Not surfaced** — no documented value table |
+
+`PowerSource` and `PrivacyLevel` are deliberately not reported by `amt_info`. Both were
+dumped as `0`, and nothing available documents what their integers mean; publishing a
+number an operator cannot interpret invites someone to invent a meaning for it.
+
+This class also carries `DigestRealm`. It carries **no** version property — see §2.5 and
+`docs/capability-matrix.md`; the AMT firmware version is on `CIM_SoftwareIdentity`
+(`InstanceID == "AMT"`, `VersionString`). `IPS_GeneralSettings.FirmwareVersion` exists but
+is deliberately not used: the `CIM_SoftwareIdentity` path is better evidenced.
+
+#### `AMT_EthernetPortSettings`
+
+```
+ResourceURI  http://intel.com/wbem/wscim/1/amt-schema/1/AMT_EthernetPortSettings
+Selector     InstanceID = "Intel(r) AMT Ethernet Port Settings 0"
+Action       Get   (Enumerate is HTTP 400 — see above)
+```
+
+| Property | Type | Notes |
+|---|---|---|
+| `MACAddress` | str | Observed **dash-separated lowercase**, e.g. `00-00-5e-00-53-01` |
+| `IPAddress`, `SubnetMask`, `DefaultGateway`, `PrimaryDNS`, `SecondaryDNS` | str | IPv4 |
+| `DHCPEnabled` | bool | |
+| `LinkIsUp` | bool | |
+| `IpSyncEnabled` | bool | AMT **shares the host OS's IP address**. Not a ping toggle |
+| `LinkPolicy` | int array | See the value table below |
+
+**Normalize the MAC on ingest and keep the raw reading.** The firmware returned dashes;
+`parmstro`'s own documented RETURN sample claims colons. Both shapes are in circulation
+for the same property, and this value is used as an identity anchor and as a PXE
+reservation key — comparisons a stray separator silently breaks.
+
+**`IpSyncEnabled` is not a ping-response toggle.** `parmstro`'s `amt_network_settings`
+writes `IpSyncEnabled` from an option named `ping_response_enabled`, conflating it with
+`AMT_GeneralSettings.PingResponseEnabled`. They are different properties on different
+classes with different meanings.
+
+**Instance 0 only.** Multi-NIC parts expose higher indices. Do not assume they exist, and
+make a missing instance degrade to "unknown" rather than failing a read.
+
+`LinkPolicy` values (a live AMT 10.0.56 machine returned `[1, 14, 16]`):
+
+| Value | Meaning |
+|---|---|
+| 1 | S0 (powered on), AC |
+| 2 | Sx (sleep/hibernate), AC |
+| 14 | S0 (powered on), DC |
+| 15 | Sx (sleep/hibernate), DC |
+| 16 | Network link always on — **the WoL-capable bit** |
+
+Only 1, 14 and 16 are hardware-corroborated (they are the set that machine returned);
+2 and 15 are the documented AC/DC sleep counterparts and have not been observed. Report
+the raw list as well as any derived boolean, so an unrecognised value stays visible.
+
+**Why `16` matters operationally.** An endpoint whose `LinkPolicy` omits `16` does not
+keep its network link up while the host is powered off, so it does not answer WS-Man at
+all in that state. `amt_power` with `state: on` against such an endpoint therefore fails
+looking exactly like a network fault — wrong VLAN, wrong address, firewall — when the
+actual cause is a link policy. Surfacing it read-only converts a confusing failure into
+a diagnosis.
+
+**Wire shape of `LinkPolicy` is not settled.** AMT's schema types it as a `uint32` array,
+which WS-Man renders as a repeated plain element. `parmstro`'s module code instead parses
+`<PolicyValue>` children inside a `LinkPolicy` wrapper, and their notes record only the
+decoded result (`[1, 14, 16]`), never the XML. Neither shape is ruled out by the
+available evidence, so a parser should accept both; the cost of guessing wrong is an
+empty policy list and a `wake_on_lan_capable` that reads `false` on a machine that is in
+fact wakeable.
+
+#### `CIM_ComputerSystem`
+
+```
+ResourceURI  http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ComputerSystem
+Selector     Name = "ManagedSystem"
+Properties   EnabledState (int), RequestedState (int),
+             OperationalStatus (uint16[]), ElementName (str)
+```
+
+Read `ElementName`, not `Name` — `Name` is the selector value the caller already
+supplied. **This class has no `UUID` property**; the platform UUID is
+`CIM_ComputerSystemPackage.PlatformGUID` (§2.5 and `docs/capability-matrix.md`). Reading
+`UUID` here was a real defect in this collection, and it is why the class was removed
+from facts gathering in 0.1.0 before being reintroduced for the state fields above.
+
+`EnabledState` (DMTF `CIM_EnabledLogicalElement`):
+
+| 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| unknown | other | enabled | disabled | shutting down | not applicable | enabled but offline | in test | deferred | quiesce | starting |
+
+`OperationalStatus` (DMTF `CIM_ManagedSystemElement`) — an **array**, decoded
+element-wise: 0 unknown, 1 other, 2 OK, 3 degraded, 4 stressed, 5 predictive failure,
+6 error, 7 non-recoverable error, 8 starting, 9 stopping, 10 stopped, 11 in service,
+12 no contact, 13 lost communication, 14 aborted, 15 dormant, 16 supporting entity in
+error, 17 completed, 18 power mode, 19 relocating. Firmware reporting one value is an
+array of length one; a client that reads only the first element drops exactly the
+statuses that explain a degraded machine.
+
+`RequestedState` is reported raw. AMT 10.0.56 was observed reporting `12`, which DMTF
+defines as "Not Applicable". No value table for it is claimed by this collection.
+
+#### `CIM_BIOSElement`
+
+```
+ResourceURI  http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_BIOSElement
+Action       Get (no selector), falling back to Enumerate
+Property     Version   e.g. "EXAMPLE10H.86A.0000.2026.0101.0000"
+```
+
+This is the **weakest-evidenced** item in this subsection. `parmstro`'s notes list the
+class as working on AMT 10.0.56 but record no dumped value, and their implementation
+swallows any failure to `None` — so their "it works" is not evidence either way. Treat it
+as unverified: read it through an optional-degradation path so a fault yields `null`
+rather than failing, and try `Enumerate` if a bare `Get` faults, since a class with no
+selector may require enumeration.
+
+This is the **host BIOS** version, not the AMT firmware version.
+
+#### Deliberately not implemented
+
+- `IPS_GeneralSettings.FirmwareVersion` — the `CIM_SoftwareIdentity` path (§2.5) is
+  better evidenced; do not switch.
+- `CIM_ComputerSystem.OnTimeCounter` as an uptime source — unevidenced.
+- Any AMT time field. `parmstro`'s `amt_host_status` fabricates `amt_time` from the
+  *controller's* own clock (`datetime.utcnow()`), which is not a fact about the endpoint
+  at all. The real source would be `AMT_TimeSynchronizationService`, unverified.
+- Any write path to any class in this subsection.
+
 ---
 
 ## 3. Redirection plane — session handshake
@@ -693,8 +881,12 @@ excerpt (2 KB is enough). A timeout *after* sending a mutation must surface as
   `amt/amt-wsman.js`, `amt/amt.js`, `amt/amt-redir-mesh.js`,
   `amt/amt-ider-module.js`, `agents/meshcmd.js`
 - `parmstro/intel_amt` (GPL-3.0-or-later) — `plugins/module_utils/wsman.py`,
-  and the hardware-verified AMT 10.0.56 TLS findings in
-  `development/research/AMT_10_TLS_LIMITATION.md`
+  the hardware-verified AMT 10.0.56 TLS findings in
+  `development/research/AMT_10_TLS_LIMITATION.md`, and the AMT 10.0.56 property
+  dumps and verb findings in `development/research/AMT_RESOURCE_DISCOVERY.md` and
+  `development/research/AMT_10_CAPABILITIES.md` (§2.7). Their *research notes* are
+  the trustworthy artefact; their module code and user documentation are not, and
+  no code was taken from them
 - Intel AMT Implementation and Reference Guide — power state, boot configuration,
   redirection enablement, manageability ports, security considerations
 

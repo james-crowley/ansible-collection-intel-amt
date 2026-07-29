@@ -63,6 +63,49 @@ behaviour were reimplemented in Python from these sources.
        does not implement TLS on port 16993, which shaped this collection's
        transport policy (see docs/protocol-notes.md section 1.1)
 
+   Files consulted:
+     development/research/AMT_10_TLS_LIMITATION.md
+     development/research/AMT_RESOURCE_DISCOVERY.md
+     development/research/AMT_10_CAPABILITIES.md
+
+   WHAT WAS TAKEN: protocol facts from the hardware research notes above --
+   WS-Man class names, ResourceURIs, InstanceID selector strings, property
+   names, observed property values, and the finding about which WS-Man verb
+   each class accepts. These were dumped from a real Intel NUC5i5MYBE running
+   AMT 10.0.56 build 3002. NO CODE was taken. Every implementation in this
+   collection was written from the protocol facts, and that distinction is
+   deliberate: that project's module code and user-facing documentation were
+   assessed as unreliable (several of its modules report success while
+   performing no operation, and its power-action constants map "reset" to CIM
+   code 11, Diagnostic Interrupt/NMI, rather than 10, Master Bus Reset). Its
+   research notes are the trustworthy artefact; its code is not.
+
+   Specifically derived, per file:
+     - plugins/module_utils/models.py -- the AMT_GeneralSettings,
+       AMT_EthernetPortSettings and CIM_ComputerSystem property names parsed by
+       EthernetSettings.from_instance() and SystemState.from_instance(), and the
+       AMT_EthernetPortSettings LinkPolicy value table (1/2/14/15/16), whose
+       values 1, 14 and 16 are corroborated by a live reading in
+       development/research/AMT_RESOURCE_DISCOVERY.md. The DMTF EnabledState and
+       OperationalStatus tables are from the DMTF CIM schema, not from that
+       project (whose own decoding covers only OperationalStatus 0 and 2).
+     - plugins/module_utils/client.py -- the InstanceID selector string
+       "Intel(r) AMT Ethernet Port Settings 0", and the requirement to reach
+       AMT_-prefixed classes with Get plus an exact selector rather than
+       Enumerate, which returns HTTP 400 on AMT 10 for
+       AMT_EthernetPortSettings, AMT_GeneralSettings, AMT_BootCapabilities,
+       AMT_BootSettingData and AMT_TLSSettingData
+       (development/research/AMT_10_CAPABILITIES.md).
+     - plugins/modules/amt_info.py -- the resulting read-only fact set
+       (amt.network, amt.system_state, amt.bios_version, and the additional
+       AMT_GeneralSettings fields).
+     - docs/protocol-notes.md section 2.7 -- the transcribed class/selector
+       reference and the Enumerate-versus-Get finding.
+
+   Both this collection and parmstro/intel_amt are licensed GPL-3.0-or-later,
+   so no license-compatibility question arises. The project owner explicitly
+   authorised this reuse with attribution.
+
 --------------------------------------------------------------------------------
 3. Intel AMT Implementation and Reference Guide
 --------------------------------------------------------------------------------
