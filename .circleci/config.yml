@@ -29,6 +29,19 @@ parameters:
     type: boolean
     default: false
 
+  # hardware-limit restricts the destructive stages to a subset of the rendered
+  # inventory, as an Ansible --limit pattern. Empty means every host in
+  # amt_targets, which is the historical behaviour.
+  #
+  # This exists because the stage playbooks target `hosts: amt_targets`, so
+  # without it a run authorised for one machine power-cycles every machine in the
+  # lab. "You may test machine 2" and "you may test everything" are different
+  # permissions, and a harness that cannot express the narrower one will always be
+  # run with the broader one.
+  hardware-limit:
+    type: string
+    default: ""
+
 executors:
   python:
     parameters:
@@ -40,6 +53,25 @@ executors:
     working_directory: ~/project
 
 commands:
+  export-hardware-limit:
+    description: >-
+      Turn the hardware-limit pipeline parameter into an ANSIBLE_LIMIT_FLAG the
+      stage steps interpolate. Kept as one command so every stage derives the flag
+      identically -- a stage that forgot it would silently widen the blast radius
+      of a run authorised for one machine.
+    steps:
+      - run:
+          name: Resolve the inventory limit for this run
+          command: |
+            limit='<< pipeline.parameters.hardware-limit >>'
+            if [ -n "${limit}" ]; then
+              echo "export ANSIBLE_LIMIT_FLAG='--limit ${limit}'" >> "$BASH_ENV"
+              echo "Destructive stages restricted to: ${limit}"
+            else
+              echo "export ANSIBLE_LIMIT_FLAG=''" >> "$BASH_ENV"
+              echo "No hardware-limit set; stages target every host in amt_targets."
+            fi
+
   install-ansible:
     description: Install a specific ansible-core minor series plus test deps.
     parameters:
@@ -525,24 +557,25 @@ jobs:
       - verify-lab-credentials
       - install-lab-ansible-venv
       - render-lab-inventory
+      - export-hardware-limit
       - run:
           name: "Stage 1: read-only AMT qualification"
           command: |
             . .venv/bin/activate
             ansible-playbook tests/hardware/qualify_readonly.yml \
-              -i tests/hardware/inventory.yml -v
+              -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -v
       - run:
           name: "Stage 3: check-mode power and boot plans (no mutation)"
           command: |
             . .venv/bin/activate
             ansible-playbook tests/hardware/qualify_checkmode.yml \
-              -i tests/hardware/inventory.yml --check -v
+              -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} --check -v
       - run:
           name: "Stage 8: idempotent re-probe"
           command: |
             . .venv/bin/activate
             ansible-playbook tests/hardware/qualify_idempotent_reprobe.yml \
-              -i tests/hardware/inventory.yml -v
+              -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -v
       - store_artifacts:
           path: tests/hardware/output
           destination: hardware-evidence
@@ -565,12 +598,13 @@ jobs:
       - verify-lab-credentials
       - install-lab-ansible-venv
       - render-lab-inventory
+      - export-hardware-limit
       - run:
           name: "Stage 4: attended power on/off (unattended in CI; the approval gate is the human checkpoint)"
           command: |
             . .venv/bin/activate
             ansible-playbook tests/hardware/qualify_power.yml \
-              -i tests/hardware/inventory.yml -e amt_qualify_attended=false -v
+              -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -e amt_qualify_attended=false -v
       - store_artifacts:
           path: tests/hardware/output
           destination: hardware-evidence
@@ -595,12 +629,13 @@ jobs:
       - install-lab-ansible-venv
       - provision-test-media
       - render-lab-inventory
+      - export-hardware-limit
       - run:
           name: "Stage 5: IDE-R attach with a small test ISO (unattended in CI)"
           command: |
             . .venv/bin/activate
             ansible-playbook tests/hardware/qualify_media_attach.yml \
-              -i tests/hardware/inventory.yml -e amt_qualify_attended=false -v
+              -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -e amt_qualify_attended=false -v
       - store_artifacts:
           path: tests/hardware/output
           destination: hardware-evidence
@@ -627,12 +662,13 @@ jobs:
       - install-lab-ansible-venv
       - provision-test-media
       - render-lab-inventory
+      - export-hardware-limit
       - run:
           name: "Stage 6: writable-image test (unattended in CI -- bytes_written=0 is expected)"
           command: |
             . .venv/bin/activate
             ansible-playbook tests/hardware/qualify_writable_image.yml \
-              -i tests/hardware/inventory.yml -e amt_qualify_attended=false -v
+              -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -e amt_qualify_attended=false -v
       - store_artifacts:
           path: tests/hardware/output
           destination: hardware-evidence
@@ -664,12 +700,13 @@ jobs:
       - verify-lab-credentials
       - install-lab-ansible-venv
       - render-lab-inventory
+      - export-hardware-limit
       - run:
           name: "Stage 7: one-time native PXE boot (unattended in CI)"
           command: |
             . .venv/bin/activate
             ansible-playbook tests/hardware/qualify_pxe.yml \
-              -i tests/hardware/inventory.yml \
+              -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} \
               -e amt_qualify_attended=false \
               -e amt_pxe_prereqs_confirmed=<< pipeline.parameters.pxe-prereqs-confirmed >> \
               -v

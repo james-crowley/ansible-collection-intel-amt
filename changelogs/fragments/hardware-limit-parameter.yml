@@ -1,0 +1,7 @@
+---
+minor_changes:
+  - "CI - add a C(hardware-limit) pipeline parameter that restricts the destructive hardware stages to a subset of the
+    rendered inventory as an Ansible C(--limit) pattern. The stage playbooks target C(hosts: amt_targets), so without it
+    a run authorised for one machine power-cycles every machine in the lab. Empty keeps the previous behaviour. The flag
+    is derived once by a shared C(export-hardware-limit) command rather than per job, so a stage cannot silently omit it
+    and widen the blast radius."
