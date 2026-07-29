@@ -147,12 +147,11 @@ this field exists to report.
   handshake but then drops a real redirection session would still show `true` here.
 - `IPS_OptInService`, which governs user consent on some AMT configurations (per
   `docs/protocol-notes.md` §2.6), is not read or reported by this module at all.
-- **Hardware-qualified: the read path against AMT 16.1.30 and 19.0.5, the mutating
-  path against 16.1.30 only.** Stage 8 ran two consecutive read-only calls against
-  both lab machines and confirmed they agreed, across two different
-  `EnabledState` values (`32769` = IDER only, `32771` = SOL+IDER). The
-  `state: ider` mutation ran on real firmware in stages 5 and 6, on the 16.1.30
-  machine alone. The `IDER`/`SOL` field-name mapping this module relies on for the
-  `supported` signal is still flagged in the
+- **Hardware-qualified against AMT 16.1.30 and 19.0.5, read path and mutating path
+  alike.** Stage 8 ran two consecutive read-only calls against both lab machines and
+  confirmed they agreed, across two different `EnabledState` values (`32769` = IDER
+  only, `32771` = SOL+IDER). The `state: ider` mutation ran on real firmware in
+  stages 5 and 6, now on both machines. The `IDER`/`SOL` field-name mapping this
+  module relies on for the `supported` signal is still flagged in the
   [Capability matrix](capability-matrix.md) — read that section before trusting
   `supported.*` against a firmware generation this collection has not seen.

@@ -186,11 +186,20 @@ produce a confusing resolution error. It echoes the interpreter it chose, so
 every job log records which one actually ran. `python3.14` is deliberately not a
 candidate: ansible-core 2.18 does not support it.
 
-**What the recorded qualification ran on.** The Tier 3 evidence in
-`docs/capability-matrix.md` was gathered on **Python 3.10 with ansible-core
-2.17**, and that record is not retroactively edited — it states the environment
-the run actually used. Do not read it as the current configuration; the two
-differ, and the next hardware run will re-record under the versions above.
+**What the recorded qualifications ran on.** The Tier 3 evidence in
+`docs/capability-matrix.md` spans two environments, and neither record is
+retroactively edited — each states the environment its run actually used:
+
+- **Machine 1 (AMT 16.1.30), 2026-07-28** — Python 3.10, ansible-core 2.17.
+- **Machine 2 (AMT 19.0.5), 2026-07-29** — Python 3.12.13, ansible-core 2.18.18,
+  the configuration described above. This was the first hardware run to reach the
+  lab at all under it: a `.circleci/config.yml` parse error meant every hardware
+  trigger since v0.1.0 errored before any job started, so nothing had exercised
+  the 3.12/2.18 path until this run.
+
+That second run **clears GHSA-w8p5-mx5w-cpqj [HIGH] for the lab runner**: the 2.17
+line it previously used is EOL and permanently affected, and the runner is now
+demonstrably executing on 2.18.18, the first release carrying the fix.
 
 The collection still supports a 3.10 controller for consumers
 (`requires_ansible: '>=2.17.0'` is unchanged, and the unit matrix still covers
@@ -216,7 +225,12 @@ it is a human cross-check performed on the output of stage 1's playbook
    BIOS inventory — this is what catches an inventory/reality mismatch before it
    becomes a reset of the wrong machine. **No playbook**: `qualify_readonly.yml`
    prints the firmware-reported UUID, and a human reviews it and records
-   `amt_expected_uuid` so every later run cross-checks it automatically.
+   `amt_expected_uuid` so every later run cross-checks it automatically. That
+   automatic comparison is live for machine 2 as of 2026-07-29 and matched. Note
+   what it can and cannot do: recorded from a value this collection observed, it
+   catches **drift** in the inventory-to-endpoint binding, not independent machine
+   identity — the human step 2 asks for is what supplies that, and the booted OS's
+   own `dmidecode -s system-uuid` is the independent source if you want one.
 3. Check-mode power and boot plans. No mutation.
 4. Attended power on/off.
 5. IDE-R attach with a small test ISO; confirm boot handoff.
@@ -242,8 +256,9 @@ on any new machine.
 Being explicit, because the gap matters:
 
 - ~~No test here proves real firmware accepts our `AMT_BootSettingData` `Put`.~~
-  **Now proven.** Stages 5 and 7 armed a one-shot boot against AMT 16.1.30, which
-  exercises the full `Put` including the field delete-list in
+  **Now proven on both lab generations.** Stages 5 and 7 armed a one-shot boot
+  against AMT 16.1.30 and, on 2026-07-29, against AMT 19.0.5 — which exercises the
+  full `Put` including the field delete-list in
   [`protocol-notes.md`](protocol-notes.md) §2.5. Retained here because the
   reasoning still holds for every *other* firmware generation, and because the
   same call did reject an empty `<Source/>` — so this firmware demonstrably
@@ -253,17 +268,17 @@ Being explicit, because the gap matters:
 - Real firmware differs across AMT generations and SKUs. Anything version
   dependent is unverified until step 1 runs on that generation.
 
-This collection is protocol-complete, test-covered, and **hardware-qualified** as
-of 2026-07-28 — precisely: **all eight stages against one AMT 16.1.30 endpoint
-(`amt-lab-01`), and the three non-mutating stages (1, 3, 8) reproduced on a second
-endpoint running AMT 19.0.5 (`amt-lab-02`)**. Machine 2's run stopped at
-`hardware-power-approval`, which was never approved, so nothing mutating has been
-exercised on it. That qualification found six defects the first two tiers could not
+This collection is protocol-complete, test-covered, and **hardware-qualified on two
+machines** — precisely: **all eight stages against AMT 16.1.30 (`amt-lab-01`,
+2026-07-28) and all eight against AMT 19.0.5 (`amt-lab-02`, 2026-07-29)**. Machine
+2's run was limited to that machine alone (`hardware-limit=amt-lab-02`), so machine
+1 was untouched by it. Qualification found six defects the first two tiers could not
 have found, which is the concrete argument for this tier existing rather than a
 theoretical one.
 
 What it still does not cover is listed as Tier 4 in
 [`capability-matrix.md`](capability-matrix.md): a non-zero IDE-R write, whether a
-PXE exchange actually occurred, AMT's internal one-shot role bit, the four
-mutating stages on any machine other than `amt-lab-01`, and any mutation at all on
-any firmware generation other than 16.1.30.
+PXE exchange actually occurred, AMT's internal one-shot role bit, the sleep and
+hibernate power actions, `amt_info`'s network and system-state facts on 16.1.30
+(read on 19.0.5 only, because machine 1 has not been re-run since v0.2.0 added
+them), and any firmware generation other than those two.

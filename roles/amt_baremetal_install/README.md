@@ -240,7 +240,8 @@ as `defaults/main.yml` sets them.
 **Both boot providers have now driven real firmware.** Hardware qualification
 stages 5 and 7 invoke this role directly via `ansible.builtin.include_role`
 (`tests/hardware/qualify_media_attach.yml` and `tests/hardware/qualify_pxe.yml`),
-and both passed against the lab's AMT 16.1.30 machine:
+and both passed against both lab machines -- AMT 16.1.30 on 2026-07-28 and AMT
+19.0.5 on 2026-07-29:
 
 | Stage | Playbook | Provider | What the role did on real hardware |
 |---|---|---|---|
@@ -267,10 +268,11 @@ with a fresh `action_token`.
 
 **What is still unverified against real hardware**, stated specifically:
 
-- **A second machine.** Stages 5 and 7 have only ever run against
-  `amt-lab-01` (AMT 16.1.30). The lab's second machine never got past the
-  read-only stages, so nothing in this role is confirmed on a second endpoint or a
-  second firmware generation -- see [`docs/capability-matrix.md`](../../docs/capability-matrix.md).
+- **A third machine, or any generation outside the lab's two.** Stages 5 and 7 have
+  now run against `amt-lab-01` (AMT 16.1.30) and `amt-lab-02` (AMT 19.0.5), so this
+  role is confirmed on a second endpoint and a second firmware generation. Two
+  generations is repeatability, not a compatibility guarantee -- see
+  [`docs/capability-matrix.md`](../../docs/capability-matrix.md).
 - **The hand-off wait.** Both hardware stages set
   `amt_baremetal_install_wait_for_handoff: false`, so the `wait_for` phase and its
   timeout behaviour have never run against a machine that actually installs an OS.

@@ -56,20 +56,21 @@ reference this implementation is built against.
 
 ## Project status
 
-**Pre-release, and now hardware-qualified.** All five modules and the bare-metal
-install role have been exercised end to end against a real Intel AMT **16.1.30**
-machine (`amt-lab-01`), on a self-hosted CircleCI runner inside the lab network,
-through all **eight** qualification stages: read-only facts, a human identity
-cross-check, check-mode plans, attended power on/off, IDE-R media attach and boot,
-a writable image, native one-time PXE, and an idempotent re-probe. (Stage 2 is the
-human cross-check and has no playbook of its own, which is why eight stages run as
+**Pre-release, and now hardware-qualified on two machines.** All five modules and
+the bare-metal install role have been exercised end to end against real Intel AMT
+firmware, on a self-hosted CircleCI runner inside the lab network, through all
+**eight** qualification stages: read-only facts, an identity cross-check,
+check-mode plans, attended power on/off, IDE-R media attach and boot, a writable
+image, native one-time PXE, and an idempotent re-probe. (Stage 2 is the
+cross-check and has no playbook of its own, which is why eight stages run as
 seven playbooks.)
 
-A **second machine** (`amt-lab-02`, AMT **19.0.5**) has reproduced the three
-non-mutating stages — read-only facts, check-mode plans, and the idempotent
-re-probe. It has **not** run the mutating ones: that run stopped at an approval
-gate that was never given, so power, media, writable-image and PXE remain a
-single-machine, single-firmware-generation result.
+All eight stages have now completed on **`amt-lab-01`, AMT 16.1.30** (2026-07-28)
+and on **`amt-lab-02`, AMT 19.0.5** (2026-07-29) — so power control, IDE-R media,
+the writable-image path and native PXE are verified on two machines across two
+firmware generations. Coverage is not identical: `amt_info`'s network and
+system-state facts came back populated on 19.0.5 and have **never been read on
+16.1.30**, because machine 1 has not been re-run since v0.2.0 added them.
 
 That qualification found six real defects that the unit and mock-integration
 tiers could not have found, including one that made IDE-R and BIOS boot
