@@ -323,14 +323,13 @@ jobs:
             COLLECTION_PATH="$(./scripts/setup-collection-tree.sh)"
             echo "export COLLECTION_PATH=${COLLECTION_PATH}" >> "$BASH_ENV"
             cd "${COLLECTION_PATH}"
-            # ansible-test exits fatally when no targets exist at all, which
-            # would hold main red while the mock fixture servers are still being
-            # built (issue #8). Skip loudly rather than failing, and drop this
-            # guard once targets land -- it becomes a no-op then anyway.
-            if ! find tests/integration/targets -mindepth 1 -maxdepth 1 -type d 2>/dev/null | read -r _; then
-              echo "WARNING: no integration targets present yet (see issue #8); skipping."
-              exit 0
-            fi
+            # No skip-guard here on purpose. There used to be one, from the era
+            # when tests/integration/targets was empty (issue #8) and a fatal
+            # "no targets" exit would have held main red. All five targets are
+            # committed now, so the guard was dead code whose only remaining
+            # effect would be to exit 0 -- green -- if the targets ever silently
+            # disappeared from the staged tree, which is precisely the failure it
+            # should report.
             ansible-test integration --venv --python 3.12 --color -v
       - collect-test-results:
           label: integration-mock
