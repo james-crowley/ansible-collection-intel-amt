@@ -343,9 +343,9 @@ def describe_event(event_sensor_type: int, event_offset: int, event_data: bytes)
     """Render a human-readable description for a record, or ``None`` if unsourced.
 
     Implements go-wsman-messages' ``decodeEventDetailString`` (Intel-authored,
-    Apache-2.0), whose outputs are asserted against real-firmware records in that
+    Apache-2.0), whose outputs are checked against real-firmware records in that
     project's own ``log_test.go`` -- which is why this collection's unit tests
-    assert the same strings for the same fixture bytes.
+    expect the same strings for the same fixture bytes.
 
     Returns ``None`` rather than a placeholder for any sensor type with no
     established description. ``None`` reads unambiguously as "this collection

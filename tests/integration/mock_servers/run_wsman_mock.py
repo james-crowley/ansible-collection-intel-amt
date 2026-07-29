@@ -21,13 +21,17 @@ stateful behaviour -- a wrong password fails digest auth on the very first reque
 within the same running instance, and `reject_boot_readonly_fields` defaults to `True`
 already.
 
-Two firmware *variations* cannot be reached that way, because they are properties of
+Some firmware *variations* cannot be reached that way, because they are properties of
 the endpoint rather than of anything a client does to it: a firmware that has no
-`AMT_EthernetPortSettings` instance 0 at all, and one whose `CIM_BIOSElement` refuses a
-bare `Get` so only `Enumerate` answers. Both are start-up flags rather than a control
-channel -- a target that needs them starts a second mock process configured that way,
-which keeps every running server's behaviour fixed for its whole lifetime and therefore
-keeps a failure attributable to one endpoint's configuration.
+`AMT_EthernetPortSettings` instance 0 at all, one whose `CIM_BIOSElement` refuses a
+bare `Get` so only `Enumerate` answers, and one with no `AMT_MessageLog` class at all.
+`--empty-message-log` is here for the same reason even though it is state rather than
+capability: an event log is emptied by `ClearLog`, so a server that starts empty is the
+only way to read an empty log *without* first destroying the records another assertion
+in the same target needs. All are start-up flags rather than a control channel -- a
+target that needs them starts a second mock process configured that way, which keeps
+every running server's behaviour fixed for its whole lifetime and therefore keeps a
+failure attributable to one endpoint's configuration.
 """
 
 from __future__ import annotations
@@ -65,6 +69,16 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Fault a bare Get CIM_BIOSElement, leaving only the Enumerate path",
     )
+    parser.add_argument(
+        "--no-message-log",
+        action="store_true",
+        help="Fault both Get and Enumerate of AMT_MessageLog, standing in for firmware with no event log",
+    )
+    parser.add_argument(
+        "--empty-message-log",
+        action="store_true",
+        help="Serve an AMT_MessageLog that exists but holds no records (PositionToFirstRecord returns 2)",
+    )
     return parser.parse_args()
 
 
@@ -83,6 +97,13 @@ def main() -> None:
     # hold for its whole lifetime rather than changing under a running client.
     server.state.ethernet_port_present = not args.no_ethernet_port
     server.faults.bios_element_get_faults = args.bios_get_faults
+    server.state.message_log_present = not args.no_message_log
+    if args.empty_message_log:
+        # An event log that exists but is empty. Distinct from --no-message-log:
+        # "the class is absent" is an unsupported_capability, while "the log holds
+        # nothing" is an ordinary successful read of zero records, and a client that
+        # conflates them reports a firmware gap where there is only a quiet machine.
+        server.state.message_log_records.clear()
     server.start()
 
     _write_json_atomic(

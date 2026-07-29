@@ -92,6 +92,7 @@ AMT_BOOT_CAPABILITIES = f"{AMT_BASE}/AMT_BootCapabilities"
 AMT_REDIRECTION_SERVICE = f"{AMT_BASE}/AMT_RedirectionService"
 AMT_GENERAL_SETTINGS = f"{AMT_BASE}/AMT_GeneralSettings"
 AMT_SETUP_AND_CONFIGURATION_SERVICE = f"{AMT_BASE}/AMT_SetupAndConfigurationService"
+AMT_MESSAGE_LOG = f"{AMT_BASE}/AMT_MessageLog"
 
 #: Fields firmware reports on Get but rejects if echoed back on Put
 #: (docs/protocol-notes.md §2.5). This is the single most important fault this
@@ -146,6 +147,71 @@ SELECTOR_MATCH_FOR_GET: dict[str, dict[str, str]] = {
 #: requiring the selector here would assert firmware behaviour nothing has
 #: observed.
 SELECTOR_REQUIRED_FOR_GET = frozenset({AMT_ETHERNET_PORT_SETTINGS})
+
+#: Method output parameters that real firmware emits **before** ``ReturnValue``.
+#:
+#: Every other method this mock serves returns ``ReturnValue`` and nothing else, so
+#: the ordering never mattered before. It matters for ``AMT_MessageLog``: the real
+#: firmware response fixtures
+#: (``go-wsman-messages``' ``pkg/wsman/wsmantesting/responses/amt/messagelog/``)
+#: put ``IterationIdentifier``, ``NoMoreRecords`` and every ``RecordArray`` element
+#: *ahead* of ``ReturnValue`` in both ``GetRecords_OUTPUT`` and
+#: ``PositionToFirstRecord_OUTPUT``. Serving our own convenient ordering instead
+#: would be the mock asserting a shape no firmware produces -- which is the exact
+#: class of bug this file's ``_boot_capabilities_items`` docstring records.
+EXTRA_BEFORE_RETURN_VALUE = frozenset(
+    {
+        (AMT_MESSAGE_LOG, "GetRecords"),
+        (AMT_MESSAGE_LOG, "PositionToFirstRecord"),
+    }
+)
+
+#: The event-log records a freshly-started mock serves, newest first (which is how
+#: AMT stores them -- go-wsman-messages' ``messagelog`` package comment: "In most
+#: implementations, log entries are stored backwards, i.e. the newest record is the
+#: first record").
+#:
+#: The first two are the **real firmware records** from
+#: ``responses/amt/messagelog/getrecords.xml``, used verbatim: they are the
+#: strongest available evidence of what a record looks like on the wire, and they
+#: contain no identifying data at all -- an event log record has no room for a
+#: hostname, address, MAC, GUID or fingerprint. The remaining four are constructed
+#: here from the documented sensor-type/entity/severity tables so the integration
+#: target can assert on the event classes this collection exists to surface
+#: (watchdog expiry, no bootable media, a firmware boot error, boot failure).
+#: Every constructed timestamp is an obviously-synthetic 2023 value.
+DEFAULT_MESSAGE_LOG_RECORDS: tuple[str, ...] = (
+    # Real firmware: sensor type 6, severity 16 (critical), entity 38 (Intel(r) ME).
+    # Decodes to "Authentication failed 10 times. The system may be under attack."
+    "Y8iYZf8GbwVoEP8mYaoKAAAAAAAA",
+    # Constructed: sensor type 18, EventData[0]=0xAA, EventData[7]=8 -> watchdog Expired.
+    "AAcBZf8SbwBoEP8mAKoBAgMEBQYI",
+    # Constructed: sensor type 30 -> "No bootable media".
+    "AQcBZf8ebwBoEP8iAAAAAAAAAAAA",
+    # Constructed: sensor type 15, offset 0, EventData[1]=8 -> "Removable boot media not found."
+    "AgcBZf8PbwBoEP8iAAAIAAAAAAAA",
+    # Constructed: sensor type 35, severity 32 (non-recoverable) -> "System boot failure".
+    "AwcBZf8jbwBoIP8iAAAAAAAAAAAA",
+    # Real firmware: sensor type 15, offset 2, entity 34 (BIOS), severity 1 (monitor).
+    # Decodes to "PCI resource configuration".
+    "IgYBZf8PbwJoAf8iAEAHAAAAAAAA",
+)
+
+#: How many records this mock returns from one ``GetRecords`` call, regardless of
+#: the client's ``MaxReadRecords``. Deliberately smaller than
+#: ``DEFAULT_MESSAGE_LOG_RECORDS`` so that following the iteration to completion is
+#: exercised over a real socket rather than only where a unit test hands back a
+#: pre-paged list. Real firmware is likewise entitled to return fewer records than
+#: asked for -- that is what ``NoMoreRecords`` is for.
+MESSAGE_LOG_BATCH_SIZE = 2
+
+#: ``AMT_MessageLog.GetRecords`` ReturnValue for "No record exists in log", and
+#: ``PositionToFirstRecord``'s for "No record exists". The two methods use
+#: *different* values for the same condition (3 and 2 respectively), per the
+#: ValueMap annotations in go-wsman-messages' ``types.go``. Serving one value for
+#: both would let a client that conflated them pass here and fail on firmware.
+GET_RECORDS_NO_RECORDS = 3
+POSITION_TO_FIRST_RECORD_NO_RECORDS = 2
 
 
 class _UnknownResource(Exception):
@@ -223,6 +289,13 @@ class AmtState:
     operational_status: list[int] = field(default_factory=lambda: [2])  # DMTF: OK
     #: CIM_BIOSElement.Version. Obviously-fake, shaped like a real Intel BIOS ID.
     bios_version: str = "EXAMPLE10H.86A.0000.2026.0101.0000"
+    #: AMT_MessageLog records, newest first, base64 as firmware sends them. Mutable:
+    #: ClearLog empties this list and a later Get observes CurrentNumberOfRecords 0,
+    #: which is what makes the clear module's before/after receipt testable end to end.
+    message_log_records: list[str] = field(default_factory=lambda: list(DEFAULT_MESSAGE_LOG_RECORDS))
+    #: Set False to make both Get and Enumerate of AMT_MessageLog fault, standing in
+    #: for firmware that does not implement the event log at all.
+    message_log_present: bool = True
 
 
 @dataclass
@@ -474,8 +547,55 @@ def _get_computer_system(state: AmtState) -> dict[str, object]:
     }
 
 
+def _get_message_log(state: AmtState) -> dict[str, object]:
+    """``AMT_MessageLog`` -- the log container, not its records.
+
+    Field set, order and values are copied from the real firmware response fixture
+    ``go-wsman-messages`` ships at
+    ``pkg/wsman/wsmantesting/responses/amt/messagelog/get.xml``, with the two
+    record counters made live so they track ``state.message_log_records``:
+
+    * ``MaxRecordSize`` is ``21`` there, independently corroborating the 21-byte
+      record struct this collection decodes.
+    * ``Capabilities`` is ``[5, 6, 8, 7]`` there, and ``6`` is
+      ``ClearLogSupported`` -- firmware stating that ``ClearLog`` is implemented.
+    * ``MaxNumberOfRecords`` is ``390`` there, which is where this collection's
+      ``MAX_READ_RECORDS`` and default ``max_records`` come from.
+
+    Deliberately served for a ``Get`` carrying **no** ``SelectorSet``, because that
+    is what the fixture is a response to, and because the instance has no
+    ``InstanceID`` property from which a selector could be built. This class is
+    therefore absent from ``SELECTOR_MATCH_FOR_GET``.
+    """
+    return {
+        "Capabilities": [5, 6, 8, 7],
+        "CharacterSet": 10,
+        "CreationClassName": "AMT_MessageLog",
+        "CurrentNumberOfRecords": len(state.message_log_records),
+        "ElementName": "Intel(r) AMT:MessageLog 1",
+        "EnabledDefault": 2,
+        "EnabledState": 2,
+        "HealthState": 5,
+        "IsFrozen": False,
+        "LastChange": 0,
+        "LogState": 4,
+        "MaxLogSize": 0,
+        "MaxNumberOfRecords": 390,
+        "MaxRecordSize": 21,
+        "Name": "Intel(r) AMT:MessageLog 1",
+        "OperationalStatus": [2],
+        "OverwritePolicy": 2,
+        "PercentageNearFull": 100,
+        "RequestedState": 12,
+        "SizeOfHeader": 0,
+        "SizeOfRecordHeader": 0,
+        "Status": "OK",
+    }
+
+
 GET_HANDLERS: dict[str, Callable[[AmtState], dict[str, object]]] = {
     CIM_ASSOCIATED_POWER_MANAGEMENT_SERVICE: _get_power,
+    AMT_MESSAGE_LOG: _get_message_log,
     AMT_BOOT_SETTING_DATA: lambda state: dict(state.boot_setting_data),
     AMT_BOOT_CAPABILITIES: _get_boot_capabilities,
     AMT_REDIRECTION_SERVICE: _get_redirection,
@@ -543,11 +663,99 @@ def _method_request_redirection_state_change(state: AmtState, body_elem: ET.Elem
     return 0, ""
 
 
+def _method_position_to_first_record(state: AmtState, _body_elem: ET.Element | None) -> tuple[int, str]:
+    """``AMT_MessageLog.PositionToFirstRecord`` -- establish an iteration.
+
+    Takes no input parameters (MeshCentral's ``AMT_MessageLog_PositionToFirstRecord``
+    passes none, and the fixture request body is an empty
+    ``PositionToFirstRecord_INPUT``). Returns ``IterationIdentifier`` 1 -- the
+    position of the first record, per go-wsman-messages' ``GetRecords`` doc comment
+    ("a numeric value (starting at 1) which is the position of the first record") --
+    and the fixture's own ``IterationIdentifier`` is likewise ``1``.
+
+    An empty log answers ``ReturnValue`` 2 ("No record exists"), **not** 3: that is
+    ``GetRecords``' value for the same condition. A client that only handles one of
+    the two must fail here rather than in production.
+    """
+    if not state.message_log_records:
+        return POSITION_TO_FIRST_RECORD_NO_RECORDS, "<r:IterationIdentifier>1</r:IterationIdentifier>"
+    return 0, "<r:IterationIdentifier>1</r:IterationIdentifier>"
+
+
+def _method_get_records(state: AmtState, body_elem: ET.Element | None) -> tuple[int, str]:
+    """``AMT_MessageLog.GetRecords`` -- one batch of base64 records.
+
+    Input is ``IterationIdentifier`` (1-based position of the first record to
+    return) and ``MaxReadRecords``. Output is ``IterationIdentifier`` (where to
+    continue from), ``NoMoreRecords``, a repeated ``RecordArray``, and
+    ``ReturnValue`` -- in that order, per ``EXTRA_BEFORE_RETURN_VALUE``.
+
+    This mock caps a batch at ``MESSAGE_LOG_BATCH_SIZE`` regardless of what the
+    client asked for, so following the iteration across several round trips is
+    actually exercised. Firmware may legitimately return fewer records than
+    requested; that is precisely why ``NoMoreRecords`` exists and why a client must
+    not infer completion from a short batch.
+
+    The next ``IterationIdentifier`` is ``identifier + len(batch)``, which is the
+    only arithmetic consistent with a 1-based position. Note the real fixture
+    returns ``3`` after serving 3 records from position 1, which does not fit that
+    rule -- so firmware's exact bookkeeping is *not* established, and a client must
+    treat the returned identifier as opaque and feed it back verbatim, which is
+    what MeshCentral does and what this collection does. This mock deliberately
+    does not reproduce the fixture's unexplained value, because doing so would bake
+    an arithmetic no client should rely on into the only place it could be relied on.
+    """
+    if not state.message_log_records:
+        return GET_RECORDS_NO_RECORDS, "<r:IterationIdentifier>1</r:IterationIdentifier><r:NoMoreRecords>true</r:NoMoreRecords>"
+
+    identifier = 1
+    raw_identifier = _child_text(body_elem, "IterationIdentifier")
+    if raw_identifier is not None:
+        try:
+            identifier = int(raw_identifier)
+        except ValueError:
+            return 2, ""  # "Invalid record pointed"
+    max_read = MESSAGE_LOG_BATCH_SIZE
+    raw_max = _child_text(body_elem, "MaxReadRecords")
+    if raw_max is not None:
+        try:
+            max_read = max(1, min(MESSAGE_LOG_BATCH_SIZE, int(raw_max)))
+        except ValueError:
+            return 2, ""
+
+    start = identifier - 1
+    if start < 0 or start >= len(state.message_log_records):
+        return 2, ""  # "Invalid record pointed"
+
+    batch = state.message_log_records[start : start + max_read]
+    next_identifier = identifier + len(batch)
+    no_more = next_identifier > len(state.message_log_records)
+    records_xml = "".join(f"<r:RecordArray>{escape(record)}</r:RecordArray>" for record in batch)
+    extra = f"<r:IterationIdentifier>{next_identifier}</r:IterationIdentifier><r:NoMoreRecords>{'true' if no_more else 'false'}</r:NoMoreRecords>{records_xml}"
+    return 0, extra
+
+
+def _method_clear_log(state: AmtState, _body_elem: ET.Element | None) -> tuple[int, str]:
+    """``AMT_MessageLog.ClearLog`` -- irreversibly empty the log.
+
+    Takes no input parameters: MeshCentral's ``AMT_MessageLog_ClearLog`` passes an
+    empty parameter object. The mutation is real, so a later
+    ``Get AMT_MessageLog`` observes ``CurrentNumberOfRecords`` 0 in the same running
+    server -- which is what lets the integration target assert the before/after
+    receipt rather than trusting ``ReturnValue`` alone.
+    """
+    state.message_log_records.clear()
+    return 0, ""
+
+
 METHOD_HANDLERS: dict[tuple[str, str], Callable[[AmtState, ET.Element | None], tuple[int, str]]] = {
     (CIM_POWER_MANAGEMENT_SERVICE, "RequestPowerStateChange"): _method_request_power_state_change,
     (CIM_BOOT_CONFIG_SETTING, "ChangeBootOrder"): _method_change_boot_order,
     (CIM_BOOT_SERVICE, "SetBootConfigRole"): _method_set_boot_config_role,
     (AMT_REDIRECTION_SERVICE, "RequestStateChange"): _method_request_redirection_state_change,
+    (AMT_MESSAGE_LOG, "PositionToFirstRecord"): _method_position_to_first_record,
+    (AMT_MESSAGE_LOG, "GetRecords"): _method_get_records,
+    (AMT_MESSAGE_LOG, "ClearLog"): _method_clear_log,
 }
 
 
@@ -607,10 +815,29 @@ def _bios_element_items(state: AmtState) -> list[str]:
     return [_fields_to_instance_xml(CIM_BIOS_ELEMENT, _get_bios_element(state))]
 
 
+def _message_log_items(state: AmtState) -> list[str]:
+    """``Enumerate`` form of ``AMT_MessageLog``, sharing ``_get_message_log``'s fields.
+
+    Both verbs are served because real firmware answers both: the fixture set at
+    ``responses/amt/messagelog/`` contains ``get.xml`` *and* ``enumerate.xml`` +
+    ``pull.xml``, all returning the same instance. That makes ``AMT_MessageLog``
+    unusual among ``AMT_``-prefixed classes, where ``Enumerate`` is HTTP 400 on
+    AMT 10 (``docs/protocol-notes.md`` §2.7).
+
+    ``plugins/module_utils/message_log.py``'s ``get_log_properties()`` tries ``Get``
+    then falls back to ``Enumerate``, and it needs both paths to be real here for
+    the same reason ``_boot_capabilities_items`` exists: a client written against
+    one verb starts failing the moment it meets firmware that only serves the other,
+    and a unit test that mocks the transport never notices.
+    """
+    return [_fields_to_instance_xml(AMT_MESSAGE_LOG, _get_message_log(state))]
+
+
 ENUMERATE_HANDLERS: dict[str, Callable[[AmtState], list[str]]] = {
     CIM_BOOT_SOURCE_SETTING: _boot_source_items,
     AMT_BOOT_CAPABILITIES: _boot_capabilities_items,
     CIM_BIOS_ELEMENT: _bios_element_items,
+    AMT_MESSAGE_LOG: _message_log_items,
 }
 
 
@@ -1012,6 +1239,9 @@ class WsmanMockServer:
         if resource_uri == CIM_BIOS_ELEMENT and self.faults.bios_element_get_faults:
             body = _fault_body("UnsupportedCapability", "CIM_BIOSElement does not answer a bare Get on this firmware")
             return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
+        if resource_uri == AMT_MESSAGE_LOG and not self.state.message_log_present:
+            body = _fault_body("InvalidResourceURI", "AMT_MessageLog is not implemented on this firmware")
+            return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
 
         fields = handler(self.state)
         body = _fields_to_instance_xml(resource_uri, fields)
@@ -1037,6 +1267,12 @@ class WsmanMockServer:
         handler = ENUMERATE_HANDLERS.get(resource_uri)
         if handler is None:
             raise _UnknownResource
+        # Absent classes must be absent for *both* verbs. Faulting only the Get
+        # would leave the Enumerate fallback answering for firmware that has no
+        # such class at all, which is the opposite of the scenario being modelled.
+        if resource_uri == AMT_MESSAGE_LOG and not self.state.message_log_present:
+            body = _fault_body("InvalidResourceURI", "AMT_MessageLog is not implemented on this firmware")
+            return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
         items = handler(self.state)
         ctx = uuid.uuid4().hex
         self._contexts[ctx] = list(items)
@@ -1078,5 +1314,9 @@ class WsmanMockServer:
             return_value, extra = return_override, ""
         else:
             return_value, extra = handler(self.state, body_elem)
-        out = f'<r:{method_name}_OUTPUT xmlns:r="{resource_uri}"><r:ReturnValue>{return_value}</r:ReturnValue>{extra}</r:{method_name}_OUTPUT>'
+        return_xml = f"<r:ReturnValue>{return_value}</r:ReturnValue>"
+        # Element order follows real firmware per resource/method -- see
+        # EXTRA_BEFORE_RETURN_VALUE.
+        inner = f"{extra}{return_xml}" if (resource_uri, method_name) in EXTRA_BEFORE_RETURN_VALUE else f"{return_xml}{extra}"
+        out = f'<r:{method_name}_OUTPUT xmlns:r="{resource_uri}">{inner}</r:{method_name}_OUTPUT>'
         return 200, _envelope(f"{resource_uri}/{method_name}Response", relates_to, out, resource_uri=resource_uri)

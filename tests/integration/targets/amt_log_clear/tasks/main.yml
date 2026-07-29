@@ -1,0 +1,344 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Drives the real amt_log_clear module against the local mock WS-Man server. The mock's
+# AmtState.message_log_records is real, mutable, cross-request state, which is what makes
+# the two properties that matter here observable rather than merely asserted about a
+# mocked object:
+#
+#   * check mode really reads the record count and really does not clear it, and
+#   * the "after" count in the receipt is observed from a fresh read, not assumed from
+#     ClearLog's ReturnValue.
+#
+# Two servers are used. The "clear" server is destroyed on purpose; the "gate" server
+# exists so the confirmation gate can be proven to leave a log with records in it
+# untouched, which is impossible to show on a server another task has already emptied.
+
+- name: Create a scratch directory for this target's runtime files
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: amt_log_clear_integration_
+  register: scratch_dir
+  delegate_to: localhost
+
+- name: Set mock-server paths for this run
+  ansible.builtin.set_fact:
+    mock_servers_dir: "{{ role_path }}/../../mock_servers"
+    clear_ready_file: "{{ scratch_dir.path }}/wsman_clear_ready.json"
+    gate_ready_file: "{{ scratch_dir.path }}/wsman_gate_ready.json"
+    absent_ready_file: "{{ scratch_dir.path }}/wsman_absent_ready.json"
+
+- name: Start the mock WS-Man server this target will clear
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ clear_ready_file }} \
+      > {{ scratch_dir.path }}/wsman_clear.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: clear_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Start a second mock WS-Man server, never cleared, for the confirmation-gate checks
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ gate_ready_file }} \
+      > {{ scratch_dir.path }}/wsman_gate.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: gate_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Start a mock WS-Man server with no AMT_MessageLog class at all
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ absent_ready_file }} \
+      --no-message-log \
+      > {{ scratch_dir.path }}/wsman_absent.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: absent_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Wait for all three mock servers to report ready
+  ansible.builtin.wait_for:
+    path: "{{ item }}"
+    state: present
+    timeout: 15
+  loop:
+    - "{{ clear_ready_file }}"
+    - "{{ gate_ready_file }}"
+    - "{{ absent_ready_file }}"
+  delegate_to: localhost
+
+- name: Read mock server connection info and pids
+  ansible.builtin.set_fact:
+    clear_info: "{{ lookup('ansible.builtin.file', clear_ready_file) | from_json }}"
+    gate_info: "{{ lookup('ansible.builtin.file', gate_ready_file) | from_json }}"
+    absent_info: "{{ lookup('ansible.builtin.file', absent_ready_file) | from_json }}"
+    clear_pid: "{{ clear_start.stdout | trim }}"
+    gate_pid: "{{ gate_start.stdout | trim }}"
+    absent_pid: "{{ absent_start.stdout | trim }}"
+
+- name: Exercise amt_log_clear against the mock servers
+  block:
+    - name: A bare invocation, with no confirmation, must refuse
+      james_crowley.intel_amt.amt_log_clear:
+        host: 127.0.0.1
+        port: "{{ gate_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: unconfirmed
+      ignore_errors: true
+
+    - name: Assert the confirmation gate refused
+      ansible.builtin.assert:
+        that:
+          - unconfirmed.failed == true
+          - unconfirmed.error_class == 'invalid_state'
+          - "'confirm_destructive' in unconfirmed.msg"
+
+    - name: The gate must also refuse in check mode
+      james_crowley.intel_amt.amt_log_clear:
+        host: 127.0.0.1
+        port: "{{ gate_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        confirm_destructive: false
+      delegate_to: localhost
+      no_log: true
+      check_mode: true
+      register: unconfirmed_check
+      ignore_errors: true
+
+    - name: Assert check mode does not bypass the confirmation gate
+      ansible.builtin.assert:
+        that:
+          - unconfirmed_check.failed == true
+          - unconfirmed_check.error_class == 'invalid_state'
+        fail_msg: >-
+          --check previews a correctly-configured play; discovering the confirmation is
+          missing only on the real run would defeat the point of the gate.
+
+    - name: Confirm the refused calls left the log completely intact
+      james_crowley.intel_amt.amt_event_log:
+        host: 127.0.0.1
+        port: "{{ gate_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: gate_log
+
+    - name: Assert nothing was destroyed by the refusals
+      ansible.builtin.assert:
+        that:
+          - gate_log.total_records == 6
+          - gate_log.records | length == 6
+
+    - name: Check mode previews the clear, reading the real record count
+      james_crowley.intel_amt.amt_log_clear:
+        host: 127.0.0.1
+        port: "{{ clear_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        confirm_destructive: true
+      delegate_to: localhost
+      no_log: true
+      check_mode: true
+      register: clear_check
+
+    - name: Assert check mode reported what would be destroyed without destroying it
+      ansible.builtin.assert:
+        that:
+          - clear_check.changed == true
+          - clear_check.cleared == false
+          - clear_check.records_before == 6
+          - clear_check.records_after is none
+          - clear_check.return_value is none
+          - clear_check.operation.previous.current_number_of_records == 6
+          - clear_check.operation.desired.current_number_of_records == 0
+          - clear_check.operation.observed is none
+        fail_msg: >-
+          Check mode must report the real record count. Exiting changed=false without
+          reading anything makes check mode useless for exactly this decision.
+
+    - name: Confirm the check-mode preview mutated nothing
+      james_crowley.intel_amt.amt_event_log:
+        host: 127.0.0.1
+        port: "{{ clear_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: still_there
+
+    - name: Assert the records survived the check-mode preview
+      ansible.builtin.assert:
+        that:
+          - still_there.total_records == 6
+          - still_there.records | length == 6
+
+    - name: Clear the event log for real
+      james_crowley.intel_amt.amt_log_clear:
+        host: 127.0.0.1
+        port: "{{ clear_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        confirm_destructive: true
+      delegate_to: localhost
+      no_log: true
+      register: cleared
+
+    - name: Assert the clear happened and the receipt records before and after
+      ansible.builtin.assert:
+        that:
+          - cleared.changed == true
+          - cleared.cleared == true
+          - cleared.return_value == 0
+          - cleared.records_before == 6
+          - cleared.records_after == 0
+          - cleared.operation.schema == 'intel-amt-operation/v1'
+          - cleared.operation.action == 'amt_log_clear.clear'
+          - cleared.operation.previous.current_number_of_records == 6
+          - cleared.operation.observed.current_number_of_records == 0
+          - cleared.operation.error_class is none
+
+    - name: Confirm the log really is empty now, read independently
+      james_crowley.intel_amt.amt_event_log:
+        host: 127.0.0.1
+        port: "{{ clear_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: after_clear
+
+    - name: Assert the records are gone and the empty read still succeeds
+      ansible.builtin.assert:
+        that:
+          - after_clear.total_records == 0
+          - after_clear.records == []
+          - after_clear.complete == true
+          - after_clear.changed == false
+
+    - name: Clearing an already-empty log is a no-op
+      james_crowley.intel_amt.amt_log_clear:
+        host: 127.0.0.1
+        port: "{{ clear_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        confirm_destructive: true
+      delegate_to: localhost
+      no_log: true
+      register: cleared_again
+
+    - name: Assert the second clear reports no change and sends nothing
+      ansible.builtin.assert:
+        that:
+          - cleared_again.changed == false
+          - cleared_again.cleared == false
+          - cleared_again.records_before == 0
+          - cleared_again.return_value is none
+
+    - name: Clear against firmware with no AMT_MessageLog class at all
+      james_crowley.intel_amt.amt_log_clear:
+        host: 127.0.0.1
+        port: "{{ absent_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        confirm_destructive: true
+      delegate_to: localhost
+      no_log: true
+      register: absent_clear
+      ignore_errors: true
+
+    - name: Assert an absent class degrades to unsupported_capability, never a traceback
+      ansible.builtin.assert:
+        that:
+          - absent_clear.failed == true
+          - absent_clear.error_class == 'unsupported_capability'
+          - absent_clear.exception is not defined
+
+    - name: Fault injection -- wrong password is refused with error_class=authentication
+      james_crowley.intel_amt.amt_log_clear:
+        host: 127.0.0.1
+        port: "{{ gate_info.port }}"
+        username: admin
+        password: definitely-the-wrong-password
+        use_tls: false
+        allow_insecure_transport: true
+        confirm_destructive: true
+      delegate_to: localhost
+      no_log: true
+      register: bad_password
+      ignore_errors: true
+
+    - name: Assert the wrong-password call failed with error_class=authentication
+      ansible.builtin.assert:
+        that:
+          - bad_password.failed == true
+          - bad_password.error_class == 'authentication'
+
+    - name: Confirm the failed-authentication attempt destroyed nothing
+      james_crowley.intel_amt.amt_event_log:
+        host: 127.0.0.1
+        port: "{{ gate_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: gate_log_final
+
+    - name: Assert the never-cleared server still holds every record
+      ansible.builtin.assert:
+        that:
+          - gate_log_final.total_records == 6
+  always:
+    - name: Stop the mock WS-Man servers
+      ansible.builtin.command: "kill {{ item }}"
+      loop:
+        - "{{ clear_pid }}"
+        - "{{ gate_pid }}"
+        - "{{ absent_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup; the assertions above are what must pass.
+      changed_when: false
+
+    - name: Remove the scratch directory
+      ansible.builtin.file:
+        path: "{{ scratch_dir.path }}"
+        state: absent
+      delegate_to: localhost

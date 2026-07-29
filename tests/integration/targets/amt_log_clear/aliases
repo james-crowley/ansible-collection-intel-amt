@@ -1,0 +1,6 @@
+# Drives the real amt_log_clear module against the local mock WS-Man server. No network
+# access and no privilege escalation. The only thing destroyed is the mock server's own
+# in-memory record list, which is the point: the before/after receipt is asserted against
+# a mutation that really happened. See docs/testing.md.
+needs/file/tests/integration/mock_servers/wsman_server.py
+needs/file/tests/integration/mock_servers/run_wsman_mock.py

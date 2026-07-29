@@ -1,0 +1,11 @@
+# Drives the real amt_event_log module against the local mock WS-Man server. No network
+# access, no privilege escalation, and no destructive action against anything -- the
+# module itself is read-only, so nothing here can mutate the mock's state. See
+# docs/testing.md.
+#
+# Three mock processes are started: a normal one holding records, one with an empty
+# AMT_MessageLog, and one with no AMT_MessageLog class at all. The latter two are
+# start-up flags rather than a control channel, because both describe what an endpoint
+# *is* -- see tests/integration/mock_servers/run_wsman_mock.py.
+needs/file/tests/integration/mock_servers/wsman_server.py
+needs/file/tests/integration/mock_servers/run_wsman_mock.py

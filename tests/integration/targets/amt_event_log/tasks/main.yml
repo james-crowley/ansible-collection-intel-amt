@@ -1,0 +1,405 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Drives the real amt_event_log module against the local mock WS-Man server, over a real
+# socket. What this tier buys over the unit tests: the mock's GetRecords batches at
+# MESSAGE_LOG_BATCH_SIZE (2) regardless of the client's MaxReadRecords, so following the
+# iteration across several round trips is exercised against a server whose response shape
+# was copied from real firmware response fixtures rather than from this module's
+# expectations. Unit tests that mock the transport cannot catch a mismatch there -- that
+# is exactly how this project previously shipped a mock implementing only `Get` for a
+# class real firmware served via `Enumerate`.
+
+- name: Create a scratch directory for this target's runtime files
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: amt_event_log_integration_
+  register: scratch_dir
+  delegate_to: localhost
+
+- name: Set mock-server paths for this run
+  ansible.builtin.set_fact:
+    mock_servers_dir: "{{ role_path }}/../../mock_servers"
+    plain_ready_file: "{{ scratch_dir.path }}/wsman_plain_ready.json"
+    tls_ready_file: "{{ scratch_dir.path }}/wsman_tls_ready.json"
+    empty_ready_file: "{{ scratch_dir.path }}/wsman_empty_ready.json"
+    absent_ready_file: "{{ scratch_dir.path }}/wsman_absent_ready.json"
+
+- name: Start the plaintext mock WS-Man server
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ plain_ready_file }} \
+      > {{ scratch_dir.path }}/wsman_plain.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: plain_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Start the TLS mock WS-Man server
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ tls_ready_file }} --use-tls \
+      > {{ scratch_dir.path }}/wsman_tls.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: tls_start
+  changed_when: false
+  delegate_to: localhost
+
+# A separate process rather than clearing the first server's log: reading an empty log
+# must be assertable without first destroying the records the assertions above need.
+- name: Start a mock WS-Man server whose event log exists but is empty
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ empty_ready_file }} \
+      --empty-message-log \
+      > {{ scratch_dir.path }}/wsman_empty.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: empty_start
+  changed_when: false
+  delegate_to: localhost
+
+# "The class is absent" is a property of the endpoint, not of anything a client does to
+# it, so it is a start-up flag. It must stay distinguishable from "the log is empty":
+# one is a firmware capability gap, the other is just a quiet machine.
+- name: Start a mock WS-Man server with no AMT_MessageLog class at all
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ absent_ready_file }} \
+      --no-message-log \
+      > {{ scratch_dir.path }}/wsman_absent.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: absent_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Wait for all four mock servers to report ready
+  ansible.builtin.wait_for:
+    path: "{{ item }}"
+    state: present
+    timeout: 15
+  loop:
+    - "{{ plain_ready_file }}"
+    - "{{ tls_ready_file }}"
+    - "{{ empty_ready_file }}"
+    - "{{ absent_ready_file }}"
+  delegate_to: localhost
+
+- name: Read mock server connection info and pids
+  ansible.builtin.set_fact:
+    plain_info: "{{ lookup('ansible.builtin.file', plain_ready_file) | from_json }}"
+    tls_info: "{{ lookup('ansible.builtin.file', tls_ready_file) | from_json }}"
+    empty_info: "{{ lookup('ansible.builtin.file', empty_ready_file) | from_json }}"
+    absent_info: "{{ lookup('ansible.builtin.file', absent_ready_file) | from_json }}"
+    plain_pid: "{{ plain_start.stdout | trim }}"
+    tls_pid: "{{ tls_start.stdout | trim }}"
+    empty_pid: "{{ empty_start.stdout | trim }}"
+    absent_pid: "{{ absent_start.stdout | trim }}"
+
+- name: Exercise amt_event_log against the mock servers
+  block:
+    - name: Read the whole event log
+      james_crowley.intel_amt.amt_event_log:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: full_read
+
+    - name: Assert the read is complete, unchanged and not truncated
+      ansible.builtin.assert:
+        that:
+          - full_read.changed == false
+          - full_read.complete == true
+          - full_read.truncated == false
+          - full_read.stop_reason == 'no_more_records'
+          - full_read.records | length == 6
+          - full_read.records_read == 6
+          - full_read.total_records == 6
+          - full_read.filtered_out == 0
+
+    - name: Assert the iteration was actually followed across several batches
+      ansible.builtin.assert:
+        that:
+          - full_read.batches == 3
+        fail_msg: >-
+          Expected 3 GetRecords round trips for 6 records at the mock's batch size of 2,
+          got {{ full_read.batches }}. One batch would mean the client stopped early --
+          the specific defect this module exists to avoid.
+
+    - name: Assert the log container properties came back
+      ansible.builtin.assert:
+        that:
+          - full_read.log.max_record_size == 21
+          - full_read.log.max_number_of_records == 390
+          - 6 in full_read.log.capabilities   # ClearLogSupported
+          - full_read.log.element_name == 'Intel(r) AMT:MessageLog 1'
+
+    - name: Assert every record carries its raw bytes alongside the decode
+      ansible.builtin.assert:
+        that:
+          - full_read.records | rejectattr('raw_base64', 'defined') | list | length == 0
+          - full_read.records | selectattr('raw_length', 'equalto', 21) | list | length == 6
+          - full_read.records | selectattr('decode_error', 'none') | list | length == 6
+
+    - name: Assert the real-firmware fixture record decoded to its known-good values
+      ansible.builtin.assert:
+        that:
+          - auth_record.timestamp == 1704511587
+          - auth_record.timestamp_utc == '2024-01-06T03:26:27Z'
+          - auth_record.event_severity == 16
+          - auth_record.event_severity_text == 'critical'
+          - auth_record.entity_text == 'Intel(r) ME'
+          - auth_record.entity_instance == 97
+          - auth_record.description == 'Authentication failed 10 times. The system may be under attack.'
+          - auth_record.raw_hex == '63c89865ff066f056810ff2661aa0a000000000000'
+      vars:
+        auth_record: "{{ full_read.records | selectattr('raw_base64', 'equalto', 'Y8iYZf8GbwVoEP8mYaoKAAAAAAAA') | first }}"
+
+    - name: Assert the events an unattended install actually needs are named
+      ansible.builtin.assert:
+        that:
+          - "'Agent watchdog 04030201-0605-... changed to Expired' in descriptions"
+          - "'No bootable media' in descriptions"
+          - "'Removable boot media not found.' in descriptions"
+          - "'System boot failure' in descriptions"
+      vars:
+        descriptions: "{{ full_read.records | map(attribute='description') | list }}"
+
+    - name: Check mode runs the identical read
+      james_crowley.intel_amt.amt_event_log:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      check_mode: true
+      register: check_read
+
+    - name: Assert check mode read the same records and changed nothing
+      ansible.builtin.assert:
+        that:
+          - check_read.changed == false
+          - check_read.records | length == 6
+          - check_read.records == full_read.records
+          - check_read.total_records == 6
+
+    - name: Confirm the check-mode read did not consume or clear the log
+      james_crowley.intel_amt.amt_event_log:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: reread
+
+    - name: Assert repeated reads are idempotent and non-consuming
+      ansible.builtin.assert:
+        that:
+          - reread.changed == false
+          - reread.total_records == 6
+          - reread.records | length == 6
+
+    - name: Read with max_records below the log size
+      james_crowley.intel_amt.amt_event_log:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        max_records: 3
+      delegate_to: localhost
+      no_log: true
+      register: truncated_read
+
+    - name: Assert truncation is reported explicitly, not returned as a silent prefix
+      ansible.builtin.assert:
+        that:
+          - truncated_read.records | length == 3
+          - truncated_read.records_read == 3
+          - truncated_read.truncated == true
+          - truncated_read.complete == false
+          - truncated_read.stop_reason == 'max_records'
+          - truncated_read.total_records == 6
+        fail_msg: >-
+          A truncated read must be distinguishable from a short log. total_records
+          ({{ truncated_read.total_records }}) is what makes that possible.
+
+    - name: Filter to the severities that indicate something went wrong
+      james_crowley.intel_amt.amt_event_log:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        severity:
+          - critical
+          - non_recoverable
+      delegate_to: localhost
+      no_log: true
+      register: severe_read
+
+    - name: Assert the filter kept only the requested severities and reported the loss
+      ansible.builtin.assert:
+        that:
+          - severe_read.records | length == 5
+          - severe_read.records_read == 6
+          - severe_read.filtered_out == 1
+          - severe_read.records | selectattr('event_severity_text', 'in', ['critical', 'non_recoverable']) | list | length == 5
+          - severe_read.total_records == 6
+          - severe_read.changed == false
+
+    - name: Read over TLS with a pinned fingerprint
+      james_crowley.intel_amt.amt_event_log:
+        host: 127.0.0.1
+        port: "{{ tls_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: true
+        tls_fingerprint: "{{ tls_info.cert_fingerprint }}"
+      delegate_to: localhost
+      no_log: true
+      register: tls_read
+
+    - name: Assert the TLS read returned the same records over a pinned connection
+      ansible.builtin.assert:
+        that:
+          - tls_read.changed == false
+          - tls_read.records | length == 6
+          - tls_read.total_records == 6
+          # The pin itself is what is being exercised: a fingerprint mismatch would have
+          # failed the task above with error_class=tls_validation before any record was read.
+          #
+          # Not asserting a specific tls_peer_fingerprint value: whether it is populated at
+          # all depends on requests/urllib3 internals (see the identical note in amt_info's
+          # and amt_boot's integration targets). This only confirms the key exists under
+          # `operation`.
+          - "'tls_peer_fingerprint' in tls_read.operation"
+
+    - name: A wrong pinned fingerprint must be refused before any record is read
+      james_crowley.intel_amt.amt_event_log:
+        host: 127.0.0.1
+        port: "{{ tls_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: true
+        tls_fingerprint: "{{ 'ab' * 32 }}"
+      delegate_to: localhost
+      no_log: true
+      register: tls_mismatch
+      ignore_errors: true
+
+    - name: Assert the fingerprint mismatch failed with error_class=tls_validation
+      ansible.builtin.assert:
+        that:
+          - tls_mismatch.failed == true
+          - tls_mismatch.error_class == 'tls_validation'
+
+    - name: Read an event log that exists but holds no records
+      james_crowley.intel_amt.amt_event_log:
+        host: 127.0.0.1
+        port: "{{ empty_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: empty_read
+
+    - name: Assert an empty log is a successful read of zero records, not a failure
+      ansible.builtin.assert:
+        that:
+          - empty_read.failed is not defined or empty_read.failed == false
+          - empty_read.changed == false
+          - empty_read.records == []
+          - empty_read.records_read == 0
+          - empty_read.total_records == 0
+          - empty_read.truncated == false
+          - empty_read.complete == true
+          - empty_read.batches == 0
+
+    - name: Read from firmware with no AMT_MessageLog class at all
+      james_crowley.intel_amt.amt_event_log:
+        host: 127.0.0.1
+        port: "{{ absent_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: absent_read
+      ignore_errors: true
+
+    - name: Assert an absent class degrades to unsupported_capability, never a traceback
+      ansible.builtin.assert:
+        that:
+          - absent_read.failed == true
+          - absent_read.error_class == 'unsupported_capability'
+          - "'AMT_MessageLog' in absent_read.msg"
+          - absent_read.exception is not defined
+        fail_msg: >-
+          Firmware without the event log must be reported as a capability gap, and must
+          stay distinguishable from the empty-log case above, which succeeds.
+
+    - name: Fault injection -- wrong password is refused with error_class=authentication
+      james_crowley.intel_amt.amt_event_log:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: definitely-the-wrong-password
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: bad_password
+      ignore_errors: true
+
+    - name: Assert the wrong-password call failed with error_class=authentication
+      ansible.builtin.assert:
+        that:
+          - bad_password.failed == true
+          - bad_password.error_class == 'authentication'
+  always:
+    - name: Stop the mock WS-Man servers
+      ansible.builtin.command: "kill {{ item }}"
+      loop:
+        - "{{ plain_pid }}"
+        - "{{ tls_pid }}"
+        - "{{ empty_pid }}"
+        - "{{ absent_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup; the assertions above are what must pass.
+      changed_when: false
+
+    - name: Remove the scratch directory
+      ansible.builtin.file:
+        path: "{{ scratch_dir.path }}"
+        state: absent
+      delegate_to: localhost
