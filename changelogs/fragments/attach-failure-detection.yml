@@ -1,0 +1,3 @@
+---
+security_fixes:
+  - "amt_media - decide attach failure from whether the session daemon is still alive, rather than from whether it managed to write an error state before the timeout. Only an explicit error state used to fail the module, so a daemon killed during the digest handshake -- which is exactly what bad credentials cause -- could fall through to a success receipt depending on timing. A failed attach reporting success is the worst available outcome for a module whose job is to serve boot media (https://github.com/james-crowley/ansible-collection-intel-amt/issues/44)."
