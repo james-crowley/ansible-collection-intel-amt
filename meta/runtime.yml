@@ -18,7 +18,9 @@ action_groups:
   #       password: "{{ amt_password }}"
   intel_amt:
     - amt_boot
+    - amt_event_log
     - amt_info
+    - amt_log_clear
     - amt_media
     - amt_power
     - amt_redirection

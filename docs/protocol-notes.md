@@ -316,12 +316,14 @@ of their ten modules report success while doing nothing, and their power constan
 `reset` to CIM code 11 (Diagnostic Interrupt / NMI) rather than 10 (Master Bus Reset).
 See `NOTICE`.
 
-**Corroborated on this collection's own hardware, on one generation.** On 2026-07-29
-every fact in this subsection came back populated from AMT **19.0.5** — so these
-property names and selectors resolve on firmware this collection can reach, not only
-on someone else's AMT 10.0.56. AMT **16.1.30** has never been asked for them. Where a
-subsection below marks something unverified, that still holds for every generation
-other than 19.0.5.
+**Corroborated on this collection's own hardware, on both generations.** Every fact in
+this subsection came back populated from AMT **19.0.5** and from AMT **16.1.30** — so
+these property names and selectors resolve on firmware this collection can reach, not
+only on someone else's AMT 10.0.56. Machine 1 (16.1.30) was re-run after v0.2.0 added
+these fields and returned every one of them populated, so the earlier note here that
+"16.1.30 has never been asked for them" is no longer true and has been removed. Where a
+subsection below marks something unverified, that still holds for every generation other
+than 16.1.30 and 19.0.5 — and AMT 10.0.56 remains third-party-reported only.
 
 #### `Enumerate` is HTTP 400 on `AMT_`-prefixed classes — use `Get` with a selector
 
@@ -467,9 +469,9 @@ element-wise: 0 unknown, 1 other, 2 OK, 3 degraded, 4 stressed, 5 predictive fai
 12 no contact, 13 lost communication, 14 aborted, 15 dormant, 16 supporting entity in
 error, 17 completed, 18 power mode, 19 relocating. Firmware reporting one value is an
 array of length one; a client that reads only the first element drops exactly the
-statuses that explain a degraded machine. **The array shape is hardware-confirmed**:
-AMT 19.0.5 returned a single-element list on 2026-07-29, not a scalar (see
-`docs/capability-matrix.md` Tier 3).
+statuses that explain a degraded machine. **The array shape is hardware-confirmed on both
+generations**: AMT 19.0.5 and AMT 16.1.30 each returned a single-element list, not a
+scalar (see `docs/capability-matrix.md` Tier 3).
 
 `RequestedState` is reported raw. AMT 10.0.56 was observed reporting `12`, which DMTF
 defines as "Not Applicable". No value table for it is claimed by this collection.
@@ -485,8 +487,8 @@ Property     Version   e.g. "EXAMPLE10H.86A.0000.2026.0101.0000"
 This was the **weakest-evidenced** item in this subsection. `parmstro`'s notes list the
 class as working on AMT 10.0.56 but record no dumped value, and their implementation
 swallows any failure to `None` — so their "it works" is not evidence either way. AMT
-19.0.5 did return a value on 2026-07-29 (`docs/capability-matrix.md` Tier 3), which
-settles the read path on that generation and nothing more. Keep the defensive shape
+19.0.5 and AMT 16.1.30 both returned a populated value (`docs/capability-matrix.md`
+Tier 3), which settles the read path on those two generations and nothing more. Keep the defensive shape
 regardless: read it through an optional-degradation path so a fault yields `null`
 rather than failing, and try `Enumerate` if a bare `Get` faults, since a class with no
 selector may require enumeration.
@@ -502,6 +504,267 @@ This is the **host BIOS** version, not the AMT firmware version.
   *controller's* own clock (`datetime.utcnow()`), which is not a fact about the endpoint
   at all. The real source would be `AMT_TimeSynchronizationService`, unverified.
 - Any write path to any class in this subsection.
+
+### 2.8 Event log — `AMT_MessageLog`
+
+Backs `amt_event_log` (read) and `amt_log_clear` (clear), implemented in
+`plugins/module_utils/message_log.py`.
+
+**Nothing in this subsection has been exercised against real firmware by this
+collection.** No hardware qualification stage covers either module. What follows is
+sourced from third-party material, and each fact below names the file — and, where one
+exists, the response fixture — that establishes it. Anything that remains inferred says
+so explicitly.
+
+#### Sources used
+
+| Short name | What it is | License |
+|---|---|---|
+| **go-wsman** | `device-management-toolkit/go-wsman-messages`, `pkg/wsman/amt/messagelog/` (`log.go`, `types.go`, `decoder.go`, `log_test.go`) | Apache-2.0, Intel-authored |
+| **fixtures** | The same repository's **real firmware response captures** at `pkg/wsman/wsmantesting/responses/amt/messagelog/` — `get.xml`, `enumerate.xml`, `pull.xml`, `getrecords.xml`, `positiontofirstrecord.xml` | Apache-2.0 |
+| **MeshCentral** | `agents/modules_meshcmd/amt.js` — the `AMT_MessageLog_*` wrappers and `GetMessageLog()` | Apache-2.0 |
+
+A **fixture** row is the strongest evidence available short of hardware: it is a captured
+firmware response, not somebody's model of one. Where go-wsman and MeshCentral agree
+*and* a fixture corroborates, the fact is treated as settled. Where the two code sources
+disagree, nothing is claimed — see "Deliberately not decoded" below.
+
+The prior art (`parmstro/intel_amt`'s `amt_event_log`) contributed **nothing** here. It
+queries `CIM_RecordLog` — the log *container* — and scans for `RecordData` elements that
+do not exist on it, so it always returns `[]` while reporting success. Its own comments
+concede it is "a framework for future enhancement", and its documented `log_type`
+parameter is absent from its code. It is not a source.
+
+#### Resource and methods
+
+```
+ResourceURI  http://intel.com/wbem/wscim/1/amt-schema/1/AMT_MessageLog
+Action       Get (no selector), falling back to Enumerate
+Methods      PositionToFirstRecord, GetRecords, ClearLog
+```
+
+| Fact | Source |
+|---|---|
+| Class is `AMT_MessageLog`, **not** `CIM_RecordLog` | fixtures (all five are `AMT_MessageLog`); go-wsman `decoder.go` `AMTMessageLog` |
+| Method names are `PositionToFirstRecord` and `GetRecords` | fixtures `positiontofirstrecord.xml`, `getrecords.xml` (both are `*_OUTPUT` responses under the `AMT_MessageLog` namespace); go-wsman `log.go` |
+| `ClearLog` exists on this class and takes **no parameters** | MeshCentral `AMT_MessageLog_ClearLog = function (callback_func) { obj.Exec("AMT_MessageLog", "ClearLog", { }, ...) }` |
+| Firmware itself advertises clear support | fixture `get.xml`: `Capabilities` includes `6`, which go-wsman `decoder.go` names `CapabilitiesClearLogSupported` |
+
+**`PositionAtRecord` and `GetRecord` (singular) also exist** — MeshCentral wraps both —
+and are deliberately **not** used. `GetRecords` (plural) is the batched form both sources
+use for a full read, and a per-record method would multiply round trips for no gain.
+
+**Why a bare `Get`, against §2.7's rule.** §2.7 requires every new `AMT_`-prefixed read to
+use `Get` with an explicit selector. That rule cannot be followed here, for an evidential
+reason rather than a stylistic one: **no source names a selector for this class.** The
+fixture `get.xml` is a response to a `Get` carrying no `SelectorSet` at all, and the
+instance it returns has no `InstanceID` property from which one could be built — its keys
+are `CreationClassName` and `Name`. Constructing `InstanceID = "Intel(r) AMT:MessageLog 1"`
+would be inventing a selector. So this follows the `CIM_BIOSElement` pattern instead:
+bare `Get`, falling back to `Enumerate`.
+
+Unusually for an `AMT_` class, **`Enumerate` is also evidenced here**: `enumerate.xml` and
+`pull.xml` exist alongside `get.xml` and return the same instance. Both verbs are
+therefore real on the generation those fixtures came from. The fallback is still worth
+having, because §2.7 records `Enumerate` as HTTP 400 on `AMT_` classes on AMT 10, so on
+that generation only the `Get` can work.
+
+#### Container properties
+
+From fixture `get.xml` (identical in `pull.xml`):
+
+| Property | Fixture value | Used for |
+|---|---|---|
+| `CurrentNumberOfRecords` | `390` | `total_records`; the clear module's before/after receipt |
+| `MaxNumberOfRecords` | `390` | Reported. Also the origin of `MAX_READ_RECORDS`/`max_records` default |
+| `MaxRecordSize` | `21` | **Independent corroboration of the 21-byte record struct** |
+| `SizeOfRecordHeader` | `0` | Records have no header — the struct starts at byte 0 |
+| `SizeOfHeader` | `0` | The log has no header either |
+| `Capabilities` | `5, 6, 8, 7` | `6` = ClearLogSupported (see above) |
+| `CharacterSet` | `10` | `OctetString` — i.e. records are binary, not text |
+| `ElementName`, `Name` | `Intel(r) AMT:MessageLog 1` | Reported |
+| `IsFrozen`, `LogState`, `OverwritePolicy` | `false`, `4`, `2` | Reported raw |
+
+`LogState` is `4` in the fixture, which is **not** in the DMTF value map go-wsman itself
+carries for it (`0` Unknown, `2` Normal, `3` Erasing, `5` NotApplicable). It is therefore
+reported as a raw integer with no name attached. Same for `OverwritePolicy`. Reporting a
+number an operator cannot interpret is the lesser error; naming it wrongly is not.
+
+#### The iteration
+
+The sequence, from MeshCentral's `GetMessageLog()`:
+
+```
+PositionToFirstRecord()                            -> IterationIdentifier
+GetRecords(IterationIdentifier, 390)               -> RecordArray[], NoMoreRecords, IterationIdentifier
+  while NoMoreRecords != true:
+    GetRecords(<returned IterationIdentifier>, 390)
+```
+
+| Fact | Source |
+|---|---|
+| `GetRecords` inputs are `IterationIdentifier` and `MaxReadRecords` | go-wsman `GetRecords_INPUT`; fixture request body in `log_test.go`: `<h:IterationIdentifier>1</h:IterationIdentifier><h:MaxReadRecords>10</h:MaxReadRecords>`; MeshCentral passes the same two |
+| `GetRecords` outputs `IterationIdentifier`, `NoMoreRecords`, repeated `RecordArray`, `ReturnValue`, **in that order** | fixture `getrecords.xml` |
+| `RecordArray` elements are base64 | go-wsman `parseEventLogResult` (`base64.StdEncoding.DecodeString`); MeshCentral `Buffer.from(ra[i], 'base64')` |
+| Iteration continues until `NoMoreRecords` is true, feeding back the returned identifier | MeshCentral `GetMessageLog`; go-wsman `log.go`: "If NoMoreRecords returns false, call this again setting the identifier to the start of the next IterationIdentifier" |
+| `PositionToFirstRecord` takes no parameters | fixture request body: empty `PositionToFirstRecord_INPUT` |
+| Identifier is 1-based | go-wsman `GetRecords` doc comment: "a numeric value (starting at 1) which is the position of the first record in the log" |
+| `MaxReadRecords` cap is 390 | go-wsman `MaxAMTRecords = 390` with the comment "Intel AMT can return 400 records in a single GetRecords call, but we limit it to 390"; MeshCentral passes `390` |
+| Log is stored **newest first** | go-wsman `messagelog` package comment: "In most implementations, log entries are stored backwards, i.e. the newest record is the first record" |
+
+**`ReturnValue` maps, from the `ValueMap`/`Values` annotations in go-wsman `types.go`:**
+
+| Method | 0 | 1 | 2 | 3 |
+|---|---|---|---|---|
+| `GetRecords` | Completed with No Error | Not Supported | Invalid record pointed | No record exists in log |
+| `PositionToFirstRecord` | Completed with No Error | Not Supported | No record exists | — |
+
+The two methods use **different values for the same condition**: an empty log is `3` from
+`GetRecords` and `2` from `PositionToFirstRecord`. Both are ordinary outcomes, not
+failures, so `message_log.py` tolerates them rather than letting `WsmanClient.invoke`'s
+non-zero-`ReturnValue` rule turn a quiet machine into a `remote_operation` error. `1`
+(Not Supported) on `PositionToFirstRecord` is escalated to `unsupported_capability`.
+
+**Inferred, not established: the returned `IterationIdentifier`'s arithmetic.** The
+fixture returns `3` after serving three records starting from position `1`, which fits no
+obvious rule (`1 + 3 = 4`). Firmware's bookkeeping is therefore *unknown*, and this
+collection treats the returned identifier as an **opaque token fed back verbatim** — which
+is what MeshCentral does, and the only approach that cannot be wrong. The mock WS-Man
+server deliberately does *not* reproduce the fixture's unexplained value, because doing so
+would bake an arithmetic no client should rely on into the one place it could be relied on.
+
+`PositionToFirstRecord` is called even though go-wsman documents it as inert on current
+firmware — "In current implementation this method doesn't have any affect. In order to get
+the events from the log user should just call GetRecord or GetRecords" — because
+MeshCentral calls it, because it is the documented way to *obtain* an identifier rather
+than assume one, and because its `ReturnValue` is an unambiguous empty-log signal.
+
+#### Record layout — 21 bytes
+
+```c
+struct {
+  UINT32 TimeStamp;        // little endian
+  UINT8  DeviceAddress;
+  UINT8  EventSensorType;
+  UINT8  EventType;
+  UINT8  EventOffset;
+  UINT8  EventSourceType;
+  UINT8  EventSeverity;
+  UINT8  SensorNumber;
+  UINT8  Entity;
+  UINT8  EntityInstance;
+  UINT8  EventData[8];
+} EVENT_DATA;                // 4 + 9 + 8 = 21
+```
+
+| Fact | Source |
+|---|---|
+| The struct, verbatim, including field order | go-wsman `log.go` package comment: "Records have no header and the record data is combined of 21 binary bytes" |
+| Same field order by index | MeshCentral: `e[4]` DeviceAddress … `e[12]` EntityInstance, then `for (j = 13; j < 21; j++)` into `EventData` |
+| Total size is 21 | fixture `get.xml` `MaxRecordSize` = `21`; every `RecordArray` element in `getrecords.xml` decodes to exactly 21 bytes |
+| Timestamp is little-endian | go-wsman `// little endian` plus `binary.LittleEndian` reads; MeshCentral `ReadIntX(e, 0)` |
+| Timestamp byte order, **arithmetically confirmed** | fixture record `Y8iYZf8GbwVoEP8mYaoKAAAAAAAA` begins `63 c8 98 65`, and go-wsman's `log_test.go` asserts `TimeStamp: 0x6598c863` for it — byte-reversed |
+
+The single-byte fields have no byte order, so only the timestamp's needed establishing.
+
+**Two independent sources agree byte-for-byte on this layout, and a real firmware record
+plus its Intel-authored expected decode confirms it.** `tests/unit/plugins/module_utils/test_message_log.py`
+asserts this collection's decode of both real fixture records against the exact values
+go-wsman's own `log_test.go` asserts, so a drift here stops agreeing with published output
+for real firmware data rather than merely failing an internal expectation.
+
+**Timestamp semantics: Unix epoch seconds, UTC** — go-wsman's `time.Unix(int64(event.TimeStamp), 0)`.
+MeshCentral instead adds the *management station's* local timezone offset before
+constructing the date, making the rendered instant depend on where the reader is sitting;
+that is a property of the reader, not the event, and is not reproduced. The raw integer is
+always returned next to the rendered form so a caller who disagrees still has the number.
+`0` and `0xFFFFFFFF` render as `null` rather than 1970 or 2106; MeshCentral drops such
+records entirely, but dropping records silently is the prior art's defect, so they are kept
+with a null timestamp.
+
+**Records are always returned raw as well as decoded** (`raw_base64`, `raw_hex`,
+`raw_length`), including records that failed to decode. This is non-negotiable: the decode
+has never met real firmware from here, so the raw bytes are the only thing that makes a
+wrong decode diagnosable rather than merely wrong. A record shorter than 21 bytes yields a
+`decode_error` and **no** decoded fields at all — a partial struct read at wrong offsets
+produces values that look real.
+
+`Capabilities` contains `8` (`VariableLengthRecordsSupported`) while `MaxRecordSize` is
+`21`, which is mildly contradictory. Nothing describes what a longer record would contain,
+so any bytes past the 21st are preserved in `raw_hex` and not guessed at.
+
+#### Value tables
+
+Both code sources carry these identically; go-wsman `decoder.go` is the transcription
+source.
+
+**`EventSeverity`** — sparse and non-contiguous, so a **lookup, not an ordered ladder**.
+`ok` (4) is numerically greater than `information` (2) without being worse, which is why
+`amt_event_log`'s `severity` option filters by *name* and never compares numerically.
+
+| 0 | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|
+| unspecified | monitor | information | ok | non_critical | critical | non_recoverable |
+
+**`Entity`** — the 53-entry IPMI-style system-entity table (`0` Unspecified … `52`
+Processor front side bus), transcribed in full into `message_log.py`'s
+`SYSTEM_ENTITY_TABLE`. Both sources list `35` **and** `38` as "Intel(r) ME"; that is not a
+transcription slip. Fixture-corroborated at two points: `Entity` `38` decodes to
+"Intel(r) ME" and `34` to "BIOS", matching the `RefinedEventData` go-wsman's own test
+asserts for those records.
+
+**Descriptions** are derived per `EventSensorType`, implementing go-wsman's
+`decodeEventDetailString`:
+
+| `EventSensorType` | Description source |
+|---|---|
+| 6 | Authentication-failure count, little-endian 16-bit in `EventData[1..2]` |
+| 15, `EventOffset == 0` | `SystemFirmwareError[EventData[1]]` (14 entries) |
+| 15, other offsets | `SystemFirmwareProgress[EventData[1]]` (26 entries) — **but see below** |
+| 15, `EventData[0] == 0xEB` | "Invalid Data" |
+| 18 | Agent watchdog: GUID prefix from `EventData[1..6]`, state from `WatchdogCurrentStates[EventData[7]]`. Gated on `EventData[0] == 0xAA` |
+| 30, 32, 35, 37 | Fixed strings: no bootable media / OS lockup or power interrupt / system boot failure / system firmware started |
+
+Any value outside a table renders as `unknown(<raw>)`, never as the table's own defined
+"Unknown" entry — "firmware said Unknown" and "we do not know what firmware said" are
+different findings and must not render identically.
+
+#### Deliberately not decoded
+
+- **`EventType`, `EventOffset`, `EventSourceType`, `DeviceAddress`, `SensorNumber`** —
+  reported as raw integers only. No value table for any of them is established by any
+  source here. MeshCentral does carry a 12-entry `_EventTrapSourceTypes` list, but real
+  firmware records show `EventSourceType == 104`, far outside it, so that list plainly
+  does not describe this field and is **not** applied. A unit test asserts no
+  `*_text` companion exists for these five, so adding one requires recording a source here
+  first.
+- **`EventSensorType == 15` at a non-zero `EventOffset` when `EventData[0] == 0xAA`** — the
+  one place the two sources **contradict** each other. go-wsman reads the
+  firmware-progress table; MeshCentral's `meshcmd` decoder treats offsets 3 and 5 with that
+  marker as One-Click-Recovery / platform-erase / OEM-specific events with an entirely
+  different layout. Two sources disagreeing is not a source, so **no description is
+  produced** for that case and the raw `EventData` is returned instead. Emitting a progress
+  string where MeshCentral says the event is a One-Click-Recovery report is exactly the
+  plausible-looking garbage worth avoiding.
+- **Sensor types MeshCentral alone decodes** (5 case intrusion, 36 packet-filter match,
+  192 SOL/IDE-R session and security policy) — single-sourced, and 36 and 192 need
+  multi-byte handle/NIC decoding that nothing corroborates. Records of those types are
+  returned with `description: null` and their raw bytes.
+- **`IPS_ProvisioningRecordLog.ClearLog`** — investigated and **not implemented**.
+  MeshCentral wraps it, but with a `_method_dummy` parameter
+  (`obj.Exec("IPS_ProvisioningRecordLog", "ClearLog", { "_method_dummy": _method_dummy })`)
+  whose type, permitted values and purpose no available source explains. There is no
+  fixture for the class anywhere in the `go-wsman-messages` response captures, and
+  `go-wsman-messages` does not implement it at all — so whether it exists on modern
+  firmware is unestablished, and its one parameter cannot be filled in without guessing.
+  It is also a *different* log (provisioning/audit history, not platform events), so it is
+  not a substitute for `AMT_MessageLog.ClearLog` and its absence costs the motivating use
+  case nothing. `AMT_AuditLog.ClearLog` and `CIM_RecordLog.ClearLog` are likewise wrapped
+  by MeshCentral and likewise out of scope here for the same reason: no fixture, different
+  log.
+- **`FreezeLog`, `CancelIteration`, `RequestStateChange`** on `AMT_MessageLog` — MeshCentral
+  wraps all three. Out of scope: nothing in the motivating use case needs them, and
+  `FreezeLog` in particular could leave an endpoint refusing log writes.
 
 ---
 

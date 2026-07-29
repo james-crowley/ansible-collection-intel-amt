@@ -13,6 +13,7 @@ endpoint on the wire, not just that its Python happens to be self-consistent.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import shutil
 import socket
@@ -31,6 +32,7 @@ from wsman_server import (
     AMT_BOOT_SETTING_DATA,
     AMT_ETHERNET_PORT_SETTINGS,
     AMT_GENERAL_SETTINGS,
+    AMT_MESSAGE_LOG,
     AMT_REDIRECTION_SERVICE,
     AMT_SETUP_AND_CONFIGURATION_SERVICE,
     CIM_ASSOCIATED_POWER_MANAGEMENT_SERVICE,
@@ -40,7 +42,9 @@ from wsman_server import (
     CIM_BOOT_SOURCE_SETTING,
     CIM_COMPUTER_SYSTEM,
     CIM_POWER_MANAGEMENT_SERVICE,
+    DEFAULT_MESSAGE_LOG_RECORDS,
     ETHERNET_PORT_0_INSTANCE_ID,
+    MESSAGE_LOG_BATCH_SIZE,
     WsmanMockServer,
 )
 
@@ -614,6 +618,132 @@ class TestFaultInjection:
         with pytest.raises(requests.exceptions.Timeout):
             _post(server, _get_xml(CIM_COMPUTER_SYSTEM), timeout=0.3)
         assert server.faults.last_timeout_body_was_read is True
+
+
+class TestMessageLog:
+    """``AMT_MessageLog``, checked against the real firmware response fixtures.
+
+    Every assertion here is about the mock matching
+    ``go-wsman-messages``' ``pkg/wsman/wsmantesting/responses/amt/messagelog/``,
+    not about matching what this collection's client happens to expect. That
+    direction matters: the bug this file's ``_boot_capabilities_items`` docstring
+    records was a mock shaped to the client instead of to firmware.
+    """
+
+    def test_get_serves_the_fixture_container_properties(self, server):
+        root = ET.fromstring(_post(server, _get_xml(AMT_MESSAGE_LOG)).content)  # noqa: S314 -- test fixture's own response
+        # MaxRecordSize == 21 in the fixture independently corroborates the
+        # 21-byte record struct the client decodes.
+        assert _find_text(root, "MaxRecordSize") == "21"
+        assert _find_text(root, "MaxNumberOfRecords") == "390"
+        assert _find_text(root, "ElementName") == "Intel(r) AMT:MessageLog 1"
+        assert _find_text(root, "CreationClassName") == "AMT_MessageLog"
+        # Capability 6 is ClearLogSupported -- firmware saying ClearLog exists.
+        assert "6" in _find_all_text(root, "Capabilities")
+
+    def test_get_needs_no_selector_because_the_fixture_response_carries_none(self, server):
+        # The fixture is a response to a Get with no SelectorSet, and the instance
+        # has no InstanceID to build one from. A mock that demanded a selector here
+        # would force the client to invent one.
+        assert _post(server, _get_xml(AMT_MESSAGE_LOG)).status_code == 200
+
+    def test_current_number_of_records_tracks_the_served_records(self, server):
+        root = ET.fromstring(_post(server, _get_xml(AMT_MESSAGE_LOG)).content)  # noqa: S314 -- test fixture's own response
+        assert _find_text(root, "CurrentNumberOfRecords") == str(len(DEFAULT_MESSAGE_LOG_RECORDS))
+
+    def test_enumerate_also_answers_with_the_same_instance(self, server):
+        # Unusually for an AMT_ class, the fixture set has enumerate.xml and
+        # pull.xml as well as get.xml, so both verbs are real here.
+        enum = ET.fromstring(_post(server, _enumerate_xml(AMT_MESSAGE_LOG)).content)  # noqa: S314 -- test fixture's own response
+        context = _find_text(enum, "EnumerationContext")
+        assert context
+        pull = ET.fromstring(_post(server, _pull_xml(AMT_MESSAGE_LOG, context)).content)  # noqa: S314 -- test fixture's own response
+        assert _find_text(pull, "MaxRecordSize") == "21"
+        assert _find_text(pull, "CreationClassName") == "AMT_MessageLog"
+
+    def test_position_to_first_record_returns_identifier_one(self, server):
+        root = ET.fromstring(_post(server, _method_xml(AMT_MESSAGE_LOG, "PositionToFirstRecord", {})).content)  # noqa: S314 -- test fixture's own response
+        assert _find_text(root, "ReturnValue") == "0"
+        assert _find_text(root, "IterationIdentifier") == "1"
+
+    def test_output_elements_precede_return_value_as_firmware_orders_them(self, server):
+        body = ET.fromstring(_post(server, _method_xml(AMT_MESSAGE_LOG, "GetRecords", {"IterationIdentifier": "1", "MaxReadRecords": "390"})).content)  # noqa: S314 -- test fixture's own response
+        output = next(elem for elem in body.iter() if elem.tag.rsplit("}", 1)[-1] == "GetRecords_OUTPUT")
+        names = [child.tag.rsplit("}", 1)[-1] for child in output]
+        # getrecords.xml order: IterationIdentifier, NoMoreRecords, RecordArray*, ReturnValue.
+        assert names[0] == "IterationIdentifier"
+        assert names[1] == "NoMoreRecords"
+        assert names[-1] == "ReturnValue"
+        assert "RecordArray" in names
+
+    def test_get_records_pages_and_never_returns_more_than_asked_for(self, server):
+        root = ET.fromstring(_post(server, _method_xml(AMT_MESSAGE_LOG, "GetRecords", {"IterationIdentifier": "1", "MaxReadRecords": "390"})).content)  # noqa: S314 -- test fixture's own response
+        records = _find_all_text(root, "RecordArray")
+        # Firmware may return fewer records than requested; that is what
+        # NoMoreRecords is for, and a client must not infer completion from a
+        # short batch.
+        assert len(records) == MESSAGE_LOG_BATCH_SIZE
+        assert _find_text(root, "NoMoreRecords") == "false"
+        assert records == list(DEFAULT_MESSAGE_LOG_RECORDS[:MESSAGE_LOG_BATCH_SIZE])
+
+    def test_following_the_iteration_yields_every_record_exactly_once(self, server):
+        seen: list[str] = []
+        identifier = "1"
+        for _unused in range(20):  # bounded: a stalled iterator must fail the test, not hang it
+            root = ET.fromstring(  # noqa: S314 -- test fixture's own response
+                _post(server, _method_xml(AMT_MESSAGE_LOG, "GetRecords", {"IterationIdentifier": identifier, "MaxReadRecords": "390"})).content
+            )
+            assert _find_text(root, "ReturnValue") == "0"
+            seen.extend(_find_all_text(root, "RecordArray"))
+            if _find_text(root, "NoMoreRecords") == "true":
+                break
+            identifier = _find_text(root, "IterationIdentifier")
+        assert seen == list(DEFAULT_MESSAGE_LOG_RECORDS)
+
+    def test_records_decode_to_twenty_one_bytes(self, server):
+        root = ET.fromstring(_post(server, _method_xml(AMT_MESSAGE_LOG, "GetRecords", {"IterationIdentifier": "1", "MaxReadRecords": "390"})).content)  # noqa: S314 -- test fixture's own response
+        for encoded in _find_all_text(root, "RecordArray"):
+            assert len(base64.b64decode(encoded, validate=True)) == 21
+
+    def test_an_identifier_past_the_end_is_invalid_record_pointed(self, server):
+        root = ET.fromstring(_post(server, _method_xml(AMT_MESSAGE_LOG, "GetRecords", {"IterationIdentifier": "9999", "MaxReadRecords": "10"})).content)  # noqa: S314 -- test fixture's own response
+        assert _find_text(root, "ReturnValue") == "2"
+
+    def test_empty_log_uses_a_different_return_value_per_method(self, server):
+        server.state.message_log_records.clear()
+        position = ET.fromstring(_post(server, _method_xml(AMT_MESSAGE_LOG, "PositionToFirstRecord", {})).content)  # noqa: S314 -- test fixture's own response
+        get_records = ET.fromstring(_post(server, _method_xml(AMT_MESSAGE_LOG, "GetRecords", {"IterationIdentifier": "1", "MaxReadRecords": "10"})).content)  # noqa: S314 -- test fixture's own response
+        # 2 for PositionToFirstRecord, 3 for GetRecords -- the same condition,
+        # different values, per the ValueMap annotations. A client that conflated
+        # them must fail here rather than on real firmware.
+        assert _find_text(position, "ReturnValue") == "2"
+        assert _find_text(get_records, "ReturnValue") == "3"
+
+    def test_clear_log_takes_no_parameters_and_is_observed_by_a_later_get(self, server):
+        cleared = ET.fromstring(_post(server, _method_xml(AMT_MESSAGE_LOG, "ClearLog", {})).content)  # noqa: S314 -- test fixture's own response
+        assert _find_text(cleared, "ReturnValue") == "0"
+        after = ET.fromstring(_post(server, _get_xml(AMT_MESSAGE_LOG)).content)  # noqa: S314 -- test fixture's own response
+        assert _find_text(after, "CurrentNumberOfRecords") == "0"
+        records = ET.fromstring(_post(server, _method_xml(AMT_MESSAGE_LOG, "GetRecords", {"IterationIdentifier": "1", "MaxReadRecords": "10"})).content)  # noqa: S314 -- test fixture's own response
+        assert _find_all_text(records, "RecordArray") == []
+
+    def test_an_absent_class_faults_for_both_get_and_enumerate(self, server):
+        server.state.message_log_present = False
+        assert _post(server, _get_xml(AMT_MESSAGE_LOG)).status_code == 500
+        # Faulting only the Get would leave the client's Enumerate fallback
+        # answering for firmware that has no such class at all.
+        assert _post(server, _enumerate_xml(AMT_MESSAGE_LOG)).status_code == 500
+
+    def test_no_record_carries_identifying_data(self, server):
+        """Every served record is 21 bytes of event data and nothing else.
+
+        An event log record has no field that could hold a hostname, address, MAC,
+        GUID or fingerprint -- but the two records taken verbatim from the upstream
+        firmware fixture are third-party data, so this asserts the whole corpus is
+        the size it claims to be rather than trusting that.
+        """
+        for encoded in DEFAULT_MESSAGE_LOG_RECORDS:
+            assert len(base64.b64decode(encoded, validate=True)) == 21
 
 
 class TestCleanShutdown:
