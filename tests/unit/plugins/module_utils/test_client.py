@@ -12,7 +12,6 @@ from ansible_collections.james_crowley.intel_amt.plugins.module_utils.client imp
     AmtClient,
     PowerAction,
     _canonical_uuid,
-    _truthy,
 )
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import (
     ProtocolError,
@@ -49,12 +48,6 @@ def _client(wsman: Mock, **kwargs) -> AmtClient:
     kwargs.setdefault("poll_delay", 0)
     kwargs.setdefault("sleep", lambda _seconds: None)
     return AmtClient(wsman, **kwargs)
-
-
-class TestTruthy:
-    @pytest.mark.parametrize("value,expected", [("true", True), ("false", False), ("1", True), ("0", False), (True, True), (False, False), (None, False)])
-    def test_wsman_boolean_text_is_interpreted(self, value, expected):
-        assert _truthy(value) is expected
 
 
 class TestGetPowerState:
@@ -107,7 +100,15 @@ class TestGetFacts:
 
     def _full_response_map(self) -> dict:
         return {
-            "AMT_GeneralSettings": {"HostName": "amt-host-07", "DomainName": "lab.example.com"},
+            "AMT_GeneralSettings": {
+                "HostName": "amt-host-07",
+                "DomainName": "lab.example.invalid",
+                "IdleWakeTimeout": "1",
+                "PingResponseEnabled": "true",
+                "RmcpPingResponseEnabled": "true",
+                "NetworkInterfaceEnabled": "true",
+                "DDNSUpdateEnabled": "false",
+            },
             "AMT_SetupAndConfigurationService": {"ProvisioningState": "2", "ProvisioningMode": "1"},
             # PlatformGUID lives on CIM_ComputerSystemPackage. CIM_ComputerSystem
             # has no UUID property at all, which is why reading it there returned
@@ -116,12 +117,50 @@ class TestGetFacts:
             "CIM_AssociatedPowerManagementService": {"PowerState": "2"},
             "AMT_BootCapabilities": {"IDER": "true", "SOL": "true", "ForcePXEBoot": "true"},
             "AMT_RedirectionService": {"EnabledState": "32771", "ListenerEnabled": "true"},
+            "AMT_EthernetPortSettings": {
+                "MACAddress": "00-00-5e-00-53-01",
+                "IPAddress": "192.0.2.10",
+                "SubnetMask": "255.255.255.0",
+                "DefaultGateway": "192.0.2.1",
+                "PrimaryDNS": "192.0.2.2",
+                "SecondaryDNS": "192.0.2.3",
+                "DHCPEnabled": "false",
+                "LinkIsUp": "true",
+                "IpSyncEnabled": "false",
+                "LinkPolicy": ["1", "14", "16"],
+            },
+            "CIM_ComputerSystem": {
+                "ElementName": "ManagedSystem",
+                "Name": "ManagedSystem",
+                "EnabledState": "2",
+                "RequestedState": "12",
+                "OperationalStatus": ["2"],
+            },
+            "CIM_BIOSElement": {"Version": "EXAMPLE10H.86A.0000.2026.0101.0000"},
         }
+
+    @staticmethod
+    def _responder(responses: dict):
+        """A ``wsman.get`` stand-in that ignores selectors and reports absent classes as faults.
+
+        Selectors are asserted separately (see :class:`TestNewFactSelectors`);
+        here the point is only which class was asked for. A class missing from the
+        map raises the same degradable error real firmware sends for a class it
+        does not implement, so the map doubles as the "which classes exist"
+        fixture rather than a KeyError.
+        """
+
+        def _get(resource_class, **_kwargs):
+            if resource_class not in responses:
+                raise ProtocolError(f"{resource_class}: SOAP Fault code=wsman:InvalidResourceURI", endpoint="10.0.0.5:16993")
+            return responses[resource_class]
+
+        return _get
 
     def test_full_firmware_response_yields_complete_facts(self):
         wsman = _fake_wsman()
         responses = self._full_response_map()
-        wsman.get.side_effect = lambda resource_class: responses[resource_class]
+        wsman.get.side_effect = self._responder(responses)
         wsman.enumerate.side_effect = lambda resource_class, **kwargs: self._SOFTWARE_IDENTITY if resource_class == "CIM_SoftwareIdentity" else []
         client = _client(wsman)
 
@@ -140,19 +179,26 @@ class TestGetFacts:
         assert facts.redirection.ider_enabled is True
         assert facts.redirection.sol_enabled is True
 
-    @pytest.mark.parametrize("missing_class", ["AMT_BootCapabilities", "AMT_RedirectionService", "AMT_GeneralSettings", "AMT_SetupAndConfigurationService"])
+    @pytest.mark.parametrize(
+        "missing_class",
+        [
+            "AMT_BootCapabilities",
+            "AMT_RedirectionService",
+            "AMT_GeneralSettings",
+            "AMT_SetupAndConfigurationService",
+            "AMT_EthernetPortSettings",
+            "CIM_ComputerSystem",
+            "CIM_BIOSElement",
+        ],
+    )
     def test_a_single_missing_optional_class_degrades_gracefully(self, missing_class):
         # "Tolerate a firmware that omits optional classes -- a missing optional
         # class must degrade a capability to false/unknown, not fail the whole read."
         wsman = _fake_wsman()
         responses = self._full_response_map()
+        responses.pop(missing_class)
 
-        def _get(resource_class):
-            if resource_class == missing_class:
-                raise ProtocolError(f"{resource_class}: SOAP Fault code=wsman:InvalidResourceURI", endpoint="10.0.0.5:16993")
-            return responses[resource_class]
-
-        wsman.get.side_effect = _get
+        wsman.get.side_effect = self._responder(responses)
         client = _client(wsman)
 
         facts = client.get_facts()  # must not raise
@@ -165,9 +211,23 @@ class TestGetFacts:
             assert facts.redirection is None
         if missing_class == "AMT_GeneralSettings":
             assert facts.reported_hostname is None
+            assert facts.reported_domain_name is None
+            assert facts.idle_wake_timeout is None
+            assert facts.ping_response_enabled is None
+            assert facts.rmcp_ping_response_enabled is None
+            assert facts.network_interface_enabled is None
+            assert facts.ddns_update_enabled is None
         if missing_class == "AMT_SetupAndConfigurationService":
             assert facts.provisioning_state is None
             assert facts.control_mode is None
+        if missing_class == "AMT_EthernetPortSettings":
+            assert facts.network is None
+        if missing_class == "CIM_ComputerSystem":
+            assert facts.system_state is None
+        if missing_class == "CIM_BIOSElement":
+            # The Enumerate fallback is stubbed to return nothing here, so the
+            # whole path degrades to null rather than failing the module.
+            assert facts.bios_version is None
         # Unrelated facts still come through -- one absent class must not
         # blank out everything else.
         assert facts.power_state.normalized == "on"
@@ -176,7 +236,7 @@ class TestGetFacts:
         wsman = _fake_wsman()
         responses = self._full_response_map()
 
-        def _get(resource_class):
+        def _get(resource_class, **_kwargs):
             if resource_class == "AMT_BootCapabilities":
                 raise UnsupportedCapabilityError("not implemented", endpoint="10.0.0.5:16993")
             return responses[resource_class]
@@ -209,6 +269,165 @@ class TestGetFacts:
 
         with pytest.raises(TimeoutError_):
             client.get_facts()
+
+    def test_general_settings_fields_come_from_the_instance_already_being_read(self):
+        # The whole justification for these six fields is that they cost nothing:
+        # AMT_GeneralSettings was already read for HostName. If this ever starts
+        # reading the class twice, that justification is gone.
+        wsman = _fake_wsman()
+        wsman.get.side_effect = self._responder(self._full_response_map())
+        facts = _client(wsman).get_facts()
+
+        general_reads = [call for call in wsman.get.call_args_list if call.args[0] == "AMT_GeneralSettings"]
+        assert len(general_reads) == 1
+        assert facts.reported_hostname == "amt-host-07"
+        assert facts.reported_domain_name == "lab.example.invalid"
+        assert facts.idle_wake_timeout == 1
+        assert facts.ping_response_enabled is True
+        assert facts.rmcp_ping_response_enabled is True
+        assert facts.network_interface_enabled is True
+        assert facts.ddns_update_enabled is False
+
+    def test_ethernet_and_system_state_are_parsed_end_to_end(self):
+        wsman = _fake_wsman()
+        wsman.get.side_effect = self._responder(self._full_response_map())
+        facts = _client(wsman).get_facts()
+
+        assert facts.network.mac_address == "00:00:5e:00:53:01"
+        assert facts.network.mac_address_raw == "00-00-5e-00-53-01"
+        assert facts.network.ip_address == "192.0.2.10"
+        assert facts.network.dhcp_enabled is False
+        assert facts.network.link_is_up is True
+        assert facts.network.ip_sync_enabled is False
+        assert facts.network.link_policy == [1, 14, 16]
+        assert facts.network.wake_on_lan_capable is True
+        assert facts.system_state.element_name == "ManagedSystem"
+        assert facts.system_state.enabled_state == 2
+        assert facts.system_state.enabled_state_text == "enabled"
+        assert facts.system_state.requested_state == 12
+        assert facts.system_state.operational_status == [2]
+        assert facts.system_state.operational_status_text == ["ok"]
+        assert facts.bios_version == "EXAMPLE10H.86A.0000.2026.0101.0000"
+
+
+class TestNewFactSelectors:
+    """The new AMT_-prefixed and CIM_ComputerSystem reads must use Get + an exact selector.
+
+    On AMT 10, ``Enumerate`` returns HTTP 400 for ``AMT_EthernetPortSettings``,
+    ``AMT_GeneralSettings``, ``AMT_BootCapabilities``, ``AMT_BootSettingData`` and
+    ``AMT_TLSSettingData``, while a ``Get`` with an exact selector works
+    (``parmstro``, hardware-verified on 10.0.56; docs/protocol-notes.md §2.7).
+    This collection's habit elsewhere is enumerate-first, so the selector is
+    asserted rather than assumed.
+    """
+
+    @staticmethod
+    def _calls_for(wsman: Mock, resource_class: str) -> list:
+        return [call for call in wsman.get.call_args_list if call.args[0] == resource_class]
+
+    def test_ethernet_port_settings_is_read_by_get_with_the_instance_0_selector(self):
+        wsman = _fake_wsman()
+        wsman.get.return_value = {}
+        _client(wsman).get_facts()
+
+        calls = self._calls_for(wsman, "AMT_EthernetPortSettings")
+        assert len(calls) == 1
+        assert calls[0].kwargs["selectors"] == {"InstanceID": "Intel(r) AMT Ethernet Port Settings 0"}
+
+    def test_ethernet_port_settings_is_never_enumerated(self):
+        wsman = _fake_wsman()
+        wsman.get.return_value = {}
+        _client(wsman).get_facts()
+
+        enumerated = [call.args[0] for call in wsman.enumerate.call_args_list]
+        assert "AMT_EthernetPortSettings" not in enumerated
+
+    def test_computer_system_is_read_with_the_managed_system_selector(self):
+        wsman = _fake_wsman()
+        wsman.get.return_value = {}
+        _client(wsman).get_facts()
+
+        calls = self._calls_for(wsman, "CIM_ComputerSystem")
+        assert len(calls) == 1
+        assert calls[0].kwargs["selectors"] == {"Name": "ManagedSystem"}
+
+    def test_computer_system_is_not_read_for_a_uuid(self):
+        # Regression guard for the original defect: CIM_ComputerSystem has no UUID
+        # property, and reintroducing this read must not reintroduce that mistake.
+        wsman = _fake_wsman()
+        wsman.get.side_effect = lambda rc, **_kw: {"UUID": "should-never-be-used", "PlatformGUID": "ALSO-NOT-FROM-HERE"} if rc == "CIM_ComputerSystem" else {}
+        facts = _client(wsman).get_facts()
+
+        assert facts.uuid is None
+        assert facts.system_state is not None
+
+
+class TestBiosVersionSource:
+    """``CIM_BIOSElement.Version`` -- the weakest-evidenced fact this client reads.
+
+    ``parmstro``'s notes claim the class works on AMT 10.0.56 but record no dumped
+    value, and their implementation swallows failures to ``None``, so their "pass"
+    proves nothing. It is therefore read optionally, with an ``Enumerate``
+    fallback for the case where a class with no selector needs enumerating.
+    """
+
+    def test_bare_get_is_tried_first(self):
+        wsman = _fake_wsman()
+        wsman.get.side_effect = lambda rc, **_kw: {"Version": "EXAMPLE10H.86A.0000.2026.0101.0000"} if rc == "CIM_BIOSElement" else {}
+
+        assert _client(wsman).get_facts().bios_version == "EXAMPLE10H.86A.0000.2026.0101.0000"
+        # No enumeration needed when the Get answered.
+        assert "CIM_BIOSElement" not in [call.args[0] for call in wsman.enumerate.call_args_list]
+
+    def test_get_is_called_without_a_selector(self):
+        # The class has no documented instance key; inventing one would fault on
+        # firmware that does answer the bare Get.
+        wsman = _fake_wsman()
+        wsman.get.return_value = {}
+        _client(wsman).get_facts()
+
+        calls = [call for call in wsman.get.call_args_list if call.args[0] == "CIM_BIOSElement"]
+        assert len(calls) == 1
+        assert calls[0].kwargs.get("selectors") is None
+
+    @staticmethod
+    def _wsman_whose_bios_get_faults() -> Mock:
+        wsman = _fake_wsman()
+
+        def _get(resource_class, **_kwargs):
+            if resource_class == "CIM_BIOSElement":
+                raise ProtocolError("SOAP Fault code=wsman:InvalidSelectors", endpoint="10.0.0.5:16993")
+            return {}
+
+        wsman.get.side_effect = _get
+        return wsman
+
+    def test_enumerate_fallback_when_the_bare_get_faults(self):
+        wsman = self._wsman_whose_bios_get_faults()
+        wsman.enumerate.side_effect = lambda rc, **_kw: [{"Version": "EXAMPLE20H.86A.0001.2026.0202.0000"}] if rc == "CIM_BIOSElement" else []
+
+        assert _client(wsman).get_facts().bios_version == "EXAMPLE20H.86A.0001.2026.0202.0000"
+
+    def test_both_verbs_failing_degrades_to_none_without_failing_the_read(self):
+        wsman = self._wsman_whose_bios_get_faults()
+        wsman.enumerate.side_effect = ProtocolError("nope either", endpoint="10.0.0.5:16993")
+
+        facts = _client(wsman).get_facts()
+        assert facts.bios_version is None
+        assert facts.capabilities is not None  # the rest of the read still happened
+
+    def test_non_dict_enumeration_entries_are_skipped(self):
+        wsman = self._wsman_whose_bios_get_faults()
+        wsman.enumerate.side_effect = lambda rc, **_kw: [None, "junk", {"Version": "EXAMPLE30H.86A.0002.2026.0303.0000"}] if rc == "CIM_BIOSElement" else []
+
+        assert _client(wsman).get_facts().bios_version == "EXAMPLE30H.86A.0002.2026.0303.0000"
+
+    def test_empty_version_property_degrades_to_none(self):
+        wsman = _fake_wsman()
+        wsman.get.side_effect = lambda rc, **_kw: {"Version": "   "} if rc == "CIM_BIOSElement" else {}
+        wsman.enumerate.return_value = []
+
+        assert _client(wsman).get_facts().bios_version is None
 
 
 class TestRequestPowerState:
