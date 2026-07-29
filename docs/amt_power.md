@@ -150,7 +150,12 @@ turn a successful request into a reported failure — see
 - `delegate_to: localhost` does not protect against inventory fan-out: a play over
   ten hosts still issues ten resets. Constrain the **play** with `serial: 1` and an
   explicit single-target selection — `serial` cannot be set on a task.
-- Hardware-unverified — see the [Capability matrix](capability-matrix.md). The action
-  codes are "as used by MeshCmd, verified against firmware" per
-  `docs/protocol-notes.md` §2.4, but this collection's own implementation of them has
-  not been re-verified against real AMT hardware.
+- **Hardware-qualified against AMT 16.1.30 only.** Stage 4 exercised this module
+  against real firmware: convergent `on` reported `changed: false` on an
+  already-on machine, `off` reported `changed: true`, and the starting state was
+  restored afterwards; stages 5 and 7 issued real resets. Check-mode power plans
+  were additionally computed against an AMT 19.0.5 endpoint in stage 3, without
+  mutating it. So the action codes — "as used by MeshCmd, verified against
+  firmware" per `docs/protocol-notes.md` §2.4 — are now confirmed as this
+  collection implements them, on one firmware generation, and remain unverified on
+  every other. See the [Capability matrix](capability-matrix.md).
