@@ -12,18 +12,25 @@ SPDX-License-Identifier: GPL-3.0-or-later
      v2 no longer returns JSON for this path, so shields.io rendered "resource
      not found" against it. Verified against a published collection before use.
 
-     The CircleCI badge reports live status again. That works only while
-     CircleCI's "Free and Open Source" project flag is ON, which makes build logs
-     and artifacts publicly readable. It was briefly off because the hardware
-     qualification jobs store evidence artifacts carrying lab machine
-     identifiers; those platform GUIDs are now held as values in the
-     `amt-lab-runner` context, and CircleCI masks context values wherever they
-     appear in log output, so they are censored rather than kept private by
-     hiding the whole build. If the OSS flag is ever turned off again this badge
-     will 404 for anonymous visitors and must go back to a static one -- a
-     status-scoped `circle-token` is not an option, because GitHub push
+     The CircleCI badge is STATIC again, and the reason is worth recording so it
+     does not get "fixed" back and forth. A live dl.circleci.com badge 404s for
+     anonymous visitors unless the project's "Free and Open Source" flag is on,
+     and that flag makes build logs AND artifacts world readable.
+
+     Logs are fine: lab values are held as amt-lab-runner context values and
+     CircleCI masks context values in log output. Artifacts were NOT fine --
+     store_artifacts content is written verbatim, and the hardware evidence files
+     carried the endpoint address, gateway, MAC, DNS, management domain, platform
+     GUID and username. tests/hardware/redact-evidence.py now fixes that for every
+     future run.
+
+     What still blocks turning the flag back on is history, not code: artifacts
+     from hardware runs that predate the redactor are unredacted, still within
+     CircleCI's retention window, and there is no supported way to delete them.
+     Once they age out, the flag can go back on and this can return to a live
+     badge. A status-scoped circle-token is not an alternative -- GitHub push
      protection correctly classifies it as a secret. -->
-[![Galaxy](https://img.shields.io/badge/dynamic/json?label=galaxy&query=%24.highest_version.version&url=https%3A%2F%2Fgalaxy.ansible.com%2Fapi%2Fv3%2Fplugin%2Fansible%2Fcontent%2Fpublished%2Fcollections%2Findex%2Fjames_crowley%2Fintel_amt%2F&color=blue)](https://galaxy.ansible.com/ui/repo/published/james_crowley/intel_amt/) [![CircleCI](https://dl.circleci.com/status-badge/img/gh/james-crowley/ansible-collection-intel-amt/tree/main.svg?style=shield)](https://dl.circleci.com/status-badge/redirect/gh/james-crowley/ansible-collection-intel-amt/tree/main) [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE) [![ansible-core](https://img.shields.io/badge/ansible--core-%3E%3D2.17-blue.svg)](https://docs.ansible.com/) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/) [![Status: pre-release](https://img.shields.io/badge/status-pre--release-orange.svg)](#project-status)
+[![Galaxy](https://img.shields.io/badge/dynamic/json?label=galaxy&query=%24.highest_version.version&url=https%3A%2F%2Fgalaxy.ansible.com%2Fapi%2Fv3%2Fplugin%2Fansible%2Fcontent%2Fpublished%2Fcollections%2Findex%2Fjames_crowley%2Fintel_amt%2F&color=blue)](https://galaxy.ansible.com/ui/repo/published/james_crowley/intel_amt/) [![CI: CircleCI](https://img.shields.io/badge/CI-CircleCI-343434?logo=circleci&logoColor=white)](https://app.circleci.com/pipelines/github/james-crowley/ansible-collection-intel-amt) [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE) [![ansible-core](https://img.shields.io/badge/ansible--core-%3E%3D2.17-blue.svg)](https://docs.ansible.com/) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/) [![Status: pre-release](https://img.shields.io/badge/status-pre--release-orange.svg)](#project-status)
 
 Out-of-band management of **Intel AMT / vPro** machines from Ansible — power
 control, one-time boot selection, redirection state, and **native IDE-R virtual

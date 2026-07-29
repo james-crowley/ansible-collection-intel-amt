@@ -58,7 +58,8 @@ commands:
       Turn the hardware-limit pipeline parameter into an ANSIBLE_LIMIT_FLAG the
       stage steps interpolate. Kept as one command so every stage derives the flag
       identically -- a stage that forgot it would silently widen the blast radius
-      of a run authorised for one machine.
+      of a run authorised for one machine. Note it restricts ALL stages, not only
+      the destructive ones: the read-only stages honour it too.
     steps:
       - run:
           name: Resolve the inventory limit for this run
@@ -66,10 +67,10 @@ commands:
             limit='<< pipeline.parameters.hardware-limit >>'
             if [ -n "${limit}" ]; then
               echo "export ANSIBLE_LIMIT_FLAG='--limit ${limit}'" >> "$BASH_ENV"
-              echo "Destructive stages restricted to: ${limit}"
+              echo "All hardware stages restricted to: ${limit}"
             else
               echo "export ANSIBLE_LIMIT_FLAG=''" >> "$BASH_ENV"
-              echo "No hardware-limit set; stages target every host in amt_targets."
+              echo "No hardware-limit set; every stage targets every host in amt_targets."
             fi
 
   install-ansible:
@@ -627,8 +628,13 @@ jobs:
               -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -v
       - redact-hardware-evidence
       - store_artifacts:
+          # Runs on failure too -- a failed stage is exactly when the evidence
+          # matters, and note-recovery-path-on-failure below already tells the
+          # operator it was published. Safe because redact-hardware-evidence
+          # above also runs when: always, so nothing unredacted is ever stored.
           path: tests/hardware/output
           destination: hardware-evidence
+          when: always
       - remove-lab-inventory
       - note-recovery-path-on-failure
 
@@ -657,8 +663,13 @@ jobs:
               -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -e amt_qualify_attended=false -v
       - redact-hardware-evidence
       - store_artifacts:
+          # Runs on failure too -- a failed stage is exactly when the evidence
+          # matters, and note-recovery-path-on-failure below already tells the
+          # operator it was published. Safe because redact-hardware-evidence
+          # above also runs when: always, so nothing unredacted is ever stored.
           path: tests/hardware/output
           destination: hardware-evidence
+          when: always
       - remove-lab-inventory
       - note-recovery-path-on-failure
 
@@ -689,8 +700,13 @@ jobs:
               -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -e amt_qualify_attended=false -v
       - redact-hardware-evidence
       - store_artifacts:
+          # Runs on failure too -- a failed stage is exactly when the evidence
+          # matters, and note-recovery-path-on-failure below already tells the
+          # operator it was published. Safe because redact-hardware-evidence
+          # above also runs when: always, so nothing unredacted is ever stored.
           path: tests/hardware/output
           destination: hardware-evidence
+          when: always
       - remove-lab-inventory
       - note-recovery-path-on-failure
 
@@ -723,8 +739,13 @@ jobs:
               -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -e amt_qualify_attended=false -v
       - redact-hardware-evidence
       - store_artifacts:
+          # Runs on failure too -- a failed stage is exactly when the evidence
+          # matters, and note-recovery-path-on-failure below already tells the
+          # operator it was published. Safe because redact-hardware-evidence
+          # above also runs when: always, so nothing unredacted is ever stored.
           path: tests/hardware/output
           destination: hardware-evidence
+          when: always
       - remove-lab-inventory
       - note-recovery-path-on-failure
 
@@ -765,8 +786,13 @@ jobs:
               -v
       - redact-hardware-evidence
       - store_artifacts:
+          # Runs on failure too -- a failed stage is exactly when the evidence
+          # matters, and note-recovery-path-on-failure below already tells the
+          # operator it was published. Safe because redact-hardware-evidence
+          # above also runs when: always, so nothing unredacted is ever stored.
           path: tests/hardware/output
           destination: hardware-evidence
+          when: always
       - remove-lab-inventory
       - note-recovery-path-on-failure
 
