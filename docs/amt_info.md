@@ -116,9 +116,8 @@ populated with something invented for a module that has no mutation to describe.
 ### `wake_on_lan_capable`: what both lab machines actually reported
 
 `wake_on_lan_capable` is derived, not read: it is `true` only when
-`AMT_EthernetPortSettings.LinkPolicy` contains `16`, the value AMT documents as
-"network link always on". **Both** lab machines report it `false`, and they agree on
-why:
+`AMT_EthernetPortSettings.LinkPolicy` contains `16`. **Both** lab machines report it
+`false`, and they agree on why:
 
 | | 16.1.30 (machine 1) | 19.0.5 (machine 2) |
 |---|---|---|
@@ -130,6 +129,27 @@ why:
 `s0_ac` and `s0_dc` are both **S0** policies — S0 is the powered-on ACPI state — one
 for AC power and one for battery. Read literally, that is AMT keeping its network
 link up only while the host is already running.
+
+> **The raw values are hardware fact; the value table interpreting them is not.**
+> That both machines return `[1, 14]` is measured. The mapping of `1`, `14` and `16`
+> to those meanings comes from `parmstro`'s constants table, corroborated by a single
+> dump of *their* machine showing `[1, 14, 16]` — see `docs/protocol-notes.md` §2.7.
+> No Intel documentation for this enum has been read directly, so the table is Tier 1
+> only in the weak sense of "a third party's hardware", not "a vendor reference".
+>
+> There is a specific reason to hold it loosely. Intel's own AMT documentation states
+> that after network access is activated, the power policy is set to
+> *"ON in S0, ME Wake in S3, S4-5"* — a wake-capable policy — which does not sit
+> comfortably beside an S0-only `LinkPolicy` on two freshly provisioned machines. Note
+> also that `LinkPolicy` governs whether the network **link** is maintained, while the
+> MEBx setting `Intel ME ON in Host Sleep States` governs whether the **ME itself** is
+> powered; these interact but are not the same field, and this collection reads only
+> the former.
+>
+> **Before acting on a `false` here, confirm it out of band**: the AMT Web UI's
+> *Power Policies* page, or Intel Manageability Commander's `Power Policy` row, both
+> report the active policy without a reboot. If those disagree with this field, the
+> value table above is what is wrong, not the firmware.
 
 **Why this is the field to check first when a power-on fails.** If that reading holds
 in practice, `amt_power state=on` against a genuinely powered-off endpoint cannot
