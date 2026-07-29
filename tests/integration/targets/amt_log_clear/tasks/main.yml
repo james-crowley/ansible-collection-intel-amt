@@ -283,12 +283,18 @@
       register: absent_clear
       ignore_errors: true
 
-    - name: Assert an absent class degrades to unsupported_capability, never a traceback
+    # See the long comment on the equivalent assertion in the amt_event_log target.
+    # Short version: `exception is not defined` is NOT a valid way to assert "no
+    # traceback" -- ansible-core 2.19's controller adds that key to every failed result
+    # regardless of the module. `error_class` is what proves the failure was routed
+    # through errors.py, since a crashing module returns no `error_class` at all.
+    - name: Assert an absent class degrades to unsupported_capability, never a crash
       ansible.builtin.assert:
         that:
           - absent_clear.failed == true
           - absent_clear.error_class == 'unsupported_capability'
-          - absent_clear.exception is not defined
+          - "'AMT_MessageLog' in absent_clear.msg"
+          - "'MODULE FAILURE' not in absent_clear.msg"
 
     - name: Fault injection -- wrong password is refused with error_class=authentication
       james_crowley.intel_amt.amt_log_clear:

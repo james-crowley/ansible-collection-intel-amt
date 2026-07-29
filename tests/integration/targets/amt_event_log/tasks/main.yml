@@ -357,13 +357,34 @@
       register: absent_read
       ignore_errors: true
 
-    - name: Assert an absent class degrades to unsupported_capability, never a traceback
+    # `error_class` is the load-bearing assertion here, and it is worth saying why,
+    # because the obvious-looking alternative is wrong.
+    #
+    # Do NOT assert `absent_read.exception is not defined` as a way to say "no
+    # traceback". On ansible-core 2.19 the *controller* adds an `exception` key to
+    # every failed task result as part of its structured-error plumbing, independently
+    # of the module; under ansible-test's default ANSIBLE_DISPLAY_TRACEBACK=never its
+    # value is the literal string "(traceback unavailable)". The key's presence
+    # therefore says nothing about whether the module crashed. That assertion passed on
+    # 2.17 (where the key is only added at -vvv) and failed on 2.19 -- which is exactly
+    # how it went green locally and red in CI, whose integration job pins 2.19.
+    #
+    # What does distinguish the two, verified by deliberately raising an unhandled
+    # ValueError inside get_log_properties() on 2.19: a crashing module returns a
+    # result whose keys are only [changed, exception, failed, msg] -- no `error_class`
+    # at all -- while a clean classified failure carries `error_class` because it was
+    # routed through errors.py's to_result(). Note that on 2.19 a crash produces
+    # neither "MODULE FAILURE" nor module_stdout/module_stderr, so asserting on those
+    # would be vacuous; `error_class` is the check with teeth. The
+    # "MODULE FAILURE" check is kept only because it does have teeth on the 2.17/2.18
+    # cores the sanity and units matrices also cover.
+    - name: Assert an absent class degrades to unsupported_capability, never a crash
       ansible.builtin.assert:
         that:
           - absent_read.failed == true
           - absent_read.error_class == 'unsupported_capability'
           - "'AMT_MessageLog' in absent_read.msg"
-          - absent_read.exception is not defined
+          - "'MODULE FAILURE' not in absent_read.msg"
         fail_msg: >-
           Firmware without the event log must be reported as a capability gap, and must
           stay distinguishable from the empty-log case above, which succeeds.

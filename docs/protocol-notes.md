@@ -316,12 +316,14 @@ of their ten modules report success while doing nothing, and their power constan
 `reset` to CIM code 11 (Diagnostic Interrupt / NMI) rather than 10 (Master Bus Reset).
 See `NOTICE`.
 
-**Corroborated on this collection's own hardware, on one generation.** On 2026-07-29
-every fact in this subsection came back populated from AMT **19.0.5** — so these
-property names and selectors resolve on firmware this collection can reach, not only
-on someone else's AMT 10.0.56. AMT **16.1.30** has never been asked for them. Where a
-subsection below marks something unverified, that still holds for every generation
-other than 19.0.5.
+**Corroborated on this collection's own hardware, on both generations.** Every fact in
+this subsection came back populated from AMT **19.0.5** and from AMT **16.1.30** — so
+these property names and selectors resolve on firmware this collection can reach, not
+only on someone else's AMT 10.0.56. Machine 1 (16.1.30) was re-run after v0.2.0 added
+these fields and returned every one of them populated, so the earlier note here that
+"16.1.30 has never been asked for them" is no longer true and has been removed. Where a
+subsection below marks something unverified, that still holds for every generation other
+than 16.1.30 and 19.0.5 — and AMT 10.0.56 remains third-party-reported only.
 
 #### `Enumerate` is HTTP 400 on `AMT_`-prefixed classes — use `Get` with a selector
 
@@ -467,9 +469,9 @@ element-wise: 0 unknown, 1 other, 2 OK, 3 degraded, 4 stressed, 5 predictive fai
 12 no contact, 13 lost communication, 14 aborted, 15 dormant, 16 supporting entity in
 error, 17 completed, 18 power mode, 19 relocating. Firmware reporting one value is an
 array of length one; a client that reads only the first element drops exactly the
-statuses that explain a degraded machine. **The array shape is hardware-confirmed**:
-AMT 19.0.5 returned a single-element list on 2026-07-29, not a scalar (see
-`docs/capability-matrix.md` Tier 3).
+statuses that explain a degraded machine. **The array shape is hardware-confirmed on both
+generations**: AMT 19.0.5 and AMT 16.1.30 each returned a single-element list, not a
+scalar (see `docs/capability-matrix.md` Tier 3).
 
 `RequestedState` is reported raw. AMT 10.0.56 was observed reporting `12`, which DMTF
 defines as "Not Applicable". No value table for it is claimed by this collection.
@@ -485,8 +487,8 @@ Property     Version   e.g. "EXAMPLE10H.86A.0000.2026.0101.0000"
 This was the **weakest-evidenced** item in this subsection. `parmstro`'s notes list the
 class as working on AMT 10.0.56 but record no dumped value, and their implementation
 swallows any failure to `None` — so their "it works" is not evidence either way. AMT
-19.0.5 did return a value on 2026-07-29 (`docs/capability-matrix.md` Tier 3), which
-settles the read path on that generation and nothing more. Keep the defensive shape
+19.0.5 and AMT 16.1.30 both returned a populated value (`docs/capability-matrix.md`
+Tier 3), which settles the read path on those two generations and nothing more. Keep the defensive shape
 regardless: read it through an optional-degradation path so a fault yields `null`
 rather than failing, and try `Enumerate` if a bare `Get` faults, since a class with no
 selector may require enumeration.
