@@ -269,7 +269,7 @@ amt:
             RV(amt.network.link_policy) decoded, element-wise, into
             V(s0_ac)/V(sx_ac)/V(s0_dc)/V(sx_dc). Only those four values are defined
             by Intel; anything else renders as V(unknown(<raw>)) rather than being
-            dropped. B(Changed in 0.4.0) -- V(14) now correctly decodes to V(sx_ac)
+            dropped. B(Changed in 0.3.1) -- V(14) now correctly decodes to V(sx_ac)
             and V(16) to V(s0_dc), and V(always_on) is gone.
           type: list
           elements: str
@@ -283,7 +283,7 @@ amt:
             with C(state=on) fails there in a way that looks like a network fault
             rather than a configuration one. V(null) when C(LinkPolicy) was not
             reported at all -- unknown is not the same finding as V(false).
-            B(Changed in 0.4.0) -- 0.2.0 and 0.3.0 keyed this off V(16), which is
+            B(Changed in 0.3.1) -- 0.2.0 and 0.3.0 keyed this off V(16), which is
             in fact "S0 DC", and so returned the inverse answer on mains-powered
             hardware. The name is kept for compatibility even though it reads only
             C(LinkPolicy) and not AMT's wake settings.

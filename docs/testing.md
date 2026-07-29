@@ -40,6 +40,30 @@ ansible-test sanity --venv --python 3.12
 ansible-test units  --venv --python 3.12
 ```
 
+### What the CI matrix actually covers
+
+It is **not** the full cross product of three ansible-core versions and four
+Pythons. Writing it down because "2.17/2.18/2.19 × 3.10-3.13" is the obvious
+shorthand and it would overstate coverage by half:
+
+| Job | Python | ansible-core | Cells |
+|---|---|---|---|
+| `sanity` | 3.12 only | 2.17, 2.18, 2.19 | **3** |
+| `units` | 3.10, 3.11, 3.12, 3.13 | 2.17, 2.19 | **6** after excludes |
+
+The `units` excludes are both forced by upstream support ranges, not choice:
+3.13 has no ansible-core 2.17 cell (3.13 controller support arrived in 2.18), and
+3.10 has no 2.19 cell (2.19 requires 3.11+). That leaves six of the eight
+combinations.
+
+**ansible-core 2.18 has no unit-test cell at all.** It is covered by `sanity`
+across all three core versions, and by the hardware jobs, which pin
+`ansible-core~=2.18.18` in the lab virtualenv (see "Runner Python version"
+below) — so 2.18 is the version the hardware tier actually executes on, while
+the unit tier brackets it from either side. That is a real gap in unit
+coverage, and it is a deliberate cost/coverage trade rather than an oversight:
+adding 2.18 to `units` would take the matrix from six cells to nine or ten.
+
 ### Why `--venv` and not `--docker`
 
 `ansible-test --docker` needs to bind-mount the collection source tree into its
@@ -282,11 +306,18 @@ Being explicit, because the gap matters:
   misunderstanding between implementation and mock passes both.
 - Real firmware differs across AMT generations and SKUs. Anything version
   dependent is unverified until step 1 runs on that generation.
+- **Nothing in the hardware tier covers `amt_event_log` or `amt_log_clear`.** Five
+  of the collection's seven modules are hardware-qualified; those two are not, on
+  any generation. The eight stages predate both modules and none was extended to
+  reach them, so their `AMT_MessageLog` iteration, record decode and `ClearLog`
+  invocation rest entirely on the unit and mock tiers plus a captured firmware
+  fixture. See Tier 4 in [`capability-matrix.md`](capability-matrix.md).
 
 This collection is protocol-complete, test-covered, and **hardware-qualified on two
-machines** — precisely: **all eight stages against AMT 16.1.30 (`amt-lab-01`,
-2026-07-28) and all eight against AMT 19.0.5 (`amt-lab-02`, 2026-07-29)**, each run
-limited to the machine it qualified (`hardware-limit`), so neither touched the other.
+machines for five of its seven modules** — precisely: **all eight stages against AMT
+16.1.30 (`amt-lab-01`, 2026-07-28) and all eight against AMT 19.0.5 (`amt-lab-02`,
+2026-07-29)**, each run limited to the machine it qualified (`hardware-limit`), so
+neither touched the other.
 A read-only re-run against machine 1 on 2026-07-29 then read that machine with
 v0.2.0's fact code, which closed the last coverage difference between the two:
 `amt_info`'s network and system-state facts are now confirmed populated on both

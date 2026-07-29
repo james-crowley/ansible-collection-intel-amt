@@ -230,6 +230,14 @@ leak this script exists to prevent.
 
 ## The staged plan, and why it never runs in parallel
 
+**What the stages do not cover: `amt_event_log` and `amt_log_clear`.** These stages
+exercise five of the collection's seven modules. Both event-log modules were added
+after the plan below was written and no stage was extended to reach them, so neither
+has ever run against real firmware. A read-only `amt_event_log` stage would be a
+natural addition to stage 1; an `amt_log_clear` stage destroys the very evidence the
+other stages produce and would need its own approval gate alongside stages 4-7. Until
+one exists, do not read a green hardware run as saying anything about either module.
+
 There are **eight numbered stages** and **seven playbooks**: stage 2 has no
 playbook of its own, because it is a human cross-check performed on stage 1's
 output rather than anything Ansible can assert unaided. Each stage is a gate on

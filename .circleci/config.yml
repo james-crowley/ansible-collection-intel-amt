@@ -580,9 +580,22 @@ jobs:
   # builds, which matters if this repository is ever made public.
   #
   # This job is READ-ONLY and check-mode only. It never mutates power or boot
-  # state. The destructive stages (attended power cycling, media attach, writable
-  # image, native PXE) are separate playbooks under tests/hardware/ and are run
-  # deliberately by a human, not wired into CI.
+  # state: it runs stages 1, 3 and 8 only.
+  #
+  # The destructive stages ARE wired into CI, contrary to what this comment used
+  # to say. Stages 4-7 run as four separate jobs defined below -- hardware-power,
+  # hardware-media, hardware-writable and hardware-pxe -- each carrying the same
+  # five controls listed above PLUS its own dedicated approval job
+  # (hardware-power-approval, hardware-media-approval, hardware-writable-approval,
+  # hardware-pxe-approval). They form a strict escalation chain: each job requires
+  # the approval before it, and each approval requires the preceding hardware job
+  # to have passed, so reaching native PXE takes five separate human approvals and
+  # cannot skip a rung. Deliberately not one approval covering all four -- an
+  # operator approving a power cycle has not thereby approved a reimage.
+  #
+  # So "run deliberately by a human" is still true and is what the approval gates
+  # enforce; "not wired into CI" was simply stale. See the per-job comments below
+  # and the hardware workflow at the end of this file.
   hardware-tests:
     machine: true
     resource_class: crowley/amt-runner

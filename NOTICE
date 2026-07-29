@@ -75,10 +75,30 @@ behaviour were reimplemented in Python from these sources.
    AMT 10.0.56 build 3002. NO CODE was taken. Every implementation in this
    collection was written from the protocol facts, and that distinction is
    deliberate: that project's module code and user-facing documentation were
-   assessed as unreliable (several of its modules report success while
-   performing no operation, and its power-action constants map "reset" to CIM
-   code 11, Diagnostic Interrupt/NMI, rather than 10, Master Bus Reset). Its
-   research notes are the trustworthy artefact; its code is not.
+   assessed as unreliable. Specifically, and stated no more strongly than can
+   be verified from its source:
+
+     - amt_tls_config reports success while performing no operation. Both
+       mutation paths are wrapped in `except Exception` handlers that append an
+       advisory message and fall through to exit_json(), so any failure still
+       exits ok. Its upload_certificate is a self-described placeholder that
+       base64-encodes the certificate text and computes a key_b64 it never
+       uses, silently discarding the private key.
+     - amt_system_settings_refactored.py returns changed: False on
+       module.check_mode before reading or comparing any current state, so
+       --check can never report drift.
+     - amt_power_policy does issue real Puts, but with inverted semantics: it
+       treats `16 in LinkPolicy` as "always_on" and derives wake_on_lan from
+       it, when 16 means "available on S0 DC" -- powered on, on battery. See
+       the LinkPolicy note below.
+     - its power-action constants map "reset" to CIM code 11, Diagnostic
+       Interrupt/NMI, rather than 10, Master Bus Reset.
+
+   An earlier version of this file said "several of its modules report success
+   while performing no operation". Exactly one does; the others are different
+   defects. The narrower statement above is the accurate one.
+
+   Its research notes are the trustworthy artefact; its code is not.
 
    WHAT WAS TAKEN AND LATER REVERSED: their AMT_EthernetPortSettings LinkPolicy
    value table (1: s0_ac, 2: sx_ac, 14: s0_dc, 15: sx_dc, 16: always_on). This
@@ -86,7 +106,7 @@ behaviour were reimplemented in Python from these sources.
    enum, 14 is "available on Sx AC" (not S0 DC), 16 is "available on S0 DC"
    (not an "always on" bit -- no such value exists), 2 and 15 are not defined
    values at all, and 224 ("available on Sx DC") is missing. The table was
-   replaced in 0.4.0 with the vendor one; see attribution 4 below.
+   replaced in 0.3.1 with the vendor one; see attribution 4 below.
 
    That makes this the SECOND wrong table from this source, after the power
    constants noted above. Their dumped property values and class/selector
@@ -96,6 +116,12 @@ behaviour were reimplemented in Python from these sources.
    this collection cited their machine returning [1, 14, 16] as corroboration
    for the table, which it never was. Do not adopt a third value table from
    this source without checking it against a vendor reference first.
+
+   AND SAID PLAINLY: this collection shipped that same wrong table, from that
+   same source, for two releases before fixing it. The defect is what happens
+   when an enumeration's MEANING is taken from a transcription rather than from
+   the vendor enum -- not something peculiar to the upstream project. It is
+   recorded here as a shared error that was corrected here, not as an accusation.
 
    Specifically derived, per file:
      - plugins/module_utils/models.py -- the AMT_GeneralSettings,
@@ -171,3 +197,56 @@ behaviour were reimplemented in Python from these sources.
    NOTE ON LICENSE COMPATIBILITY: as with MeshCentral above, Apache-2.0 is
    one-way compatible with GPLv3. Nothing here is a code derivation in any
    case; the facts consulted are enumeration values and property names.
+
+================================================================================
+Prior art NOT consulted
+================================================================================
+
+This section exists because the rest of this file claims per-file provenance,
+and a provenance claim is only as good as its omissions. The following is
+genuine prior art for the hardest part of this collection -- the IDE-R
+redirection plane -- and it was NOT used. It was identified after the fact,
+during a documentation-integrity review, and is recorded here rather than left
+out.
+
+--------------------------------------------------------------------------------
+5. kraxel/amtterm -- amtider
+--------------------------------------------------------------------------------
+   Copyright (C) 2022 Hannes Reinecke <hare@suse.de> (amtider.c)
+   Maintainer: Gerd Hoffmann (kraxel)
+   License: GNU General Public License v2.0 or later
+   Source: https://github.com/kraxel/amtterm
+
+   WHAT THIS IS: amtider is a standalone, self-contained Intel AMT IDE-R
+   client written in C -- it presents a local image file to a remote AMT
+   machine as a virtual floppy or CD-ROM, which is the same job
+   plugins/module_utils/ider.py does. It is, as far as this review found, the
+   only standalone IDE-R implementation outside MeshCentral/MeshCmd. It ships
+   in the amtterm source tree alongside amtterm (SOL), sharing redir.c, auth.c,
+   ssl.c and ider.c, and has been built unconditionally since amtterm 1.7
+   (GNUmakefile: `TARGETS := amtterm amtider`, unlike gamt which is
+   conditional). Current release is 1.8 (tag amtterm-1.8-1, 2026-05-04), and
+   TLS fixes for Intel ME 16 -- which no longer accepts non-SSL connections to
+   the SOL/IDER port -- landed in 2026.
+
+   WHAT WAS TAKEN FROM IT: NOTHING. No code, no protocol fact, no byte array,
+   no state-machine behaviour. This collection's IDE-R implementation was
+   reimplemented from MeshCentral (attribution 1 above), and every protocol
+   claim in docs/protocol-notes.md sections 3 and 4 cites MeshCentral or a
+   firmware fixture. The evidence that it genuinely was not used, rather than
+   used and uncredited: the strings "amtider", "amtterm" and "kraxel" appear
+   nowhere in this repository's source, documentation or git history prior to
+   this section being added. Discovering an independent implementation after the
+   fact neither validates nor invalidates this one.
+
+   WHY IT IS RECORDED ANYWAY: README.md previously implied that no standalone
+   IDE-R client existed -- that serving boot media is "why most automation
+   shells out to MeshCmd (Node.js)". That framing was wrong by omission, and
+   omitting the one genuine prior-art standalone IDE-R implementation is the
+   most damaging possible gap in a document whose selling point is per-file
+   provenance. The novelty claim in README.md has been narrowed accordingly.
+
+   NOTE ON LICENSE: GPL-2.0-or-later is compatible with this collection's
+   GPL-3.0-or-later, so reuse would have been permissible. It simply did not
+   happen. Anyone wanting to build on amtider should take it from upstream
+   under its own terms, not from here.
