@@ -489,3 +489,76 @@ class TestTrustPolicyIsScopedToAttach:
             amt_media.main()
         assert excinfo.value.kwargs["error_class"] == "tls_validation"
         assert "ca_path" in excinfo.value.kwargs["msg"]
+
+
+class TestAttachFailureIsDecidedByDaemonLiveness:
+    """A dead daemon that never reported 'attached' must fail the module.
+
+    Regression test for issue #44. Only an explicit ERROR state used to fail the
+    attach, so a daemon that died without writing one -- or had not written it yet
+    when attach_timeout expired -- fell through to a success receipt. Bad
+    credentials kill the daemon during the digest handshake, so whether the module
+    noticed was a race, and the wrong-password integration assertion flaked green
+    roughly one run in three.
+
+    Liveness is the unambiguous signal, so these tests pin it rather than the
+    timing.
+    """
+
+    def _run_attach(self, monkeypatch, runtime_dir, floppy_image, *, waited_state, pid_alive):
+        media_session._write_state_atomic(runtime_dir, "sess-x", waited_state) if waited_state else None
+        monkeypatch.setattr(media_session, "spawn_session", lambda *a, **k: 4242)
+        monkeypatch.setattr(media_session, "wait_for_state", lambda *a, **k: waited_state)
+        monkeypatch.setattr(media_session, "is_pid_alive", lambda pid: pid_alive)
+        monkeypatch.setattr(media_session, "read_state", lambda *a, **k: waited_state)
+        _set_module_args(_attach_args(runtime_dir=runtime_dir, floppy_image=floppy_image))
+        with pytest.raises(AnsibleFailJson) as excinfo:
+            amt_media.main()
+        return excinfo.value.kwargs
+
+    def test_dead_daemon_with_no_error_state_fails(self, monkeypatch, runtime_dir, floppy_image):
+        # The exact shape that used to slip through: an intermediate state, no
+        # error recorded, and a daemon that is already gone.
+        result = self._run_attach(
+            monkeypatch,
+            runtime_dir,
+            floppy_image,
+            waited_state={"session_id": "sess-x", "state": media_session.STATE_CONNECTING, "pid": 4242},
+            pid_alive=False,
+        )
+        assert "exited without reporting" in result["msg"]
+        assert result["error_class"]
+
+    def test_dead_daemon_with_a_late_error_reports_that_error(self, monkeypatch, runtime_dir, floppy_image):
+        result = self._run_attach(
+            monkeypatch,
+            runtime_dir,
+            floppy_image,
+            waited_state={
+                "session_id": "sess-x",
+                "state": media_session.STATE_ERROR,
+                "pid": 4242,
+                "error": "AMT rejected the credentials",
+                "error_class": "authentication",
+            },
+            pid_alive=False,
+        )
+        assert "AMT rejected the credentials" in result["msg"]
+        assert result["error_class"] == "authentication"
+
+    def test_absent_state_with_dead_daemon_fails(self, monkeypatch, runtime_dir, floppy_image):
+        result = self._run_attach(monkeypatch, runtime_dir, floppy_image, waited_state=None, pid_alive=False)
+        assert "exited without reporting" in result["msg"]
+
+    def test_live_daemon_still_starting_is_not_failed(self, monkeypatch, runtime_dir, floppy_image):
+        # The legitimate slow-attach case must keep working: a daemon that is still
+        # running simply has not finished yet, and failing it would make this fix a
+        # different bug.
+        monkeypatch.setattr(media_session, "spawn_session", lambda *a, **k: 4242)
+        state = {"session_id": "sess-y", "state": media_session.STATE_ATTACHED, "pid": 4242, "devices": {}, "error": None, "tls_peer_fingerprint": None}
+        monkeypatch.setattr(media_session, "wait_for_state", lambda *a, **k: state)
+        monkeypatch.setattr(media_session, "is_pid_alive", lambda pid: True)
+        _set_module_args(_attach_args(runtime_dir=runtime_dir, floppy_image=floppy_image))
+        with pytest.raises(AnsibleExitJson) as excinfo:
+            amt_media.main()
+        assert excinfo.value.kwargs["session_state"] == media_session.STATE_ATTACHED

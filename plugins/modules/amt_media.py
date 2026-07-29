@@ -607,6 +607,44 @@ def _attach(module: AnsibleModule, params: dict, *, endpoint: str, port: int) ->
             **fields,
         )
 
+    # Anything short of ATTACHED is decided by whether the daemon is still alive,
+    # not by which of two events happened first.
+    #
+    # Previously only an explicit ERROR state failed the module. A daemon that died
+    # without writing one -- or that had not written it yet when attach_timeout
+    # expired -- left an intermediate or absent state, skipped the branch above, and
+    # fell through to building a success receipt. So a genuinely failed attach could
+    # report success depending on timing. That is how the wrong-password integration
+    # assertion came to flake (issue #44): bad credentials kill the daemon during the
+    # digest handshake, and whether we noticed was a race.
+    #
+    # Liveness is the unambiguous signal, and media_session already tracks a pid for
+    # stale-session recovery. If the daemon is gone and never reported ATTACHED, the
+    # attach failed regardless of who won.
+    if fields["session_state"] != media_session.STATE_ATTACHED:
+        pid = (observed or {}).get("pid")
+        if not media_session.is_pid_alive(pid):
+            # Re-read once: the daemon may have written its error between the last
+            # poll and now, and a specific error_class is far more useful to a
+            # caller than a generic failure.
+            final = media_session.read_state(runtime_dir, session_id) or observed
+            final_fields = _status_fields(final)
+            reported = final_fields.get("error") or fields.get("error")
+            module.fail_json(
+                msg=(
+                    f"amt_media attach failed: {reported}"
+                    if reported
+                    else (
+                        "amt_media attach failed: the session process exited without reporting "
+                        f"'attached' (last observed state {final_fields['session_state']!r}). "
+                        "Check the AMT credentials and that the redirection port is reachable."
+                    )
+                ),
+                error_class=_error_class_of(final),
+                session_id=session_id,
+                **final_fields,
+            )
+
     receipt = OperationReceipt(
         action="amt_media.attach",
         endpoint=endpoint,
