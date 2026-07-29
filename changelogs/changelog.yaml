@@ -480,3 +480,142 @@ releases:
       name: amt_redirection
       namespace: ''
     release_date: '2026-07-28'
+  0.2.0:
+    changes:
+      bugfixes:
+      - amt_power - a new test asserts that every C(state) choice except V(query)
+        has an entry in both the action map and the expected-state map, and that the
+        module's copy of the expected-state map agrees with the client's. The first
+        guards the defect being fixed here -- three actions implemented but not reachable
+        -- and the second guards check mode previewing a different outcome than a
+        real run would produce.
+      minor_changes:
+      - amt_info - derive C(amt.network.wake_on_lan_capable) from whether C(LinkPolicy)
+        contains V(16) (network link always on), and report C(link_policy_names) decoded
+        alongside the raw list. An endpoint without V(16) does not answer WS-Man while
+        powered off, so C(amt_power) with C(state=on) fails there looking exactly
+        like a network fault; surfacing it read-only turns that into a diagnosis.
+        V(null), not V(false), when C(LinkPolicy) is absent.
+      - amt_info - normalize C(amt.network.mac_address) to colon-separated lowercase
+        and keep the firmware's own formatting in C(amt.network.mac_address_raw).
+        Real AMT 10 firmware returns the MAC dash-separated while the research notes'
+        own sample claims colons, and the MAC is both a second identity anchor alongside
+        the platform GUID and the key a PXE reservation is made against -- comparisons
+        a stray separator silently breaks.
+      - 'amt_info - report C(AMT_EthernetPortSettings) instance 0 under a new C(amt.network)
+        key: MAC address, IPv4 address/mask/gateway/DNS, C(dhcp_enabled), C(link_is_up),
+        C(ip_sync_enabled) and the raw C(LinkPolicy) list. Read with C(Get) and an
+        exact C(InstanceID) selector, never C(Enumerate). Instance 0 only; a firmware
+        with no such instance reports V(null) rather than failing.'
+      - 'amt_info - report C(CIM_ComputerSystem) state under a new C(amt.system_state)
+        key: C(ElementName), C(EnabledState) and C(OperationalStatus) decoded against
+        the full DMTF tables, and C(RequestedState) raw. C(OperationalStatus) is always
+        a list because CIM types it as an array. This reintroduces a WS-Man round
+        trip that 0.1.0 removed; the class now sources three useful state fields rather
+        than a C(UUID) property it does not have. C(amt.uuid) still comes from C(CIM_ComputerSystemPackage.PlatformGUID).'
+      - amt_info - report the host BIOS version from C(CIM_BIOSElement.Version) as
+        C(amt.bios_version), falling back to C(Enumerate) when the bare C(Get) faults.
+        This is the least well-evidenced fact the module returns and is expected to
+        be V(null) on some firmware; see C(docs/capability-matrix.md).
+      - 'amt_info - report the rest of the C(AMT_GeneralSettings) instance already
+        being read for the hostname: C(domain_name), C(idle_wake_timeout), C(ping_response_enabled),
+        C(rmcp_ping_response_enabled), C(network_interface_enabled) and C(ddns_update_enabled).
+        Zero extra WS-Man round trips. C(PowerSource) and C(PrivacyLevel) are deliberately
+        not surfaced: nothing documents what their integers mean.'
+      - 'amt_info - the module documentation now states the WS-Man round-trip cost
+        explicitly: ten HTTP requests, of which three C(Get)s are new. All new facts
+        are additive -- every pre-existing C(amt) key keeps its name, position and
+        shape, which a new test asserts.'
+      - amt_power - expose the V(sleep-light), V(sleep-deep) and V(hibernate) power
+        actions, which were fully implemented in C(module_utils/client.py) -- correct
+        CIM C(RequestPowerStateChange) codes 3, 4 and 7, and correct expected-state
+        mappings -- but omitted from the module's C(state) choices, so they were unreachable
+        dead code. V(hibernate) is convergent; the two sleep depths deliberately are
+        not, because CIM 3 (S1) and CIM 4 (S3) both normalize to the single state
+        C(sleep), so treating them as convergent would report C(changed=false) for
+        a transition that was never issued. All three are unverified against real
+        firmware and additionally depend on target-OS ACPI support, which the documentation
+        now states.
+      - docs/protocol-notes.md - new section 2.7 recording the network and system-state
+        classes, their selectors and their property tables, plus the hardware-verified
+        finding that C(Enumerate) returns HTTP 400 on AMT 10 for C(AMT_EthernetPortSettings),
+        C(AMT_GeneralSettings), C(AMT_BootCapabilities), C(AMT_BootSettingData) and
+        C(AMT_TLSSettingData) while C(Get) with an exact selector works. This cuts
+        against the enumerate-first habit elsewhere in the client, so the existing
+        hardware-verified C(Enumerate) call sites are left alone rather than swapped
+        for an unverified verb. Derived from parmstro/intel_amt's hardware research
+        notes, with attribution recorded per file in C(NOTICE); protocol facts were
+        taken, no code was.
+      - 'tests - the mock WS-Man server answers the three new reads the way real firmware
+        does: it requires the exact C(Get) selector for C(AMT_EthernetPortSettings)
+        and faults without it, serves the MAC dash-separated, renders C(LinkPolicy)
+        and C(OperationalStatus) as repeated elements, and can be started with C(--no-ethernet-port)
+        or C(--bios-get-faults) so the integration target exercises graceful degradation
+        and the C(Enumerate) fallback over a real socket rather than only where a
+        unit test mocks the transport away.'
+      release_summary: 'Additive release. Nothing in 0.1.0''s return shapes changed,
+        so this is a drop-in
+
+        upgrade.
+
+
+        ``amt_info`` gains network, system-state and BIOS facts, most usefully the
+
+        endpoint''s MAC address -- a second identity anchor alongside the platform
+        GUID,
+
+        and the key a PXE reservation is made against -- and ``wake_on_lan_capable``,
+
+        which explains a failure mode that previously looked like a network fault:
+        an
+
+        endpoint whose ``LinkPolicy`` omits "network link always on" does not answer
+
+        WS-Man while powered off, so ``amt_power`` with ``state=on`` cannot reach
+        it.
+
+
+        ``amt_power`` gains ``sleep-light``, ``sleep-deep`` and ``hibernate``. These
+        were
+
+        already implemented with the correct CIM codes but were unreachable, because
+        the
+
+        module''s ``state`` choices omitted them.
+
+
+        These additions came out of an audit of ``parmstro/intel_amt`` (GPL-3.0-or-later,
+
+        reuse authorised and attributed in ``NOTICE``). What was taken is protocol
+        facts
+
+        from that project''s hardware research notes -- property names and values
+        dumped
+
+        from a real AMT 10.0.56 machine -- and not code. They are therefore recorded
+        as
+
+        Tier 2 in ``docs/capability-matrix.md``: mock-tested here, resting on someone
+
+        else''s hardware, and **unverified on AMT 16.1.30 or 19.0.5**, the two generations
+
+        every hardware-qualified fact in 0.1.0 rests on. The same applies to the three
+        new
+
+        power actions, which additionally depend on target-OS ACPI support.
+
+
+        Deliberately not adopted from that audit: its network-settings, TLS-config
+        and
+
+        user modules. ``docs/capability-matrix.md`` records why, and the short version
+        is
+
+        that each is either a non-functional stub or capable of stranding the management
+
+        path in a way only a physical MEBx visit recovers.'
+    fragments:
+    - amt-info-network-and-state-facts.yml
+    - expose-sleep-hibernate-power-actions.yml
+    - v0.2.0-summary.yml
+    release_date: '2026-07-29'

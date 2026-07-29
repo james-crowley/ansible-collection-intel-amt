@@ -2,18 +2,75 @@
 
 **Topics**
 
-- <a href="#v0-1-0">v0\.1\.0</a>
+- <a href="#v0-2-0">v0\.2\.0</a>
     - <a href="#release-summary">Release Summary</a>
     - <a href="#minor-changes">Minor Changes</a>
+    - <a href="#bugfixes">Bugfixes</a>
+- <a href="#v0-1-0">v0\.1\.0</a>
+    - <a href="#release-summary-1">Release Summary</a>
+    - <a href="#minor-changes-1">Minor Changes</a>
     - <a href="#breaking-changes--porting-guide">Breaking Changes / Porting Guide</a>
     - <a href="#security-fixes">Security Fixes</a>
-    - <a href="#bugfixes">Bugfixes</a>
+    - <a href="#bugfixes-1">Bugfixes</a>
     - <a href="#new-modules">New Modules</a>
+
+<a id="v0-2-0"></a>
+## v0\.2\.0
+
+<a id="release-summary"></a>
+### Release Summary
+
+Additive release\. Nothing in 0\.1\.0\'s return shapes changed\, so this is a drop\-in
+upgrade\.
+
+<code>amt\_info</code> gains network\, system\-state and BIOS facts\, most usefully the
+endpoint\'s MAC address \-\- a second identity anchor alongside the platform GUID\,
+and the key a PXE reservation is made against \-\- and <code>wake\_on\_lan\_capable</code>\,
+which explains a failure mode that previously looked like a network fault\: an
+endpoint whose <code>LinkPolicy</code> omits \"network link always on\" does not answer
+WS\-Man while powered off\, so <code>amt\_power</code> with <code>state\=on</code> cannot reach it\.
+
+<code>amt\_power</code> gains <code>sleep\-light</code>\, <code>sleep\-deep</code> and <code>hibernate</code>\. These were
+already implemented with the correct CIM codes but were unreachable\, because the
+module\'s <code>state</code> choices omitted them\.
+
+These additions came out of an audit of <code>parmstro/intel\_amt</code> \(GPL\-3\.0\-or\-later\,
+reuse authorised and attributed in <code>NOTICE</code>\)\. What was taken is protocol facts
+from that project\'s hardware research notes \-\- property names and values dumped
+from a real AMT 10\.0\.56 machine \-\- and not code\. They are therefore recorded as
+Tier 2 in <code>docs/capability\-matrix\.md</code>\: mock\-tested here\, resting on someone
+else\'s hardware\, and <strong>unverified on AMT 16\.1\.30 or 19\.0\.5</strong>\, the two generations
+every hardware\-qualified fact in 0\.1\.0 rests on\. The same applies to the three new
+power actions\, which additionally depend on target\-OS ACPI support\.
+
+Deliberately not adopted from that audit\: its network\-settings\, TLS\-config and
+user modules\. <code>docs/capability\-matrix\.md</code> records why\, and the short version is
+that each is either a non\-functional stub or capable of stranding the management
+path in a way only a physical MEBx visit recovers\.
+
+<a id="minor-changes"></a>
+### Minor Changes
+
+* amt\_info \- derive C\(amt\.network\.wake\_on\_lan\_capable\) from whether C\(LinkPolicy\) contains V\(16\) \(network link always on\)\, and report C\(link\_policy\_names\) decoded alongside the raw list\. An endpoint without V\(16\) does not answer WS\-Man while powered off\, so C\(amt\_power\) with C\(state\=on\) fails there looking exactly like a network fault\; surfacing it read\-only turns that into a diagnosis\. V\(null\)\, not V\(false\)\, when C\(LinkPolicy\) is absent\.
+* amt\_info \- normalize C\(amt\.network\.mac\_address\) to colon\-separated lowercase and keep the firmware\'s own formatting in C\(amt\.network\.mac\_address\_raw\)\. Real AMT 10 firmware returns the MAC dash\-separated while the research notes\' own sample claims colons\, and the MAC is both a second identity anchor alongside the platform GUID and the key a PXE reservation is made against \-\- comparisons a stray separator silently breaks\.
+* amt\_info \- report C\(AMT\_EthernetPortSettings\) instance 0 under a new C\(amt\.network\) key\: MAC address\, IPv4 address/mask/gateway/DNS\, C\(dhcp\_enabled\)\, C\(link\_is\_up\)\, C\(ip\_sync\_enabled\) and the raw C\(LinkPolicy\) list\. Read with C\(Get\) and an exact C\(InstanceID\) selector\, never C\(Enumerate\)\. Instance 0 only\; a firmware with no such instance reports V\(null\) rather than failing\.
+* amt\_info \- report C\(CIM\_ComputerSystem\) state under a new C\(amt\.system\_state\) key\: C\(ElementName\)\, C\(EnabledState\) and C\(OperationalStatus\) decoded against the full DMTF tables\, and C\(RequestedState\) raw\. C\(OperationalStatus\) is always a list because CIM types it as an array\. This reintroduces a WS\-Man round trip that 0\.1\.0 removed\; the class now sources three useful state fields rather than a C\(UUID\) property it does not have\. C\(amt\.uuid\) still comes from C\(CIM\_ComputerSystemPackage\.PlatformGUID\)\.
+* amt\_info \- report the host BIOS version from C\(CIM\_BIOSElement\.Version\) as C\(amt\.bios\_version\)\, falling back to C\(Enumerate\) when the bare C\(Get\) faults\. This is the least well\-evidenced fact the module returns and is expected to be V\(null\) on some firmware\; see C\(docs/capability\-matrix\.md\)\.
+* amt\_info \- report the rest of the C\(AMT\_GeneralSettings\) instance already being read for the hostname\: C\(domain\_name\)\, C\(idle\_wake\_timeout\)\, C\(ping\_response\_enabled\)\, C\(rmcp\_ping\_response\_enabled\)\, C\(network\_interface\_enabled\) and C\(ddns\_update\_enabled\)\. Zero extra WS\-Man round trips\. C\(PowerSource\) and C\(PrivacyLevel\) are deliberately not surfaced\: nothing documents what their integers mean\.
+* amt\_info \- the module documentation now states the WS\-Man round\-trip cost explicitly\: ten HTTP requests\, of which three C\(Get\)s are new\. All new facts are additive \-\- every pre\-existing C\(amt\) key keeps its name\, position and shape\, which a new test asserts\.
+* amt\_power \- expose the V\(sleep\-light\)\, V\(sleep\-deep\) and V\(hibernate\) power actions\, which were fully implemented in C\(module\_utils/client\.py\) \-\- correct CIM C\(RequestPowerStateChange\) codes 3\, 4 and 7\, and correct expected\-state mappings \-\- but omitted from the module\'s C\(state\) choices\, so they were unreachable dead code\. V\(hibernate\) is convergent\; the two sleep depths deliberately are not\, because CIM 3 \(S1\) and CIM 4 \(S3\) both normalize to the single state C\(sleep\)\, so treating them as convergent would report C\(changed\=false\) for a transition that was never issued\. All three are unverified against real firmware and additionally depend on target\-OS ACPI support\, which the documentation now states\.
+* docs/protocol\-notes\.md \- new section 2\.7 recording the network and system\-state classes\, their selectors and their property tables\, plus the hardware\-verified finding that C\(Enumerate\) returns HTTP 400 on AMT 10 for C\(AMT\_EthernetPortSettings\)\, C\(AMT\_GeneralSettings\)\, C\(AMT\_BootCapabilities\)\, C\(AMT\_BootSettingData\) and C\(AMT\_TLSSettingData\) while C\(Get\) with an exact selector works\. This cuts against the enumerate\-first habit elsewhere in the client\, so the existing hardware\-verified C\(Enumerate\) call sites are left alone rather than swapped for an unverified verb\. Derived from parmstro/intel\_amt\'s hardware research notes\, with attribution recorded per file in C\(NOTICE\)\; protocol facts were taken\, no code was\.
+* tests \- the mock WS\-Man server answers the three new reads the way real firmware does\: it requires the exact C\(Get\) selector for C\(AMT\_EthernetPortSettings\) and faults without it\, serves the MAC dash\-separated\, renders C\(LinkPolicy\) and C\(OperationalStatus\) as repeated elements\, and can be started with C\(\-\-no\-ethernet\-port\) or C\(\-\-bios\-get\-faults\) so the integration target exercises graceful degradation and the C\(Enumerate\) fallback over a real socket rather than only where a unit test mocks the transport away\.
+
+<a id="bugfixes"></a>
+### Bugfixes
+
+* amt\_power \- a new test asserts that every C\(state\) choice except V\(query\) has an entry in both the action map and the expected\-state map\, and that the module\'s copy of the expected\-state map agrees with the client\'s\. The first guards the defect being fixed here \-\- three actions implemented but not reachable \-\- and the second guards check mode previewing a different outcome than a real run would produce\.
 
 <a id="v0-1-0"></a>
 ## v0\.1\.0
 
-<a id="release-summary"></a>
+<a id="release-summary-1"></a>
 ### Release Summary
 
 First release\. Manages Intel AMT / vPro endpoints from Ansible\: capability
@@ -34,7 +91,7 @@ what is only covered by mock fixtures\, and what remains unproven\. That
 distinction is maintained deliberately\, and the \"still unproven\" list is short
 and specific rather than absent\.
 
-<a id="minor-changes"></a>
+<a id="minor-changes-1"></a>
 ### Minor Changes
 
 * Add C\(CONTRIBUTING\.md\) documenting the local verification sequence\, the C\(scripts/setup\-collection\-tree\.sh\) staging requirement \(it copies rather than symlinks\, and C\(COLLECTION\_BUILD\_ROOT\) must be set when several checkouts stage concurrently\)\, conventional commits\, the changelog\-fragment requirement\, and the two gates in front of hardware\-in\-the\-loop tests \([https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/issues/10](https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/issues/10)\)\.
@@ -105,7 +162,7 @@ and specific rather than absent\.
 * amt\_media \- require O\(tls\_fingerprint\) when O\(use\_tls\=true\)\, and reject O\(ca\_path\) outright\. The redirection plane is a raw TLS socket whose only trust mode is leaf pinning\; TLS without a pin is encrypted but unauthenticated\, and silently ignoring a supplied ca\_path would leave an operator believing the session was chain\-validated \([https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/pull/20](https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/pull/20)\)\.
 * amt\_media \- session state files are created mode 0600 rather than at the umask default\, so they are not readable by other local users even when the runtime directory already exists with laxer permissions \([https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/pull/20](https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/pull/20)\)\.
 
-<a id="bugfixes"></a>
+<a id="bugfixes-1"></a>
 ### Bugfixes
 
 * CI \- pin ansible\-core to 2\.17 in the hardware qualification job\. The lab runner image ships Python 3\.10 and ansible\-core 2\.19 requires 3\.11\+ on the controller\, so the job would have failed at dependency installation\. 2\.17 is also the collection\'s declared floor\, so hardware qualification now exercises the oldest version the collection claims to support\.
