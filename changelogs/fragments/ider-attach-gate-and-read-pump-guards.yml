@@ -1,0 +1,33 @@
+---
+bugfixes:
+  - plugins/modules/amt_media.py / plugins/module_utils/media_session.py - stop reporting RV(session_state) V(attached) for a session
+    that is B(not serving the media). An IDE-R attach is two facts arriving in two frames - the endpoint opens the session
+    (C(OPEN_SESSION_REPLY)), and then it says whether it will actually engage IDE-R (C(STATUS_DATA) type C(3) / C(REGS_TOGGLE), see
+    C(docs/protocol-notes.md) section 4.2). The daemon gated V(attached) on the first fact alone, so an endpoint that opened the session
+    and then B(refused the feature toggle) was reported as a successful attach. C(ider.IderEngine) had recorded the refusal in
+    C(feature_toggle_ok) all along and B(no consumer ever read it). This is the worst result this module can produce, because of what a
+    caller does next with it - C(amt_boot) arms the boot device and C(amt_power) resets the machine, into media that is not being
+    redirected. The toggle verdict is now required before V(attached), a refusal fails with RV(ignore:error_class)
+    V(unsupported_capability), and a verdict that never arrives at all fails with RV(ignore:error_class) V(timeout) after a bounded
+    5-second wait rather than reporting success or waiting forever. A refusal arriving B(after) a legitimate attach (C(REGS_AVAIL) makes
+    the engine re-send the toggle mid-session) now fails the session too, instead of leaving a stale V(attached).
+  - plugins/module_utils/ider.py - fix an unbounded spin in the IDE-R read pump when a backing image is truncated underneath a live
+    session. C(_scsi_read) bounds-checks against C(MediaImage.blocks), which is computed B(once, at open) - and C(amt_media)'s detached
+    daemon holds an image for as long as a redirected OS install takes, up to an hour. If the file shrinks in that window, C(read())
+    returns C(b"") while the transfer still has bytes outstanding, C(remaining) never decreases, and C(_pump_read) emits empty
+    C(DATA_TO_HOST) frames forever - the process grows until it is OOM killed rather than failing. A short read now ends the transfer
+    with C(MEDIUM ERROR / UNRECOVERED READ ERROR) (sense C(0x03), asc C(0x11)) in the sense-bearing form, so the host learns why, and is
+    B(never) reported as a completed transfer - a BIOS that believes a short read succeeded executes whatever was already in its buffer.
+    Reads queued behind the failed one are still answered, so the session is not left wedged on an unanswered CDB.
+  - plugins/module_utils/media_session.py - remove a race in which C(spawn_session) B(overwrote the forked daemon's own failure report).
+    C(spawn_session) returns only after the daemon has reported its pid back over a pipe, by which point the daemon may already have
+    recorded C(connecting) - or its final C(error), with the real classification. Writing the C(starting) record unconditionally at that
+    point clobbered it, and the daemon never wrote again because it had already exited; the caller then polled C(starting) until
+    C(attach_timeout) expired and reported a generic failure, having destroyed the specific one. Which writer won was pure scheduling
+    luck, so this presented as an intermittent B(wrong) RV(ignore:error_class) under CPU contention - a wrong password reported as
+    V(protocol) instead of V(authentication) - and not as a reproducible bug. The parent's record is now create-only
+    (C(O_CREAT | O_EXCL)), so it serves its actual purpose (a daemon that dies before writing anything still leaves a pid a later
+    C(state - detached) can find) without being able to overwrite anything; the daemon claims the state file before it opens any media;
+    and both writers now build the record from one function, C(_initial_state()), because they had already drifted - the parent's copy
+    omitted C(error_class), which is exactly the key C(amt_media._error_class_of) reads to decide the reported failure class. B(The
+    timeout was not lengthened.)

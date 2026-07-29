@@ -94,6 +94,26 @@ _RECV_POLL_TIMEOUT = 2.0
 #: confirmation) re-check the file.
 _STATE_POLL_INTERVAL = 0.2
 
+#: How long after the IDE-R session opens the daemon waits for firmware's verdict on the
+#: feature toggle -- STATUS_DATA type 3 / REGS_TOGGLE, docs/protocol-notes.md section 4.2 --
+#: before giving up and reporting a classified timeout.
+#:
+#: The toggle is a separate round trip from OPEN_SESSION_REPLY, so "the session is open" and
+#: "firmware agreed to engage IDE-R" are two different facts arriving at two different times,
+#: and this daemon must not report the second on the strength of the first (see
+#: :func:`_run_daemon`). That makes a bounded wait unavoidable: firmware that opens the session
+#: and then simply never answers the toggle would otherwise leave the daemon reporting
+#: ``connecting`` forever, which the module's ``attach_timeout`` would surface as an
+#: unclassified generic failure.
+#:
+#: Deliberately shorter than ``amt_media``'s default ``attach_timeout`` (10s), so the daemon
+#: loses this race on purpose: it gets to write its own specific, classified error
+#: (``timeout``, naming the toggle) and have the module report *that*, rather than the module
+#: timing out first on a daemon still claiming ``connecting``. Real firmware answers the toggle
+#: in the same breath as it sends OPEN_SESSION_REPLY; this is a stuck-peer bound, not a
+#: latency budget, so there is nothing to tune and it is not a module option.
+_FEATURE_TOGGLE_TIMEOUT = 5.0
+
 
 @dataclass(frozen=True, slots=True)
 class MediaSpec:
@@ -197,6 +217,69 @@ def _write_state_atomic(runtime_dir: str | os.PathLike[str], session_id: str, da
         tmp_path.unlink(missing_ok=True)
         raise
     os.replace(tmp_path, path)
+
+
+def _initial_state(*, session_id: str, endpoint: str, pid: int) -> dict[str, Any]:
+    """The starting state record, in the one shape every writer must use.
+
+    There are two independent writers of a session's *first* state record -- the daemon
+    itself (:func:`_run_daemon`) and the process that forked it (:func:`spawn_session`,
+    for the case where the daemon dies before writing anything) -- and they used to build
+    that dict separately. They drifted: ``spawn_session``'s copy omitted ``error_class``.
+
+    That is not cosmetic. ``amt_media._error_class_of`` reads ``error_class`` off whatever
+    record it finds and falls back to a generic class when the key is absent, so whichever
+    of the two records a caller happened to read decided the failure class it reported.
+    Factored into one function so the two shapes cannot disagree again; a new key added
+    here reaches both writers by construction.
+    """
+    now = _now_iso()
+    return {
+        "session_id": session_id,
+        "pid": pid,
+        "endpoint": endpoint,
+        "state": STATE_STARTING,
+        "error": None,
+        "error_class": None,
+        "tls_peer_fingerprint": None,
+        "devices": {},
+        "started_at": now,
+        "updated_at": now,
+    }
+
+
+def _write_state_if_absent(runtime_dir: str | os.PathLike[str], session_id: str, data: dict[str, Any]) -> bool:
+    """Write ``data`` as the state record only if no record exists yet. Returns whether it wrote.
+
+    This is the create-only counterpart of :func:`_write_state_atomic`, and it exists to
+    remove a race rather than to save a write.
+
+    :func:`spawn_session` returns to its caller only after the forked daemon has reported
+    its pid back over a pipe -- by which time the daemon is already running and may already
+    have written ``connecting``, or even its final ``error``. An unconditional write of the
+    ``starting`` record at that point *clobbers* the daemon's own report with a record that
+    is both older and less informative, and the daemon never writes again once it has
+    exited. The caller then polls a ``starting`` record until ``attach_timeout`` expires and
+    reports a generic failure, having overwritten the specific one. Which of the two wins is
+    pure scheduling luck, so it showed up as an intermittent wrong ``error_class`` under CPU
+    contention rather than as a reproducible bug.
+
+    ``O_CREAT | O_EXCL`` is what makes this safe against that ordering rather than merely
+    less likely to hit it: the kernel decides who creates the file. If the daemon got there
+    first the create fails and we leave its record alone. If we get there first, a daemon
+    write landing while we are still writing is equally harmless -- it arrives via
+    ``os.replace()``, so it becomes the file and our bytes go to an unlinked inode nobody
+    will read.
+    """
+    path = state_file_path(runtime_dir, session_id)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(data, handle)
+    return True
 
 
 def remove_state(runtime_dir: str | os.PathLike[str], session_id: str) -> None:
@@ -384,20 +467,16 @@ def spawn_session(config: SessionConfig, *, username: str, password: str) -> int
                 operation="amt_media.spawn_session",
             )
         pid = int(reported)
-        _write_state_atomic(
+        # Create-only, never overwrite: by the time we get here the daemon is already
+        # running and may already have written a more advanced -- or final -- record. See
+        # _write_state_if_absent for why clobbering it was a real, intermittent bug and not
+        # a theoretical one. This record is the fallback for the opposite case, a daemon
+        # that dies before writing anything at all, so that a later detach can still find
+        # the pid.
+        _write_state_if_absent(
             config.runtime_dir,
             config.session_id,
-            {
-                "session_id": config.session_id,
-                "pid": pid,
-                "endpoint": f"{config.host}:{config.port}",
-                "state": STATE_STARTING,
-                "error": None,
-                "tls_peer_fingerprint": None,
-                "devices": {},
-                "started_at": _now_iso(),
-                "updated_at": _now_iso(),
-            },
+            _initial_state(session_id=config.session_id, endpoint=f"{config.host}:{config.port}", pid=pid),
         )
         return pid
 
@@ -473,27 +552,27 @@ def _run_daemon(config: SessionConfig, username: str, password: str) -> None:
     Runs in the grandchild produced by :func:`spawn_session`. Every exit from this
     function is through a state-file write recording the outcome -- there is no other
     channel back to whatever, if anything, is still watching for this session.
+
+    ``STATE_ATTACHED`` is reported only once the endpoint has *confirmed the IDE-R feature
+    toggle*, not merely opened the session; see the long comment on the gate in the main
+    loop for why that distinction is the difference between a retry and a wrongly reset
+    machine, and :data:`_FEATURE_TOGGLE_TIMEOUT` for the bound on waiting for it.
     """
     log_path = log_file_path(config.runtime_dir, config.session_id)
     _redirect_std_fds(log_path)
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
-    state: dict[str, Any] = {
-        "session_id": config.session_id,
-        "pid": os.getpid(),
-        "endpoint": f"{config.host}:{config.port}",
-        "state": STATE_STARTING,
-        "error": None,
-        "error_class": None,
-        "tls_peer_fingerprint": None,
-        "devices": {},
-        "started_at": _now_iso(),
-        "updated_at": _now_iso(),
-    }
+    state: dict[str, Any] = _initial_state(session_id=config.session_id, endpoint=f"{config.host}:{config.port}", pid=os.getpid())
 
     def _persist() -> None:
         state["updated_at"] = _now_iso()
         _write_state_atomic(config.runtime_dir, config.session_id, state)
+
+    # Claim the state file immediately, before opening a single image. Two reasons: this
+    # record carries the daemon's real pid (spawn_session's fallback record can only carry
+    # what the pipe told it), and getting in first means the fallback write in
+    # spawn_session finds the file already present and leaves this daemon's reports alone.
+    _persist()
 
     def _fail(message: str, *, error_class: str = ErrorClass.PROTOCOL) -> None:
         # error_class defaults to "protocol" only for failures this daemon itself detects
@@ -541,9 +620,60 @@ def _run_daemon(config: SessionConfig, username: str, password: str) -> None:
 
         session.set_recv_timeout(_RECV_POLL_TIMEOUT)
 
+        # Deadline for firmware's REGS_TOGGLE verdict, armed the first time we observe the
+        # session as open. See _FEATURE_TOGGLE_TIMEOUT and the gate inside the loop.
+        toggle_deadline: float | None = None
+
         while not engine.stopped and not _stop_flag:
-            if engine.session_open and state["state"] != STATE_ATTACHED:
-                state["state"] = STATE_ATTACHED
+            # The attach gate. ``session_open`` alone is NOT sufficient to report
+            # STATE_ATTACHED, and this is the whole point of the gate:
+            #
+            #   OPEN_SESSION_REPLY  -> engine.session_open = True, toggle sent
+            #   STATUS_DATA type 3  -> engine.feature_toggle_ok = True | False
+            #
+            # An endpoint that accepts the session and then *refuses* the IDE-R feature
+            # toggle is not serving the media. Reporting ``attached`` there is the worst
+            # failure this module can produce, because of what the caller does next: it
+            # arms a boot device and resets the machine, expecting it to come up on media
+            # that is not actually being redirected. A hard failure here costs a retry; a
+            # false success costs a machine.
+            #
+            # The two facts arrive in separate frames, so this is a timing question and not
+            # just a conditional. Three outcomes, all of them explicit:
+            #
+            #   feature_toggle_ok is True  -> attached, for real
+            #   feature_toggle_ok is False -> firmware refused; fail, do not attach
+            #   feature_toggle_ok is None  -> verdict not in yet; stay ``connecting`` until
+            #                                 _FEATURE_TOGGLE_TIMEOUT, then fail as a timeout
+            #
+            # The refusal check sits outside the ``session_open`` branch on purpose: a
+            # REGS_AVAIL status makes the engine re-send the toggle mid-session (see
+            # ider._on_status_data), so a refusal can also arrive *after* we have already
+            # reported ``attached``. The media stops being served at that moment, so the
+            # session must fail then too rather than sit in a stale ``attached``.
+            if engine.feature_toggle_ok is False:
+                _fail(
+                    "IDE-R session opened but the endpoint refused the IDE-R feature toggle "
+                    "(STATUS_DATA REGS_TOGGLE reported failure), so no media is being served. "
+                    "Check that IDE-R/redirection is enabled for this endpoint and that no other "
+                    "redirection session holds the device.",
+                    error_class=ErrorClass.UNSUPPORTED_CAPABILITY,
+                )
+                return
+            if engine.session_open:
+                if toggle_deadline is None:
+                    toggle_deadline = time.monotonic() + _FEATURE_TOGGLE_TIMEOUT
+                if engine.feature_toggle_ok:
+                    state["state"] = STATE_ATTACHED
+                elif time.monotonic() >= toggle_deadline:
+                    _fail(
+                        f"IDE-R session opened but the endpoint never reported the outcome of the "
+                        f"IDE-R feature toggle within {_FEATURE_TOGGLE_TIMEOUT}s (no STATUS_DATA "
+                        "REGS_TOGGLE frame arrived), so whether media is being served is unknown. "
+                        "The session was not reported as attached.",
+                        error_class=ErrorClass.TIMEOUT,
+                    )
+                    return
             for slot, image in images.items():
                 state["devices"][slot] = _device_state(image)
             _persist()
