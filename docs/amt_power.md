@@ -180,6 +180,7 @@ turn a successful request into a reported failure — see
   issued real resets. So the action codes — "as used by MeshCmd, verified against
   firmware" per `docs/protocol-notes.md` §2.4 — are now confirmed as this
   collection implements them, on two firmware generations, and remain unverified on
-  every other. `sleep`/`hibernate` are not reachable from this module and no stage
-  has issued them on either machine. See the
-  [Capability matrix](capability-matrix.md).
+  every other. `sleep-light`, `sleep-deep` and `hibernate` **are** selectable (they
+  were exposed after being implemented-but-unreachable for three releases), but no
+  hardware stage has issued any of them on either machine -- stage 4 exercised only
+  `on` and `off`. See the [Capability matrix](capability-matrix.md).
