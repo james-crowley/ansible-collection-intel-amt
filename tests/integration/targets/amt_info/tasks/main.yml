@@ -20,6 +20,7 @@
     mock_servers_dir: "{{ role_path }}/../../mock_servers"
     plain_ready_file: "{{ scratch_dir.path }}/wsman_plain_ready.json"
     tls_ready_file: "{{ scratch_dir.path }}/wsman_tls_ready.json"
+    degraded_ready_file: "{{ scratch_dir.path }}/wsman_degraded_ready.json"
 
 - name: Start the plaintext mock WS-Man server
   ansible.builtin.shell: |
@@ -47,7 +48,25 @@
   changed_when: false
   delegate_to: localhost
 
-- name: Wait for both mock servers to report ready
+# A separate process rather than a fault flipped on the server above: these two
+# flags describe firmware that lacks AMT_EthernetPortSettings instance 0 and
+# whose CIM_BIOSElement refuses a bare Get. Both are properties of an endpoint,
+# not of anything a client does to it, so they hold for this server's lifetime.
+- name: Start a degraded-firmware mock WS-Man server (no ethernet port, BIOS Get faults)
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ degraded_ready_file }} \
+      --no-ethernet-port --bios-get-faults \
+      > {{ scratch_dir.path }}/wsman_degraded.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: degraded_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Wait for all three mock servers to report ready
   ansible.builtin.wait_for:
     path: "{{ item }}"
     state: present
@@ -55,14 +74,17 @@
   loop:
     - "{{ plain_ready_file }}"
     - "{{ tls_ready_file }}"
+    - "{{ degraded_ready_file }}"
   delegate_to: localhost
 
 - name: Read mock server connection info and pids
   ansible.builtin.set_fact:
     plain_info: "{{ lookup('ansible.builtin.file', plain_ready_file) | from_json }}"
     tls_info: "{{ lookup('ansible.builtin.file', tls_ready_file) | from_json }}"
+    degraded_info: "{{ lookup('ansible.builtin.file', degraded_ready_file) | from_json }}"
     plain_pid: "{{ plain_start.stdout | trim }}"
     tls_pid: "{{ tls_start.stdout | trim }}"
+    degraded_pid: "{{ degraded_start.stdout | trim }}"
 
 - name: Exercise amt_info against both mock servers
   block:
@@ -88,6 +110,67 @@
           - info_plain.amt.capabilities.storage_redirection == true
           - info_plain.amt.capabilities.sol == true
           - info_plain.amt.capabilities.boot_once_pxe == true
+
+    - name: Assert the AMT_GeneralSettings extras come back from the same instance as the hostname
+      ansible.builtin.assert:
+        that:
+          - info_plain.amt.domain_name == 'example.invalid'
+          - info_plain.amt.idle_wake_timeout == 1
+          - info_plain.amt.ping_response_enabled == true
+          - info_plain.amt.rmcp_ping_response_enabled == true
+          - info_plain.amt.network_interface_enabled == true
+          - info_plain.amt.ddns_update_enabled == false
+        fail_msg: >-
+          AMT_GeneralSettings fields beyond HostName did not come through. These cost no extra
+          WS-Man round trip, so a null here means the parse, not the transport.
+
+    - name: Assert AMT_EthernetPortSettings instance 0 is read, normalized and decoded
+      ansible.builtin.assert:
+        that:
+          # The mock serves the MAC dash-separated, as real AMT 10 firmware did.
+          # Asserting the normalized form here is what proves normalization happens
+          # end to end rather than only in a unit test's fixture.
+          - info_plain.amt.network.mac_address == '00:00:5e:00:53:01'
+          - info_plain.amt.network.mac_address_raw == '00-00-5E-00-53-01'
+          - info_plain.amt.network.ip_address == '192.0.2.10'
+          - info_plain.amt.network.subnet_mask == '255.255.255.0'
+          - info_plain.amt.network.default_gateway == '192.0.2.1'
+          - info_plain.amt.network.primary_dns == '192.0.2.2'
+          - info_plain.amt.network.secondary_dns == '192.0.2.3'
+          - info_plain.amt.network.dhcp_enabled == false
+          - info_plain.amt.network.link_is_up == true
+          - info_plain.amt.network.ip_sync_enabled == false
+          - info_plain.amt.network.link_policy == [1, 14, 16]
+          - info_plain.amt.network.link_policy_names == ['s0_ac', 's0_dc', 'always_on']
+          - info_plain.amt.network.wake_on_lan_capable == true
+        fail_msg: >-
+          AMT_EthernetPortSettings instance 0 did not come through. The mock requires the exact
+          Get selector for this class, as AMT 10 firmware does, so a null here may mean the
+          client tried Enumerate or sent no SelectorSet.
+
+    - name: Assert CIM_ComputerSystem state is read and decoded per DMTF
+      ansible.builtin.assert:
+        that:
+          - info_plain.amt.system_state.element_name == 'ManagedSystem'
+          - info_plain.amt.system_state.enabled_state == 2
+          - info_plain.amt.system_state.enabled_state_text == 'enabled'
+          - info_plain.amt.system_state.requested_state == 12
+          - info_plain.amt.system_state.operational_status == [2]
+          - info_plain.amt.system_state.operational_status_text == ['ok']
+
+    - name: Assert the platform UUID still does not come from CIM_ComputerSystem
+      ansible.builtin.assert:
+        that:
+          - "'uuid' not in info_plain.amt.system_state"
+        fail_msg: >-
+          Reintroducing the CIM_ComputerSystem round trip must not reintroduce the defect that
+          got it removed: the class has no UUID property, and amt.uuid comes from
+          CIM_ComputerSystemPackage.PlatformGUID.
+
+    - name: Assert CIM_BIOSElement.Version comes back from the bare Get
+      ansible.builtin.assert:
+        that:
+          - info_plain.amt.bios_version == 'EXAMPLE10H.86A.0000.2026.0101.0000'
 
     - name: Assert amt_info now carries a non-secret operation receipt, per collection issue 22
       ansible.builtin.assert:
@@ -159,6 +242,41 @@
           # target for the same note). This only confirms the key exists under `operation`.
           - "'tls_peer_fingerprint' in info_tls.operation"
 
+    - name: Read facts from the degraded-firmware endpoint
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ degraded_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: info_degraded
+
+    - name: Assert a missing AMT_EthernetPortSettings instance degrades to null, never a failure
+      ansible.builtin.assert:
+        that:
+          - info_degraded.changed == false
+          - info_degraded.amt.reachable == true
+          - info_degraded.amt.network is none
+          # Everything unrelated still comes through: one absent optional class
+          # must not blank out the rest of the read.
+          - info_degraded.amt.hostname == 'mock-amt-host'
+          - info_degraded.amt.system_state.enabled_state_text == 'enabled'
+        fail_msg: >-
+          A firmware generation that lacks AMT_EthernetPortSettings instance 0 must yield a null
+          `network` fact, not a module failure.
+
+    - name: Assert CIM_BIOSElement falls back to Enumerate when the bare Get faults
+      ansible.builtin.assert:
+        that:
+          - info_degraded.amt.bios_version == 'EXAMPLE10H.86A.0000.2026.0101.0000'
+        fail_msg: >-
+          The Enumerate fallback did not run. This is the exact class of bug this project already
+          hit once -- a mock that only implemented Get for a class real firmware served via
+          Enumerate, with unit tests mocking at a higher level and hiding it.
+
     - name: Fault injection -- wrong password is refused with error_class=authentication
       james_crowley.intel_amt.amt_info:
         host: 127.0.0.1
@@ -186,6 +304,12 @@
 
     - name: Stop the TLS mock WS-Man server
       ansible.builtin.command: "kill {{ tls_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
+      changed_when: false
+
+    - name: Stop the degraded-firmware mock WS-Man server
+      ansible.builtin.command: "kill {{ degraded_pid }}"
       delegate_to: localhost
       ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
       changed_when: false

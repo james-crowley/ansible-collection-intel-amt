@@ -85,6 +85,8 @@ CIM_BOOT_CONFIG_SETTING = f"{CIM_BASE}/CIM_BootConfigSetting"
 CIM_BOOT_SERVICE = f"{CIM_BASE}/CIM_BootService"
 CIM_BOOT_SOURCE_SETTING = f"{CIM_BASE}/CIM_BootSourceSetting"
 CIM_COMPUTER_SYSTEM = f"{CIM_BASE}/CIM_ComputerSystem"
+CIM_BIOS_ELEMENT = f"{CIM_BASE}/CIM_BIOSElement"
+AMT_ETHERNET_PORT_SETTINGS = f"{AMT_BASE}/AMT_EthernetPortSettings"
 AMT_BOOT_SETTING_DATA = f"{AMT_BASE}/AMT_BootSettingData"
 AMT_BOOT_CAPABILITIES = f"{AMT_BASE}/AMT_BootCapabilities"
 AMT_REDIRECTION_SERVICE = f"{AMT_BASE}/AMT_RedirectionService"
@@ -119,6 +121,31 @@ BOOT_SOURCE_NAMES = (
 #: RequestPowerStateChange action code -> resulting CIM_AssociatedPowerManagementService.PowerState
 #: (docs/protocol-notes.md §2.4). Codes 5 (power cycle) and 10 (reset) both end powered-on.
 POWER_ACTION_TO_STATE = {2: 2, 3: 3, 4: 4, 5: 2, 7: 7, 8: 8, 10: 2}
+
+#: The one ``AMT_EthernetPortSettings`` instance this mock serves
+#: (docs/protocol-notes.md §2.7). Real firmware requires an exact selector for
+#: this class -- ``Enumerate`` is HTTP 400 on AMT 10 -- and a wrong or absent
+#: instance index must fault rather than quietly returning instance 0's data,
+#: which is the whole point of the mock checking the selector at all.
+ETHERNET_PORT_0_INSTANCE_ID = "Intel(r) AMT Ethernet Port Settings 0"
+
+#: The selector values that address the single instance this mock serves, per
+#: resource URI. A ``Get`` carrying a ``SelectorSet`` that disagrees with these
+#: faults, rather than being answered with instance 0's data anyway -- a client
+#: that asks for a nonexistent instance must find out.
+SELECTOR_MATCH_FOR_GET: dict[str, dict[str, str]] = {
+    AMT_ETHERNET_PORT_SETTINGS: {"InstanceID": ETHERNET_PORT_0_INSTANCE_ID},
+    CIM_COMPUTER_SYSTEM: {"Name": "ManagedSystem"},
+}
+
+#: Resources where a ``Get`` with **no** selector faults. Only
+#: ``AMT_EthernetPortSettings`` is listed: it is an indexed class (instance 0, 1,
+#: ...), and AMT 10 requires the exact selector for it -- ``Enumerate`` is HTTP
+#: 400 (docs/protocol-notes.md §2.7). ``CIM_ComputerSystem`` is deliberately not
+#: listed: a bare ``Get`` against it is reported to work on real AMT 10, so
+#: requiring the selector here would assert firmware behaviour nothing has
+#: observed.
+SELECTOR_REQUIRED_FOR_GET = frozenset({AMT_ETHERNET_PORT_SETTINGS})
 
 
 class _UnknownResource(Exception):
@@ -181,6 +208,21 @@ class AmtState:
     boot_source_count: int = 5
     digest_realm: str = "Digest:A4000000000000000000000000000000"
     boot_setting_data: dict[str, object] = field(default_factory=_default_boot_setting_data)
+    #: AMT_EthernetPortSettings instance 0 (docs/protocol-notes.md §2.7). The MAC
+    #: is deliberately **dash**-separated and from the RFC 7042 documentation
+    #: range: real AMT 10 firmware was observed returning dashes, so a client that
+    #: only handles colons must fail here rather than in production.
+    ethernet_mac_address: str = "00-00-5E-00-53-01"
+    ethernet_link_policy: list[int] = field(default_factory=lambda: [1, 14, 16])
+    #: Set False to make the instance-0 Get fault, standing in for firmware that
+    #: does not implement the class (or a machine with no such port).
+    ethernet_port_present: bool = True
+    #: CIM_ComputerSystem. OperationalStatus is a CIM array, so it is a list here.
+    enabled_state: int = 2  # DMTF: enabled
+    requested_state: int = 12  # DMTF: not applicable -- what AMT 10 reports
+    operational_status: list[int] = field(default_factory=lambda: [2])  # DMTF: OK
+    #: CIM_BIOSElement.Version. Obviously-fake, shaped like a real Intel BIOS ID.
+    bios_version: str = "EXAMPLE10H.86A.0000.2026.0101.0000"
 
 
 @dataclass
@@ -192,6 +234,14 @@ class FaultConfig:
     #: Toggle for the read-only-field Put rejection. Default on: this is what
     #: real firmware does, and turning it off is the exception, not the rule.
     reject_boot_readonly_fields: bool = True
+
+    #: Fault a bare ``Get CIM_BIOSElement``, leaving only the ``Enumerate`` path.
+    #: This exists because ``CIM_BIOSElement`` has no obvious singleton selector,
+    #: so which verb real firmware accepts for it is genuinely unsettled -- see
+    #: docs/capability-matrix.md. A client must survive either answer, and this
+    #: knob is how the ``Enumerate`` fallback gets exercised on the wire rather
+    #: than only where a unit test mocks it away.
+    bios_element_get_faults: bool = False
 
     #: One-shot: hang before ever reading the request body.
     timeout_before_read: bool = False
@@ -350,6 +400,50 @@ def _get_general_settings(state: AmtState) -> dict[str, object]:
         "AMTNetworkEnabled": 1,
         "RmcpPingResponseEnabled": True,
         "PreferredAddressFamily": 0,
+        # Hardware-dumped on AMT 10.0.56 alongside the fields above
+        # (docs/protocol-notes.md §2.7). PowerSource/PrivacyLevel are also on the
+        # real instance but are deliberately not served here: this collection does
+        # not surface them, because nothing documents what their integers mean.
+        "IdleWakeTimeout": 1,
+        "DDNSUpdateEnabled": False,
+    }
+
+
+def _get_ethernet_port_settings(state: AmtState) -> dict[str, object]:
+    """``AMT_EthernetPortSettings`` instance 0 (docs/protocol-notes.md §2.7).
+
+    ``LinkPolicy`` is emitted as a **repeated plain element**, which is how
+    WS-Man renders the ``uint32`` array AMT's schema declares. ``parmstro``'s
+    module code instead expects ``<PolicyValue>`` children inside a wrapper;
+    their hardware notes record only the decoded result (``[1, 14, 16]``), so
+    neither shape is ruled out by evidence. This mock serves the schema-implied
+    shape and the client tolerates both -- see
+    ``plugins/module_utils/models.py`` ``_link_policy_values()``.
+    """
+    return {
+        "ElementName": "Intel(r) AMT Ethernet Port Settings",
+        "InstanceID": ETHERNET_PORT_0_INSTANCE_ID,
+        "MACAddress": state.ethernet_mac_address,
+        "IPAddress": "192.0.2.10",
+        "SubnetMask": "255.255.255.0",
+        "DefaultGateway": "192.0.2.1",
+        "PrimaryDNS": "192.0.2.2",
+        "SecondaryDNS": "192.0.2.3",
+        "DHCPEnabled": False,
+        "LinkIsUp": True,
+        "IpSyncEnabled": False,
+        "SharedMAC": True,
+        "LinkPolicy": list(state.ethernet_link_policy),
+    }
+
+
+def _get_bios_element(state: AmtState) -> dict[str, object]:
+    return {
+        "ElementName": "Intel(r) AMT: BIOS Element",
+        "Name": "MockBIOS",
+        "Manufacturer": "Mock Systems (example.invalid)",
+        "Version": state.bios_version,
+        "PrimaryBIOS": True,
     }
 
 
@@ -366,13 +460,17 @@ def _get_setup_and_configuration_service(_state: AmtState) -> dict[str, object]:
     }
 
 
-def _get_computer_system(_state: AmtState) -> dict[str, object]:
+def _get_computer_system(state: AmtState) -> dict[str, object]:
     return {
         "ElementName": "ManagedSystem",
         "Name": "ManagedSystem",
         "Caption": "Computer System",
-        "EnabledState": 2,
-        "RequestedState": 12,
+        "EnabledState": state.enabled_state,
+        "RequestedState": state.requested_state,
+        # A CIM array (uint16[]), so a repeated element even when there is one
+        # value. A client that reads only the first would pass here and then drop
+        # every status after the first on a degraded machine.
+        "OperationalStatus": list(state.operational_status),
     }
 
 
@@ -384,6 +482,8 @@ GET_HANDLERS: dict[str, Callable[[AmtState], dict[str, object]]] = {
     AMT_GENERAL_SETTINGS: _get_general_settings,
     AMT_SETUP_AND_CONFIGURATION_SERVICE: _get_setup_and_configuration_service,
     CIM_COMPUTER_SYSTEM: _get_computer_system,
+    AMT_ETHERNET_PORT_SETTINGS: _get_ethernet_port_settings,
+    CIM_BIOS_ELEMENT: _get_bios_element,
 }
 
 
@@ -493,9 +593,24 @@ def _boot_capabilities_items(state: AmtState) -> list[str]:
     return [_fields_to_instance_xml(AMT_BOOT_CAPABILITIES, _get_boot_capabilities(state))]
 
 
+def _bios_element_items(state: AmtState) -> list[str]:
+    """``Enumerate`` form of ``CIM_BIOSElement``, sharing ``_get_bios_element``'s fields.
+
+    Both verbs are served for the same reason ``AMT_BootCapabilities`` is (see
+    ``_boot_capabilities_items``): this class has no obvious singleton selector,
+    so whether real firmware answers a bare ``Get``, an ``Enumerate``, or both is
+    not established by any evidence this collection has. ``AmtClient`` tries
+    ``Get`` and falls back to ``Enumerate``, and the ``bios_element_get_faults``
+    knob exists so the fallback is exercised against a real server rather than
+    only where a unit test mocks the client's own transport.
+    """
+    return [_fields_to_instance_xml(CIM_BIOS_ELEMENT, _get_bios_element(state))]
+
+
 ENUMERATE_HANDLERS: dict[str, Callable[[AmtState], list[str]]] = {
     CIM_BOOT_SOURCE_SETTING: _boot_source_items,
     AMT_BOOT_CAPABILITIES: _boot_capabilities_items,
+    CIM_BIOS_ELEMENT: _bios_element_items,
 }
 
 
@@ -681,7 +796,7 @@ class _WsmanHandler(http.server.BaseHTTPRequestHandler):
             self._send_plain(400, b"malformed SOAP request")
             return
 
-        action, resource_uri, relates_to, body_elem = _parse_envelope(root)
+        action, resource_uri, relates_to, body_elem, selectors = _parse_envelope(root)
         key = (resource_uri, action)
 
         if key in faults.malformed_xml_for:
@@ -696,7 +811,7 @@ class _WsmanHandler(http.server.BaseHTTPRequestHandler):
             return
 
         return_override = faults.return_value_for.get(key)
-        status, response_xml = mock.dispatch(action, resource_uri, relates_to, body_elem, return_override)
+        status, response_xml = mock.dispatch(action, resource_uri, relates_to, body_elem, return_override, selectors)
         self._send_raw(status, response_xml.encode("utf-8"))
 
     def _hang(self, mock: WsmanMockServer) -> None:
@@ -729,14 +844,35 @@ class _WsmanHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def _parse_envelope(root: ET.Element) -> tuple[str, str, str, ET.Element | None]:
+def _parse_selector_set(header: ET.Element | None) -> dict[str, str]:
+    """Read the request's ``<w:SelectorSet>`` into a name->value mapping.
+
+    Only the header's own SelectorSet, never one nested inside a method body's
+    endpoint reference: those name a *parameter*, not the instance the request
+    itself addresses, and conflating the two would make e.g. ``ChangeBootOrder``
+    look like a Get against ``CIM_BootSourceSetting``.
+    """
+    if header is None:
+        return {}
+    selector_set = header.find(f"{{{NS_W}}}SelectorSet")
+    if selector_set is None:
+        return {}
+    selectors: dict[str, str] = {}
+    for selector in selector_set.findall(f"{{{NS_W}}}Selector"):
+        name = selector.attrib.get("Name")
+        if name:
+            selectors[name] = (selector.text or "").strip()
+    return selectors
+
+
+def _parse_envelope(root: ET.Element) -> tuple[str, str, str, ET.Element | None, dict[str, str]]:
     header = root.find(f"{{{NS_S}}}Header")
     body = root.find(f"{{{NS_S}}}Body")
     action = (header.findtext(f"{{{NS_A}}}Action", default="") if header is not None else "").strip()
     resource_uri = (header.findtext(f"{{{NS_W}}}ResourceURI", default="") if header is not None else "").strip()
     message_id = (header.findtext(f"{{{NS_A}}}MessageID", default="") if header is not None else "").strip()
     body_elem = next(iter(body), None) if body is not None else None
-    return action, resource_uri, message_id, body_elem
+    return action, resource_uri, message_id, body_elem, _parse_selector_set(header)
 
 
 class WsmanMockServer:
@@ -832,11 +968,12 @@ class WsmanMockServer:
         relates_to: str,
         body_elem: ET.Element | None,
         return_override: int | None,
+        selectors: dict[str, str] | None = None,
     ) -> tuple[int, str]:
         with self._lock:
             try:
                 if action == ACTION_GET:
-                    return self._handle_get(resource_uri, relates_to)
+                    return self._handle_get(resource_uri, relates_to, selectors or {})
                 if action == ACTION_PUT:
                     return self._handle_put(resource_uri, relates_to, body_elem)
                 if action == ACTION_ENUMERATE:
@@ -851,10 +988,31 @@ class WsmanMockServer:
             body = _fault_body("UnsupportedCapability", f"No handler for action={action!r} resourceURI={resource_uri!r}")
             return 500, _envelope(ACTION_FAULT, relates_to, body)
 
-    def _handle_get(self, resource_uri: str, relates_to: str) -> tuple[int, str]:
+    def _handle_get(self, resource_uri: str, relates_to: str, selectors: dict[str, str]) -> tuple[int, str]:
         handler = GET_HANDLERS.get(resource_uri)
         if handler is None:
             raise _UnknownResource
+
+        expected = SELECTOR_MATCH_FOR_GET.get(resource_uri)
+        if expected is not None:
+            if not selectors and resource_uri in SELECTOR_REQUIRED_FOR_GET:
+                body = _fault_body(
+                    "InvalidSelectors",
+                    f"{resource_uri.rsplit('/', 1)[-1]} requires a SelectorSet naming one instance",
+                )
+                return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
+            mismatched = {name: value for name, value in selectors.items() if expected.get(name) != value}
+            if mismatched:
+                body = _fault_body("InvalidSelectors", f"No instance matches selector(s) {sorted(mismatched)}")
+                return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
+
+        if resource_uri == AMT_ETHERNET_PORT_SETTINGS and not self.state.ethernet_port_present:
+            body = _fault_body("InvalidResourceURI", "AMT_EthernetPortSettings is not implemented on this firmware")
+            return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
+        if resource_uri == CIM_BIOS_ELEMENT and self.faults.bios_element_get_faults:
+            body = _fault_body("UnsupportedCapability", "CIM_BIOSElement does not answer a bare Get on this firmware")
+            return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
+
         fields = handler(self.state)
         body = _fields_to_instance_xml(resource_uri, fields)
         return 200, _envelope(ACTION_GET_RESPONSE, relates_to, body, resource_uri=resource_uri)
