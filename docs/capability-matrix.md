@@ -124,6 +124,13 @@ EPR result meaningful rather than merely permissive.
 
 A short list, deliberately.
 
+- **The sleep and hibernate power actions.** `amt_power` accepts `sleep-light`
+  (CIM code 3), `sleep-deep` (code 4) and `hibernate` (code 7), and the codes and
+  expected-state mappings are unit-tested, but no hardware stage has issued any of
+  them. Stage 4 exercised only `on`/`off`. These three also depend on the target
+  operating system supporting the corresponding ACPI state, so a failure against
+  real hardware would not necessarily indicate a defect in this collection — which
+  is exactly why they are listed here rather than claimed.
 - **A non-zero IDE-R write.** Stage 6 proves the device is accepted, attached and
   presented writable, and that the session stays healthy. It does **not** prove
   bytes were written, because nothing at the other end issues a SCSI write: a

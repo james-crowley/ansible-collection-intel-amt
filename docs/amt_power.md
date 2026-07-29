@@ -11,14 +11,37 @@ Control and query Intel AMT power state.
 ## Purpose
 
 Reads and changes power state via `CIM_AssociatedPowerManagementService` (read) and
-`CIM_PowerManagementService.RequestPowerStateChange` (mutate). `state=on` and
-`state=off` are **convergent**: the current state is read first, and nothing is sent
-if the endpoint is already there. `state=reboot`, `state=reset`, and `state=cycle` are
+`CIM_PowerManagementService.RequestPowerStateChange` (mutate). `state=on`,
+`state=off` and `state=hibernate` are **convergent**: the current state is read
+first, and nothing is sent if the endpoint is already there. `state=reboot`,
+`state=reset`, `state=cycle`, `state=sleep-light` and `state=sleep-deep` are
 **imperative** and always issue a request outside check mode. `state=query` only reads.
 
 `reboot` and `reset` are two names for the *same* AMT action (master-bus-reset,
 action code 10) — AMT has no separate graceful-reboot primitive
 (`plugins/module_utils/client.py`, `PowerAction`/`_POWER_ACTION_CODES`).
+
+### Why the sleep depths are not convergent, but hibernate is
+
+`sleep-light` (ACPI S1, CIM code 3) and `sleep-deep` (ACPI S3, CIM code 4) both
+read back through `_POWER_STATE_TABLE` as the single normalized state `sleep`
+(`plugins/module_utils/models.py`). So "already asleep" is indistinguishable from
+"asleep, but at the other depth" — treating them as convergent would report
+`changed: false` for a transition that was never issued. They therefore always
+send. `hibernate` is convergent because CIM code 7 is the only value normalizing
+to `hibernate`, so that reading can be trusted.
+
+### Firmware and OS support
+
+**`sleep-light`, `sleep-deep` and `hibernate` are unverified against real
+firmware** — see [`capability-matrix.md`](capability-matrix.md). They carry the
+correct CIM codes, but no hardware qualification stage has exercised them.
+
+They also depend on the **target operating system** supporting the corresponding
+ACPI state and on it being enabled in firmware. Where it is not, AMT answers with
+a non-zero return code, surfaced as `error_class=remote_operation` rather than
+being treated as success. A powered-off machine cannot be put to sleep at all;
+AMT rejects that rather than ignoring it.
 
 A successful request only means AMT accepted it (`ReturnValue == 0`), not that the
 transition finished. This module polls a bounded number of times afterwards
@@ -29,7 +52,7 @@ what it actually observed; it never retries the request itself.
 
 | Option | Type | Default | Required | Choices |
 |---|---|---|---|---|
-| `state` | `str` | `query` | no | `on`, `off`, `reboot`, `reset`, `cycle`, `query` |
+| `state` | `str` | `query` | no | `on`, `off`, `reboot`, `reset`, `cycle`, `sleep-light`, `sleep-deep`, `hibernate`, `query` |
 | `host` | `str` | — | yes | — |
 | `port` | `int` | (16993 if `use_tls` else 16992) | no | — |
 | `username` | `str` | `admin` | no | — |

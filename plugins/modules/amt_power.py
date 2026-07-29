@@ -30,13 +30,44 @@ options:
   state:
     description:
       - >-
-        Desired power action. V(on) and V(off) are convergent (nothing is sent if
-        already in that state). V(reboot) and V(reset) both issue AMT's master-bus-reset
-        request (code 10) -- AMT has no separate graceful-reboot primitive, so these are
-        two names for the same action. V(cycle) issues a power-off-then-on request.
-        V(query) only reads the current state and never mutates anything.
+        Desired power action. V(on), V(off) and V(hibernate) are convergent (nothing is
+        sent if already in that state). V(reboot) and V(reset) both issue AMT's
+        master-bus-reset request (code 10) -- AMT has no separate graceful-reboot
+        primitive, so these are two names for the same action. V(cycle) issues a
+        power-off-then-on request. V(query) only reads the current state and never
+        mutates anything.
+      - >-
+        V(sleep-light) (ACPI S1) and V(sleep-deep) (ACPI S3) are deliberately B(not)
+        convergent, even though V(hibernate) is. AMT reports both sleep depths through
+        CIM C(PowerState) values that this collection normalizes to the single state
+        C(sleep), so "already asleep" cannot be distinguished from "asleep, but at the
+        other depth". Reporting C(changed=false) for a transition that was never
+        requested would be worse than always issuing it, so these two always send.
+      - >-
+        B(V(sleep-light), V(sleep-deep) and V(hibernate) are unverified against real
+        firmware.) They are wired to the CIM C(RequestPowerStateChange) codes 3, 4 and 7
+        respectively, but no hardware qualification stage has exercised them -- see
+        C(docs/capability-matrix.md). Sleep and hibernate additionally depend on the
+        B(target operating system) supporting the corresponding ACPI state and on it
+        being enabled in firmware; where it is not, AMT answers the request with a
+        non-zero return code, which this module reports as
+        C(error_class=remote_operation) rather than silently treating as success.
+      - >-
+        A machine that is powered off cannot be put to sleep. AMT rejects such a
+        request rather than ignoring it, so it surfaces as
+        C(error_class=invalid_state) or C(error_class=remote_operation) depending on
+        firmware.
     type: str
-    choices: ['on', 'off', 'reboot', 'reset', 'cycle', query]
+    choices:
+      - 'on'
+      - 'off'
+      - reboot
+      - reset
+      - cycle
+      - sleep-light
+      - sleep-deep
+      - hibernate
+      - query
     default: query
 seealso:
   - module: james_crowley.intel_amt.amt_info
@@ -176,7 +207,16 @@ from ansible_collections.james_crowley.intel_amt.plugins.module_utils.models imp
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.wsman import HAS_REQUESTS, REQUESTS_IMPORT_ERROR, WsmanClient
 
 #: The convergent states: read-first, no-op if already there.
-_CONVERGENT_STATES = ("on", "off")
+#:
+#: V(hibernate) is convergent because CIM PowerState 7 is the only value that
+#: normalizes to ``"hibernate"``, so "already hibernating" is a reading we can
+#: actually trust. The two sleep depths are deliberately *not* here: CIM 3
+#: (Sleep - Light, S1) and CIM 4 (Sleep - Deep, S3) both normalize to
+#: ``"sleep"`` -- see ``_POWER_STATE_TABLE`` in module_utils/models.py -- so a
+#: machine in S1 asked for V(sleep-deep) would compare equal and be reported as
+#: ``changed: false`` having never been asked to go deeper. Claiming
+#: convergence we cannot observe is worse than being imperative about it.
+_CONVERGENT_STATES = ("on", "off", "hibernate")
 
 #: Map a module `state` to the client-level action it issues. `query` has no
 #: entry -- it never reaches request_power_state at all.
@@ -186,6 +226,9 @@ _STATE_TO_ACTION = {
     "reboot": PowerAction.REBOOT,
     "reset": PowerAction.RESET,
     "cycle": PowerAction.CYCLE,
+    "sleep-light": PowerAction.SLEEP_LIGHT,
+    "sleep-deep": PowerAction.SLEEP_DEEP,
+    "hibernate": PowerAction.HIBERNATE,
 }
 
 #: The normalized end state each action is expected to converge on -- kept
@@ -197,6 +240,9 @@ _ACTION_EXPECTED_STATE = {
     PowerAction.REBOOT: "on",
     PowerAction.RESET: "on",
     PowerAction.CYCLE: "on",
+    PowerAction.SLEEP_LIGHT: "sleep",
+    PowerAction.SLEEP_DEEP: "sleep",
+    PowerAction.HIBERNATE: "hibernate",
 }
 
 
@@ -220,7 +266,17 @@ def argument_spec() -> dict[str, dict]:
     spec = _connection_argument_spec()
     spec["state"] = {
         "type": "str",
-        "choices": ["on", "off", "reboot", "reset", "cycle", "query"],
+        "choices": [
+            "on",
+            "off",
+            "reboot",
+            "reset",
+            "cycle",
+            "sleep-light",
+            "sleep-deep",
+            "hibernate",
+            "query",
+        ],
         "default": "query",
     }
     return spec

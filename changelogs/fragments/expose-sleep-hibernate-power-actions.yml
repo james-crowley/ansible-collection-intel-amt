@@ -1,0 +1,15 @@
+---
+minor_changes:
+  - "amt_power - expose the V(sleep-light), V(sleep-deep) and V(hibernate) power actions, which were fully implemented
+    in C(module_utils/client.py) -- correct CIM C(RequestPowerStateChange) codes 3, 4 and 7, and correct expected-state
+    mappings -- but omitted from the module's C(state) choices, so they were unreachable dead code. V(hibernate) is
+    convergent; the two sleep depths deliberately are not, because CIM 3 (S1) and CIM 4 (S3) both normalize to the
+    single state C(sleep), so treating them as convergent would report C(changed=false) for a transition that was never
+    issued. All three are unverified against real firmware and additionally depend on target-OS ACPI support, which the
+    documentation now states."
+
+bugfixes:
+  - "amt_power - a new test asserts that every C(state) choice except V(query) has an entry in both the action map and
+    the expected-state map, and that the module's copy of the expected-state map agrees with the client's. The first
+    guards the defect being fixed here -- three actions implemented but not reachable -- and the second guards check
+    mode previewing a different outcome than a real run would produce."
