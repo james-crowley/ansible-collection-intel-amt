@@ -181,18 +181,25 @@ already-built image paths, exactly like `amt_media` does.
 
 ### Connection (mirrors the `connection` doc fragment)
 
+**Every connection variable falls back to the conventional `amt_*` inventory
+variable of the same name**, which is what this collection's README, the `docs/`
+examples, and `tests/hardware/inventory.yml.example` all use. A conventional
+inventory therefore drives this role with no per-variable mapping, and an explicit
+`amt_baremetal_install_*` value still wins. The defaults below are quoted exactly
+as `defaults/main.yml` sets them.
+
 | Variable | Default | Notes |
 |---|---|---|
-| `amt_baremetal_install_host` | `{{ inventory_hostname }}` | The AMT management address, usually distinct from the OS's own address |
-| `amt_baremetal_install_port` | `null` | WS-Man port; `16993`/`16992` if unset |
-| `amt_baremetal_install_username` | `admin` | |
-| `amt_baremetal_install_password` | `null` (required) | Always vaulted |
-| `amt_baremetal_install_use_tls` | `true` | |
-| `amt_baremetal_install_allow_insecure_transport` | `false` | Required alongside `amt_baremetal_install_use_tls: false` |
-| `amt_baremetal_install_validate_certs` | `true` | |
-| `amt_baremetal_install_ca_path` | `null` | Mutually exclusive with `amt_baremetal_install_tls_fingerprint` |
-| `amt_baremetal_install_tls_fingerprint` | `null` | Required when `amt_baremetal_install_use_tls: true` |
-| `amt_baremetal_install_timeout` / `amt_baremetal_install_connect_timeout` | `30` / `10` | |
+| `amt_baremetal_install_host` | `{{ amt_host \| default(None) }}` | The AMT management address. **It does not fall back to `inventory_hostname`.** It used to, and that was removed as a bug: the inventory hostname is the *operating system's* name, whereas AMT answers on a separate management address, so the old default silently pointed at the wrong endpoint or an unresolvable name. With no `amt_host` it stays unset and `tasks/validate.yml` fails loudly — which is the correct outcome for a role that power-cycles hardware |
+| `amt_baremetal_install_port` | `{{ amt_port \| default(None) }}` | WS-Man port; the module picks `16993`/`16992` when unset |
+| `amt_baremetal_install_username` | `{{ amt_username \| default('admin') }}` | |
+| `amt_baremetal_install_password` | `{{ amt_password \| default(None) }}` (required) | Always vaulted. No default beyond the fallback, on purpose: a missing required value must fail loudly in `tasks/validate.yml`, not coerce silently |
+| `amt_baremetal_install_use_tls` | `{{ amt_use_tls \| default(true) }}` | |
+| `amt_baremetal_install_allow_insecure_transport` | `{{ amt_allow_insecure_transport \| default(false) }}` | Required alongside `amt_baremetal_install_use_tls: false` |
+| `amt_baremetal_install_validate_certs` | `{{ amt_validate_certs \| default(true) }}` | |
+| `amt_baremetal_install_ca_path` | `{{ amt_ca_path \| default(None) }}` | Mutually exclusive with `amt_baremetal_install_tls_fingerprint` |
+| `amt_baremetal_install_tls_fingerprint` | `{{ amt_tls_fingerprint \| default(None) }}` | Required when `amt_baremetal_install_use_tls: true`. Same rationale as the password: no default beyond the fallback |
+| `amt_baremetal_install_timeout` / `amt_baremetal_install_connect_timeout` | `{{ amt_timeout \| default(30) }}` / `{{ amt_connect_timeout \| default(10) }}` | |
 
 ### Lifecycle
 
@@ -228,34 +235,49 @@ already-built image paths, exactly like `amt_media` does.
   reports `changed: true`) -- which is exactly why this role never arms it
   more than once per confirmed attempt.
 
-## What this role has and has not been run against
+## Verification status
 
-`--syntax-check` passes for the role and for every playbook under
-`tests/hardware/`. Beyond that, this role was manually driven (ad hoc, not as
-a committed automated test -- see the constraint below) against a live
-instance of this collection's mock WS-Man server
-(`tests/integration/mock_servers/wsman_server.py`) with `amt_baremetal_install_boot_provider: pxe`,
-both under `--check` and for real, over plaintext. That run exercised the
-fan-out guard (refused a two-host play), the destructive-confirmation gate,
-a full validate -> probe -> arm -> reset -> observe -> detach pass with
-`reset_confirmed: true` written to a real state file, the resumability
-guard refusing a hand-crafted "interrupted, unconfirmed" state file without
-`amt_baremetal_install_force_resume`, and that flag then letting it proceed with a
-fresh `action_token`.
+**Both boot providers have now driven real firmware.** Hardware qualification
+stages 5 and 7 invoke this role directly via `ansible.builtin.include_role`
+(`tests/hardware/qualify_media_attach.yml` and `tests/hardware/qualify_pxe.yml`),
+and both passed against the lab's AMT 16.1.30 machine:
 
-**Not covered by that run, or by anything else in this PR:** the
-`ider_cdrom` provider's live path through `amt_redirection` and `amt_media`
-against the mock IDE-R server. That mock plays firmware and requires an
-active per-test handshake-driving script (see
-`tests/integration/mock_servers/run_ider_mock.py`'s own docstring) rather
-than passively answering connections the way the WS-Man mock does, and
-wiring a new one is exactly what the existing `amt_media` integration target
-already does -- duplicating or extending it was out of this change's scope
-(`tests/integration/` is explicitly not touched here). The `amt_media` and
-`amt_redirection` modules themselves are independently covered by their own
-integration targets; what remains genuinely unverified is this role's
-*orchestration* of them together. `tests/hardware/qualify_media_attach.yml`
-(stage 5) is where that gets proven against real firmware, gated behind the
-CircleCI `hardware` workflow's manual approval -- see
-`tests/hardware/README.md`. Treat the `ider_cdrom` path, and this role
-against real hardware generally, as unverified until that stage has run.
+| Stage | Playbook | Provider | What the role did on real hardware |
+|---|---|---|---|
+| 5 | `qualify_media_attach.yml` | `ider_cdrom` | validate -> probe -> enable IDE-R -> attach a real bootable ISO over IDE-R -> arm one-time boot -> reset -> observe -> detach |
+| 7 | `qualify_pxe.yml` | `pxe` | validate -> probe -> arm native one-time PXE -> reset -> observe, with `AMT_BootSettingData` re-read afterwards and asserted undrifted |
+
+So the `ider_cdrom` path's orchestration of `amt_redirection` and `amt_media`
+together -- the thing no mock tier covers, because the mock IDE-R server needs an
+active per-test handshake-driving script rather than passively answering
+connections (see `tests/integration/mock_servers/run_ider_mock.py`'s docstring) --
+is verified, not inferred.
+
+Below that, `--syntax-check` passes for the role and for every playbook under
+`tests/hardware/`, and the role was also driven ad hoc (not as a committed
+automated test) against a live instance of this collection's mock WS-Man server
+(`tests/integration/mock_servers/wsman_server.py`) with
+`amt_baremetal_install_boot_provider: pxe`, both under `--check` and for real, over
+plaintext. That run exercised the fan-out guard (refused a two-host play), the
+destructive-confirmation gate, a full validate -> probe -> arm -> reset -> observe
+-> detach pass with `reset_confirmed: true` written to a real state file, the
+resumability guard refusing a hand-crafted "interrupted, unconfirmed" state file
+without `amt_baremetal_install_force_resume`, and that flag then letting it proceed
+with a fresh `action_token`.
+
+**What is still unverified against real hardware**, stated specifically:
+
+- **A second machine.** Stages 5 and 7 have only ever run against
+  `amt-lab-01` (AMT 16.1.30). The lab's second machine never got past the
+  read-only stages, so nothing in this role is confirmed on a second endpoint or a
+  second firmware generation -- see [`docs/capability-matrix.md`](../../docs/capability-matrix.md).
+- **The hand-off wait.** Both hardware stages set
+  `amt_baremetal_install_wait_for_handoff: false`, so the `wait_for` phase and its
+  timeout behaviour have never run against a machine that actually installs an OS.
+- **`amt_baremetal_install_answer_image_path`.** Stage 6 proves `amt_media` presents
+  a writable image to real firmware, but it calls the module directly; this role has
+  never attached an answer-file image on hardware.
+- **The resumability guard on hardware.** It is covered only by the ad hoc mock run
+  above, with a hand-crafted state file.
+- **A real unattended install completing.** No stage boots an installer through to
+  a provisioned OS; stage 5 confirms boot hand-off over KVM and stops there.

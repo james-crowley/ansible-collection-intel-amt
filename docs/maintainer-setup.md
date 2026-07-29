@@ -4,212 +4,244 @@ GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/lic
 SPDX-License-Identifier: GPL-3.0-or-later
 -->
 
-# Maintainer setup: accounts, secrets, and one-time steps
+# Maintainer runbook: accounts, secrets, and one-time steps
 
-Everything here needs a human. Each item says what to do, where, and what it
-unblocks. Nothing in this list can be done from CI.
+This is the maintainer-side setup for the repository: the accounts, CircleCI
+contexts, and secrets that CI itself cannot create. It is excluded from the
+published collection artifact (`build_ignore` in `galaxy.yml`), because none of it
+is actionable by a consumer.
+
+Each section states the current state first, then whatever action remains.
 
 ---
 
-## 1. Decide the Galaxy namespace — **blocking, and time-sensitive**
+## 1. Galaxy namespace
 
-The collection is currently `james_crowley.intel_amt`. Nothing is published yet,
-so this is free to change now and a breaking change later.
+**Decided: `james_crowley`.** `galaxy.yml` declares
+`namespace: james_crowley`, `name: intel_amt`, so the fully-qualified collection
+name is `james_crowley.intel_amt` and every FQCN in `plugins/`, `roles/`,
+`tests/`, the hardware playbooks, the docs, and `scripts/setup-collection-tree.sh`
+uses it. Changing it after publication would be a breaking change for every
+consumer, so treat it as fixed.
 
-**Namespace rules.** A Galaxy namespace must be lowercase alphanumeric with
-underscores, cannot start with an underscore or a digit, and cannot contain
-consecutive underscores. It does **not** have to match a GitHub username — you can
-request an arbitrary name, and you can also have a namespace that maps to a GitHub
-org rather than a personal account.
-
-Plausible alternatives, all valid:
-
-| Namespace | FQCN becomes | Notes |
-|---|---|---|
-| `james_crowley` | `james_crowley.intel_amt` | current; ties the collection to you personally |
-| `crowley` | `crowley.intel_amt` | matches the CircleCI runner namespace already in use |
-| `crowleylab` / `crowley_lab` | `crowleylab.intel_amt` | reads as a project rather than a person |
-| something org-shaped | e.g. `<org>.intel_amt` | best if this may gain co-maintainers |
-
-**Cost of changing it:** 242 occurrences across 63 files. It is a mechanical
-rename (namespace directory, `galaxy.yml`, every FQCN in modules, role, tests,
-integration targets, hardware playbooks, docs, README, CI paths, and
-`scripts/setup-collection-tree.sh`), done in one PR and verified by the full test
-suite. Tell me the name and I will do it.
-
-**How claiming actually works** — this is not what I first told you, and the
-correction matters:
+Two facts worth recording, because they are easy to get wrong:
 
 - **`james_crowley` needs no claiming.** Galaxy auto-creates a namespace matching
-  your GitHub login the first time you sign in with GitHub, mapping hyphens to
-  underscores (`james-crowley` → `james_crowley`). So it is effectively reserved
-  for you already. My earlier "0 results means someone could take it" was wrong:
-  an empty query just means you have not signed in to Galaxy yet, not that the
-  name is up for grabs.
-- **Any other name is a forum request, not self-service.** There is no "create
-  namespace" button for a name that does not match a GitHub login. You post to the
-  Galaxy namespace request thread on the Ansible forum:
+  the owner's GitHub login the first time they sign in with GitHub, mapping
+  hyphens to underscores (`james-crowley` → `james_crowley`). An empty Galaxy
+  search result for a name does not mean it is available to others; it means
+  nobody has signed in to create it yet.
+- **Any *other* name is a forum request, not self-service.** There is no "create
+  namespace" button for a name that does not match a GitHub login. Requests go to
+  the Galaxy namespace request thread on the Ansible forum:
   <https://forum.ansible.com/t/ansible-galaxy-how-to-request-a-custom-namespace/45689>
-
-  The request needs: the desired namespace, a one-line description (it is shown on
+  A request needs the desired namespace, a one-line description (shown on
   Galaxy), a link to the GitHub org if there is one, and the Galaxy usernames to
-  make namespace admins — **each of whom must have signed in to Galaxy at least
-  once first**, so do that before requesting.
+  make namespace admins — each of whom must have signed in to Galaxy at least
+  once first.
 
-**So:**
-
-1. Sign in at <https://galaxy.ansible.com/> with GitHub. This alone secures
-   `james_crowley`.
-2. If you want a different name, open the forum request above. Expect it to take
-   days rather than minutes, so start it early if you want it.
-3. Tell me the final name and I will do the rename in one PR.
+**Remaining action:** sign in at <https://galaxy.ansible.com/> with GitHub, if
+that has not been done, so the namespace exists before the first publish.
 
 ---
 
-## 2. Create the `galaxy-publish` CircleCI context — **blocks publishing**
+## 2. The `galaxy-publish` CircleCI context
 
-The publish job exists and is wired, but the context it needs **does not exist**,
-so its first run would fail. This is the single largest untested path in the repo.
+**Exists.** The context is named exactly `galaxy-publish`, it holds the Galaxy API
+key as **`GALAXY_API_KEY`**, and it is restricted to this project only, so no other
+project in the org can publish with the key.
 
-Get an API key: <https://galaxy.ansible.com/ui/token/> → **Load token** (it is
-shown once).
+`GALAXY_API_KEY` is the name that matters: it is what the `publish` job in
+`.circleci/config.yml` reads, and the job fails fast with
+"`GALAXY_API_KEY` is not set; is the `galaxy-publish` context attached?" if the
+context is missing or renamed. Do not store it under any other name.
+
+To rotate the key, get a new one from <https://galaxy.ansible.com/ui/token/> →
+**Load token** (shown once), then store it under the same name — the same command
+form `.circleci/config.yml` documents for the lab context, which prompts for the
+value rather than taking it on the command line:
 
 ```bash
-circleci context create galaxy-publish --org gh/james-crowley
-
-circleci context secret set galaxy-publish --org gh/james-crowley \
-  --name ANSIBLE_GALAXY_API_KEY --value '<paste token>'
-
-# Restrict it to this project only, exactly as amt-lab-runner is restricted,
-# so no other project in the org can publish using your token.
-circleci context restriction create galaxy-publish \
-  --type project --value 833e6f14-146b-4cc1-9313-18576537356c \
-  --org gh/james-crowley
+circleci context store-secret galaxy-publish --org gh/james-crowley GALAXY_API_KEY
 ```
 
-Publishing then happens on a `v*` tag, behind a manual approval.
-
----
-
-## 3. Install Renovate — **replaces Dependabot**
-
-`renovate.json` is committed and configured for our actual dependency surfaces
-(pip requirements, `cimg/python` images, and the single `ansible-core` pin the
-hardware job uses). It needs the GitHub App installed to do anything.
-
-1. <https://github.com/apps/renovate> → **Install**.
-2. Grant it access to **this repository only** (not all repos).
-3. It opens an onboarding PR plus a "Dependency Dashboard" issue. Merge the
-   onboarding PR to activate.
-
-Note it works on private repos on the free tier. No secrets or env vars required.
-
-**What Renovate will and will not manage here:**
-
-- **Will:** `requirements.txt`, `tests/unit/requirements.txt`,
-  `tests/integration/requirements.txt`, `cimg/python` images in CI, and the
-  `ansible-core~=2.17.0` pin in the hardware job.
-- **Will not:** the sanity/unit *matrices*, because those are comma-separated lists
-  of supported versions rather than single pins — there is no "current version" to
-  bump. Widening or narrowing the support matrix is a policy decision, and the
-  Dependency Dashboard will still surface new `ansible-core` releases for you to
-  act on. I removed a regex manager that appeared to handle this; it would only
-  have produced noise.
-
----
-
-## 4. Decide: make the repository public?
-
-This is a genuine trade-off, not a formality.
-
-**Gained:**
-
-- **Branch protection.** Currently unavailable ("Upgrade to GitHub Pro or make this
-  repository public"). Right now CI is *advisory* — every merge so far was green
-  because I verified it manually, not because anything would have stopped a red
-  merge. Public unlocks required status checks.
-- Required for Galaxy to be genuinely useful to anyone else.
-- Private vulnerability reporting (referenced by `SECURITY.md`) works properly.
-
-**Cost:** the lab's AMT topology becomes public in git history and CI logs. I have
-kept endpoint addresses out of the repository, and CircleCI masks context values in
-job output, but **before flipping this I should sweep git history** for anything
-that leaked — commit messages, changelog fragments, and the evidence artifacts in
-particular. Ask me to do that sweep first.
-
-If it stays private, consider GitHub Pro purely to get branch protection, because
-unenforced CI on a repo that power-cycles hardware is a real gap.
-
----
-
-## 5. Give me Theta — **blocks the repeatability claim**
-
-Everything is qualified against **one** machine and **one** firmware version
-(AMT 16.1.30). The design intent was always that a second machine proves
-repeatability, and until it runs, "repeatable" is an assumption.
-
-What I need, added to the existing `amt-lab-runner` context:
+If the context ever has to be recreated from scratch, restrict it to this project
+only, the same way `amt-lab-runner` is restricted. Context restrictions are managed
+in **Organization Settings → Contexts** in the CircleCI UI, or via the contexts
+API; the project ID they need is not reproduced here, because it is a stable
+identifier better looked up than copied:
 
 ```bash
-circleci context secret set amt-lab-runner --org gh/james-crowley \
-  --name AMT_HOSTS --value '<LAB_HOST_1-ip>,<theta-amt-ip>'
+circleci api "/api/v2/project/gh/james-crowley/ansible-collection-intel-amt"
 ```
 
-`AMT_HOSTS` (plural) is already supported and takes precedence over `AMT_HOST`.
-**Two caveats:**
+### How a release actually publishes
 
-- Theta's TLS fingerprint differs from Lambda's, and there is currently only one
-  `AMT_TLS_FINGERPRINT` variable. Supporting per-host pins needs a small change to
-  `render-inventory.sh` — tell me when you add Theta and I will do it.
-- If Theta's AMT password differs from Lambda's, the same applies to
-  `AMT_PASSWORD`.
+Publishing is triggered by pushing a `v*` tag, and is gated twice:
 
-Theta's reviewed fingerprint is held in the `amt-lab-runner` context, not
-recorded here — this repository is public.
+1. `publish-approval`, a manual approval that only exists on tag pushes.
+2. The `publish` job asserts that the tag matches `galaxy.yml`'s `version` before
+   uploading anything, and uploads one exact filename rather than a
+   `./dist/*.tar.gz` glob.
+
+That check exists because **a Galaxy version is immutable once published**: it
+cannot be replaced, only superseded by a higher version. Tagging `v0.2.0` while
+`galaxy.yml` still says `0.1.0` would be irrecoverable.
 
 ---
 
-## 6. Confirm Lambda's UUID against MEBx — **one minute, unblocks the identity guard**
+## 3. Renovate
 
-Run the `hardware-observe` job (or stage 1) and read the `uuid` that `amt_info`
-reports for Lambda. The value is not reproduced here, because a platform GUID
-identifies a physical machine and this repository is public.
+**Installed and running.** The GitHub App is active on this repository, and
+Renovate has onboarded: it opened its "Dependency Dashboard" issue and is
+evaluating the surfaces `renovate.json` configures.
 
-Open MEBx (or BIOS system information) on Lambda and confirm it matches. This
-matters because the stage-2 identity cross-check compares the firmware-reported
-UUID against a reviewed value, and that check is what stops a reset landing on the
-wrong machine. It is currently *plausible* but unconfirmed — and the value needed a
-non-obvious SMBIOS little-endian field reversal to derive, so confirming it is
-confirming that reasoning, not just a string.
+**What Renovate manages here:**
 
-Cross-check from a trusted host if you prefer:
+- **Does:** `requirements.txt`, `tests/unit/requirements.txt`,
+  `tests/integration/requirements.txt`, the `cimg/python` images in CI, and the
+  `ansible-core~=2.17.0` pin the hardware job uses.
+- **Does not:** the sanity/unit *matrices*, because those are comma-separated
+  lists of supported versions rather than single pins — there is no "current
+  version" to bump. Widening or narrowing the support matrix is a policy decision.
+  The Dependency Dashboard still surfaces new `ansible-core` releases to act on
+  manually.
+
+**Remaining actions**, both visible on the Dependency Dashboard issue:
+
+- Renovate reports a **config migration** available for `renovate.json`. Ticking
+  the box on the dashboard makes it open the migration PR.
+- At least one update has **errored** and is being retried. The dashboard links
+  the Mend logs; resolve it there rather than assuming a green dashboard.
+
+---
+
+## 4. Repository visibility and branch protection
+
+**Both done.** The repository is **public**, and branch protection is **active on
+`main`** with required status checks — 12 of them, all CircleCI contexts — plus
+"require branches to be up to date before merging". CI is therefore enforced, not
+advisory: a red required check blocks the merge.
+
+List the current set rather than trusting a copy of it:
 
 ```bash
-openssl s_client -connect <LAB_HOST_1-ip>:16993 </dev/null 2>/dev/null \
-  | openssl x509 -noout -fingerprint -sha256
+gh api repos/james-crowley/ansible-collection-intel-amt/branches/main/protection \
+  --jq '.required_status_checks.contexts'
 ```
 
-Once confirmed, record it as `amt_expected_uuid` in the lab inventory and the
-guard becomes live.
+Keep that list in step with `.circleci/config.yml`. A job renamed in CI but not in
+the protection rule silently stops being required; a required check that no longer
+exists blocks every merge instead.
+
+Because the repository is public, the lab's AMT topology must stay out of it.
+Endpoint addresses, credentials, platform GUIDs, and TLS fingerprints live in the
+`amt-lab-runner` context and the gitignored `tests/hardware/inventory.yml`, never
+in the repository — see `tests/hardware/render-inventory.sh`, which emits
+credentials as `lookup('ansible.builtin.env', ...)` expressions so nothing secret
+reaches disk. Private vulnerability reporting (referenced by `SECURITY.md`) also
+depends on the repository being public.
 
 ---
 
-## Already done for you (no action needed)
+## 5. The second lab machine
 
-- **Weekly drift-detection schedule** — created via the CircleCI API as
-  `weekly-drift-detection`, Mondays 11:00 UTC, running the `test` workflow against
-  `main`. This closes a real gap found while auditing against community practice:
-  Geerling runs a weekly cron on every one of his ~100 repos precisely to catch
-  breakage that arrives without a push. Safe by construction, since
-  `run-hardware-tests` defaults to `false`.
+**Partly done.** Two machines are provisioned in the `amt-lab-runner` context, and
+`tests/hardware/render-inventory.sh` renders both as `amt-lab-01` and
+`amt-lab-02`. Per-machine credentials are already supported: machine 1 uses the
+unsuffixed variables (`AMT_HOST`, `AMT_PASSWORD`, `AMT_TLS_FINGERPRINT`, …) and
+each additional machine appends `_N` (`AMT_HOST_2`, `AMT_PASSWORD_2`,
+`AMT_TLS_FINGERPRINT_2`, …). Each machine needs **its own** reviewed fingerprint,
+because each AMT endpoint presents its own self-signed certificate; the render
+script refuses to emit a machine that has no pin. `AMT_HOSTS` (comma-separated)
+also still works, for machines that share one credential set.
 
-## Summary: what blocks what
+Adding a further machine therefore needs no code change:
 
-| Item | Blocks | Needs |
+```bash
+circleci context store-secret amt-lab-runner --org gh/james-crowley AMT_HOST_3
+circleci context store-secret amt-lab-runner --org gh/james-crowley AMT_TLS_FINGERPRINT_3
+# plus AMT_PASSWORD_3 / AMT_USERNAME_3 if they differ from machine 1's
+```
+
+Read the new machine's fingerprint from the `hardware-observe` job, which sends no
+credentials and mutates nothing, and review it before storing it.
+
+**Remaining action: approve the mutating stages for machine 2.** Machine 2 has
+completed stages 1, 3 and 8 only — its run stopped at `hardware-power-approval`,
+which was never approved. Until stages 4 through 7 run against it, power, media,
+writable-image and PXE remain a single-machine result. See
+[`capability-matrix.md`](capability-matrix.md) Tier 4.
+
+---
+
+## 6. Cross-check a machine's UUID (optional)
+
+This closes the loop on the stage-2 identity guard, which is what stops a reset
+landing on the wrong machine. It is **optional**: `amt_expected_uuid` is unset by
+default, `tests/hardware/qualify_readonly.yml` proceeds and simply reports that
+there is nothing to cross-check, and the guard only becomes live once a reviewed
+value is recorded. Note also that the guard exists **only in `tests/hardware/`** —
+it is not a module feature, and nothing in `plugins/` or `roles/` compares a UUID
+unless a caller passes one.
+
+1. Run the `hardware-observe` job (or stage 1) and read the `uuid` that `amt_info`
+   reports for the machine. The values are not reproduced in this repository,
+   because a platform GUID identifies a physical machine and this repository is
+   public.
+2. Boot the machine and read the same value from the OS's view of SMBIOS:
+
+   ```bash
+   sudo dmidecode -s system-uuid
+   # or, without root:
+   cat /sys/class/dmi/id/product_uuid
+   ```
+
+3. Compare the two strings. They must match exactly.
+4. Record the confirmed value as `amt_expected_uuid` for that host in the lab
+   inventory. Every later run of stage 1 then cross-checks it automatically and
+   fails on a drifted binding.
+
+The comparison is worth doing for a reason beyond bookkeeping: `amt_info` derives
+this value from `CIM_ComputerSystemPackage.PlatformGUID` and has to reverse the
+first three fields, because an SMBIOS Type 1 UUID stores them little-endian (see
+`_canonical_uuid()` in `plugins/module_utils/client.py`). Matching the OS-reported
+UUID confirms that reasoning, not just a string. Both lab machines already render
+with UUID version nibble `1` after the reversal, which is corroborating but weaker
+than a direct comparison.
+
+Do **not** substitute a certificate fingerprint for this check.
+`openssl x509 -fingerprint -sha256` returns the TLS leaf certificate's
+fingerprint, which is a different property of a different object and cannot
+confirm a platform UUID. It is the right tool for reviewing the TLS pin — which is
+what the `hardware-observe` job prints — and the wrong tool for identity.
+
+---
+
+## Already in place (no action needed)
+
+- **Weekly drift-detection schedule** — `weekly-drift-detection`, Mondays 11:00
+  UTC, running the `test` workflow against `main`. It exists because some breakage
+  arrives without anyone pushing: a new `ansible-core` point release, a PyPI
+  dependency change, or a rebuilt `cimg/python` image. Safe by construction, since
+  `run-hardware-tests` defaults to `false`, so a scheduled pipeline can never reach
+  lab hardware. Scheduled triggers live in project settings, not
+  `.circleci/config.yml`; inspect them with:
+
+  ```bash
+  circleci api "/api/v2/project/gh/james-crowley/ansible-collection-intel-amt/schedule"
+  ```
+
+- **The `amt-lab-runner` context**, restricted to this project, holding the lab
+  addresses, credentials and reviewed TLS pins.
+
+## Summary: what is left
+
+| Item | Status | Remaining |
 |---|---|---|
-| Galaxy namespace decision | any publish; gets harder later | your choice of name |
-| `galaxy-publish` context | publishing at all | Galaxy API token |
-| Renovate install | dependency updates | 2 clicks |
-| Public vs private | **enforced CI**, Galaxy usefulness | a decision + a history sweep |
-| Theta access | the repeatability claim | one context variable |
-| MEBx UUID check | the identity guard | one minute at the machine |
+| Galaxy namespace | Decided: `james_crowley` | Sign in to Galaxy once, if not already |
+| `galaxy-publish` context | Exists, holds `GALAXY_API_KEY`, project-restricted | Nothing |
+| Renovate | Installed, dashboard open | Config migration PR; one errored update |
+| Public repo + branch protection | Public, 12 required checks, enforced | Keep the check list in step with CI |
+| Second lab machine | Provisioned; stages 1, 3, 8 done | Approve stages 4-7 for it |
+| UUID identity guard | Optional, currently unset | One `dmidecode` comparison per machine |

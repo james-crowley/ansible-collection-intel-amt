@@ -102,18 +102,26 @@ is always `null` on the successful-exit path documented above.
 
 ## Examples
 
+`serial` is a **play** keyword, not a task keyword: putting it on a task makes
+Ansible fail with "conflicting action statements". Arming a boot is a fan-out
+hazard, so the example below shows the play wrapper that actually constrains it.
+
 ```yaml
 - name: Arm a one-time PXE boot for an unattended install
-  james_crowley.intel_amt.amt_boot:
-    host: 10.0.0.5
-    username: admin
-    password: "{{ vaulted_amt_password }}"
-    tls_fingerprint: "{{ vaulted_amt_tls_fingerprint }}"
-    device: pxe
-    action_token: "{{ lookup('ansible.builtin.password', '/dev/null length=32') }}"
-  delegate_to: localhost
-  no_log: true
-  serial: 1
+  hosts: "{{ target }}"
+  serial: 1                     # play-level; never fan out an arm-then-reset
+  gather_facts: false
+  tasks:
+    - name: Arm the one-time PXE boot
+      james_crowley.intel_amt.amt_boot:
+        host: 10.0.0.5
+        username: admin
+        password: "{{ vaulted_amt_password }}"
+        tls_fingerprint: "{{ vaulted_amt_tls_fingerprint }}"
+        device: pxe
+        action_token: "{{ lookup('ansible.builtin.password', '/dev/null length=32') }}"
+      delegate_to: localhost
+      no_log: true
 ```
 
 ```yaml
@@ -169,7 +177,18 @@ or five times before it.
   `once`), and the arm is consumed by literally the next reset — if something else
   resets the machine before your intended `amt_power` task runs, the boot selection is
   spent.
-- Hardware-unverified — no AMT firmware has actually processed this five-step
-  sequence yet. See the [Capability matrix](capability-matrix.md), including issue
-  **#13** on the WS-Addressing EPR byte-form question, which specifically affects this
-  module's `ChangeBootOrder` calls.
+- **Hardware-qualified against AMT 16.1.30 only.** Real firmware has processed this
+  five-step sequence: stage 7 armed a native one-time PXE boot, read it back as
+  armed, and found `AMT_BootSettingData` unchanged after the reset, and stage 5
+  armed `ider_cdrom` through the `amt_baremetal_install` role. Check-mode plans were
+  additionally computed against an AMT 19.0.5 endpoint in stage 3, but nothing was
+  ever armed on that generation, and no other generation has been touched at all.
+  See the [Capability matrix](capability-matrix.md).
+- **Issue #13 (the WS-Addressing EPR byte-form question) is settled for 16.1.30.**
+  Stage 7's `ChangeBootOrder` named a real endpoint reference for
+  `Intel(r) AMT: Force PXE Boot` and succeeded, so the prefixed-namespace form this
+  module emits **is** accepted by real firmware. That result is meaningful rather
+  than merely permissive because the same firmware rejected an empty `<Source/>`
+  with HTTP 400 — it demonstrably enforces its own schema on this call. The form
+  remains *inferred* for every other firmware generation, since a conformant XML
+  parser treats both byte-forms as identical and no test can distinguish them.

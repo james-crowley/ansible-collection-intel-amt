@@ -95,14 +95,17 @@ also gitignored; the CircleCI job stores it as build artifacts instead
 
 ## The staged plan, and why it never runs in parallel
 
-Each stage is a gate on the next. They run in this order, and **never in
-parallel** -- a failure at stage N must stop everything after it, not race
-ahead on the assumption stage N was cosmetic:
+There are **eight numbered stages** and **seven playbooks**: stage 2 has no
+playbook of its own, because it is a human cross-check performed on stage 1's
+output rather than anything Ansible can assert unaided. Each stage is a gate on
+the next. They run in this order, and **never in parallel** -- a failure at stage
+N must stop everything after it, not race ahead on the assumption stage N was
+cosmetic:
 
 | Stage | Playbook | Mutates? | What it catches |
 |---|---|---|---|
 | 1 | `qualify_readonly.yml` | No | Endpoint unreachable, firmware read failures |
-| 2 | `qualify_readonly.yml` (same file) | No | **Inventory/reality mismatch** -- firmware-reported UUID vs. reviewed `amt_expected_uuid` |
+| 2 | *(none -- human review of stage 1's output)* | No | **Inventory/reality mismatch** -- firmware-reported UUID vs. reviewed `amt_expected_uuid` |
 | 3 | `qualify_checkmode.yml` (`--check`) | No | Module check-mode paths that unit/mock tests cannot fully exercise against real firmware quirks |
 | 4 | `qualify_power.yml` | Yes | Real `RequestPowerStateChange` behaviour, attended |
 | 5 | `qualify_media_attach.yml` | Yes | IDE-R attach and boot hand-off against real firmware |
@@ -146,6 +149,27 @@ that the first machine's success was not a fluke of that specific firmware
 build or lab-network quirk. Never cut both machines over to a new stage at
 once: if a firmware quirk bricks a boot configuration, you want a known-good
 machine to compare against while recovering the other.
+
+### Where the lab actually stands
+
+As of 2026-07-28, and stated precisely because the difference matters:
+
+| Machine | Firmware | Stages completed |
+|---|---|---|
+| `amt-lab-01` | AMT 16.1.30 | **All eight** (1, 2, 3, 4, 5, 6, 7, 8) |
+| `amt-lab-02` | AMT 19.0.5 | **Only 1, 2, 3 and 8** -- the non-mutating ones |
+
+Machine 2's run reached `hardware-power-approval` and stopped there; that
+approval was never given, so stages 4 through 7 never ran against it. Nothing
+about power control, IDE-R media, the writable-image path or native PXE has
+been reproduced on any machine other than `amt-lab-01`. Read-only facts,
+check-mode plans and the idempotent re-probe have -- on a machine of a
+different firmware generation, which is worth more than a second machine of
+the same one.
+
+Real hostnames, addresses and fingerprints are deliberately absent from this
+repository; `amt-lab-01`/`amt-lab-02` are the neutral names
+[`render-inventory.sh`](render-inventory.sh) emits.
 
 ## If a machine ends up in a bad boot state
 

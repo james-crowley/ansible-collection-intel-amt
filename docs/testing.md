@@ -182,12 +182,17 @@ environment, never the repository. Commit only an `.example` file.
 
 ### Qualification order
 
-Run these in order and never in parallel. Each step is a gate on the next.
+**Eight numbered stages.** Run them in order and never in parallel; each is a gate
+on the next. Stage 2 is the odd one out: it has **no playbook of its own**, because
+it is a human cross-check performed on the output of stage 1's playbook
+(`qualify_readonly.yml`). That is why CI runs seven playbooks across eight stages.
 
 1. Read-only `amt_info` against each target.
 2. Compare the reported facts against an independent power probe and reviewed
    BIOS inventory — this is what catches an inventory/reality mismatch before it
-   becomes a reset of the wrong machine.
+   becomes a reset of the wrong machine. **No playbook**: `qualify_readonly.yml`
+   prints the firmware-reported UUID, and a human reviews it and records
+   `amt_expected_uuid` so every later run cross-checks it automatically.
 3. Check-mode power and boot plans. No mutation.
 4. Attended power on/off.
 5. IDE-R attach with a small test ISO; confirm boot handoff.
@@ -196,9 +201,9 @@ Run these in order and never in parallel. Each step is a gate on the next.
    separately proven.
 8. Idempotent re-probe.
 
-**Qualify one machine first.** A second machine proves repeatability. Never cut
-both over at once — if a firmware quirk bricks a boot configuration, you want a
-known-good machine to compare against.
+**Qualify one machine through all eight stages first.** A second machine proves
+repeatability. Never cut both over to a new stage at once — if a firmware quirk
+bricks a boot configuration, you want a known-good machine to compare against.
 
 ### If a machine ends up in a bad boot state
 
@@ -224,12 +229,17 @@ Being explicit, because the gap matters:
 - Real firmware differs across AMT generations and SKUs. Anything version
   dependent is unverified until step 1 runs on that generation.
 
-This collection is protocol-complete, test-covered, and **hardware-qualified
-against a single AMT 16.1.30 endpoint** as of 2026-07-28. That qualification
-found six defects the first two tiers could not have found, which is the
-concrete argument for this tier existing rather than a theoretical one.
+This collection is protocol-complete, test-covered, and **hardware-qualified** as
+of 2026-07-28 — precisely: **all eight stages against one AMT 16.1.30 endpoint
+(`amt-lab-01`), and the three non-mutating stages (1, 3, 8) reproduced on a second
+endpoint running AMT 19.0.5 (`amt-lab-02`)**. Machine 2's run stopped at
+`hardware-power-approval`, which was never approved, so nothing mutating has been
+exercised on it. That qualification found six defects the first two tiers could not
+have found, which is the concrete argument for this tier existing rather than a
+theoretical one.
 
 What it still does not cover is listed as Tier 4 in
 [`capability-matrix.md`](capability-matrix.md): a non-zero IDE-R write, whether a
-PXE exchange actually occurred, AMT's internal one-shot role bit, a second
-machine, and any firmware generation other than 16.1.30.
+PXE exchange actually occurred, AMT's internal one-shot role bit, the four
+mutating stages on any machine other than `amt-lab-01`, and any mutation at all on
+any firmware generation other than 16.1.30.

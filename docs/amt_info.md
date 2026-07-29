@@ -56,7 +56,7 @@ Everything is nested under a single `amt` key (`type: dict`, `returned: success`
 |---|---|---|---|
 | `amt.reachable` | `bool` | always | Whether the WS-Man management plane answered this read at all. |
 | `amt.version` | `str` | when available | AMT firmware version string, read from `CIM_SoftwareIdentity` where `InstanceID == "AMT"`, field `VersionString` (see [Capability matrix](capability-matrix.md)). |
-| `amt.uuid` | `str` | when available | System UUID from `CIM_ComputerSystem`. |
+| `amt.uuid` | `str` | when available | System UUID, read from `CIM_ComputerSystemPackage.PlatformGUID` as 32 undashed hex characters and rendered in canonical dashed form. The SMBIOS Type 1 UUID carries its first three fields **little-endian**, so those fields are reversed on the way out (`_canonical_uuid()` in [`plugins/module_utils/client.py`](../plugins/module_utils/client.py)); without that reversal the value does not match what the machine's own OS reports. It is **not** read from `CIM_ComputerSystem`, which has no such property. |
 | `amt.control_mode` | `str` | when available | `AMT_SetupAndConfigurationService.ProvisioningMode`. |
 | `amt.provisioning_state` | `str` | when available | `AMT_SetupAndConfigurationService.ProvisioningState`. |
 | `amt.hostname` | `str` | when available | `AMT_GeneralSettings.HostName` — firmware-observed, **not** an inventory value. |
@@ -172,7 +172,9 @@ compare caller-supplied identity.
   `BIOSPause`, `BIOSReflash`, and others) that `amt_info` does not surface; consult
   `amt_boot`'s and `amt_redirection`'s own capability checks, or read the class directly,
   if you need one of those.
-- This module is **hardware-qualified against AMT 16.1.30** (firmware version, all four
-  capability flags, redirection state and platform UUID all confirmed on real firmware). It
-  remains unverified on any other firmware generation — see the
-  [Capability matrix](capability-matrix.md).
+- This module is **hardware-qualified against AMT 16.1.30 and AMT 19.0.5** — the two
+  lab machines both ran it in stages 1 and 8, and on both the firmware version, all
+  four capability flags, redirection state, power state and platform UUID came back
+  from real firmware. It is the only module in the collection verified on more than
+  one generation, and it remains unverified on every generation other than those two
+  — see the [Capability matrix](capability-matrix.md).
