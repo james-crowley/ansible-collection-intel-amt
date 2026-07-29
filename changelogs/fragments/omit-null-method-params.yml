@@ -1,3 +1,0 @@
----
-bugfixes:
-  - "Omit WS-Man method parameters whose value is ``None`` instead of emitting an empty element. Real AMT 16.1.30 rejects ``CIM_BootConfigSetting.ChangeBootOrder`` carrying an empty ``<Source/>`` with HTTP 400 and \"The supplied SOAP violates the corresponding XML schema definition\", because ``Source`` is typed as an endpoint reference and so requires child elements. This blocked IDE-R and BIOS boot entirely against real firmware."

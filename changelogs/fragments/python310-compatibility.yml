@@ -1,6 +1,0 @@
----
-bugfixes:
-  - Support Python 3.10 on the controller, which the collection already claimed by declaring ``requires_ansible '>=2.17.0'`` (ansible-core 2.17 runs on 3.10) but did not actually honour. ``client.py`` imported ``enum.StrEnum`` and ``media_session.py`` used ``datetime.UTC``, both Python 3.11+, so every module that imports the client raised ImportError on 3.10 before any error handling could classify it.
-  - "``PowerAction`` keeps ``StrEnum`` semantics via an explicit ``__str__``. A plain ``(str, Enum)`` renders as ``PowerAction.ON`` under ``str()`` and f-string interpolation rather than ``on``, which would have silently changed the shape of messages and receipt fields."
-minor_changes:
-  - CI - add Python 3.10 to the unit-test matrix, paired with ansible-core 2.17. The matrix previously started at 3.11 and was therefore blind to 3.11-only APIs on a version of Python the collection claims to support.

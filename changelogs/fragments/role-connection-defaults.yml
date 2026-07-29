@@ -1,4 +1,0 @@
----
-bugfixes:
-  - "amt_baremetal_install - connection variables now fall back to the conventional ``amt_*`` inventory variables (``amt_host``, ``amt_password``, ``amt_tls_fingerprint`` and friends) that this collection's README, docs and example inventory all use, so a conventional inventory drives the role with no per-variable mapping."
-  - "amt_baremetal_install - ``amt_baremetal_install_host`` no longer defaults to ``inventory_hostname``. AMT answers on a separate management address from the operating system's hostname, so that default silently pointed at the wrong endpoint or an unresolvable name; it now resolves from ``amt_host`` and otherwise stays unset so validation fails loudly."

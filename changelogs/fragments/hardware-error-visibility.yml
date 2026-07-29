@@ -1,3 +1,0 @@
----
-bugfixes:
-  - "tests/hardware/qualify_readonly.yml - surface the redacted failure detail when amt_info fails. The task carries ``no_log: true`` to keep task arguments (including the password) out of the log, but that also censored the module's own error, which errors.py has already redacted and which is therefore safe to show. A censored failure is undiagnosable, so a rescue now reports ``error_class``, ``endpoint``, ``operation``, ``indeterminate`` and the redacted message."

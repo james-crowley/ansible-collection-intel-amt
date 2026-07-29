@@ -1,4 +1,0 @@
----
-bugfixes:
-  - "amt_baremetal_install - choose the power transition from the observed power state instead of always issuing ``reset``. A master bus reset does nothing to a machine that is already off, so installing an operating system onto a powered-off machine -- arguably the common bare-metal case -- attached the media, armed the one-shot boot, and then reported success having booted nothing."
-  - "tests/hardware/qualify_power.yml - restore the power state the stage started from. It previously left the target powered off, and the next stage issues a reset, which does nothing to an off machine."

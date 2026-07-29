@@ -1,3 +1,0 @@
----
-minor_changes:
-  - CI - a weekly scheduled pipeline now runs the standard test workflow against main, to catch breakage that arrives without a push such as a new ansible-core point release, a PyPI dependency change, or a rebuilt CI image. It cannot reach lab hardware, because the hardware workflow requires a pipeline parameter that defaults to false.

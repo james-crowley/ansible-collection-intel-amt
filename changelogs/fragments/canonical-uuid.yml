@@ -1,3 +1,0 @@
----
-bugfixes:
-  - "amt_info - render the system UUID in the canonical dashed form, reversing the first three SMBIOS fields. ``PlatformGUID`` arrives as 32 undashed hex characters with those fields little-endian, so the naive reading produces a plausible-looking UUID that does not match what MEBx displays -- which would make the identity cross-check fail against a correctly recorded expectation (https://github.com/james-crowley/ansible-collection-intel-amt/issues/32)."

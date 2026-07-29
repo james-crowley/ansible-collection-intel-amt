@@ -1,4 +1,0 @@
----
-minor_changes:
-  - Documentation now records that the collection is hardware-qualified against a single Intel AMT 16.1.30 endpoint through all seven qualification stages, and states specifically what remains unproven -- a non-zero IDE-R write, whether a PXE exchange occurred, AMT's internal one-shot role bit, a second machine, and any other firmware generation.
-  - "docs/capability-matrix.md gains a fourth tier for firmware-verified claims and tabulates the six defects hardware qualification found that neither the unit nor the mock tier could have caught."

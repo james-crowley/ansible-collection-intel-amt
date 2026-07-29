@@ -1,8 +1,0 @@
----
-minor_changes:
-  - CI - add a ``hardware-observe`` job that reports the SHA-256 leaf-certificate fingerprint each AMT port offers. It sends no credentials and mutates nothing, so it is safe to run before an endpoint's identity is established, and it produces the reviewed pin the credentialed stages require.
-  - CI - the hardware job installs ansible-core into a workspace virtualenv rather than with ``pip install --user``, because the lab runner is rootless with a read-only root filesystem.
-  - CI - the hardware job builds and installs the collection from the checkout before running playbooks, so qualification runs against the code under test rather than a published release.
-bugfixes:
-  - "tests/hardware/render-inventory.sh - emit the ``amt_targets`` group the qualification playbooks actually target. It previously emitted ``amt_lab``, so every play would have matched zero hosts and reported success having done nothing."
-  - "tests/hardware/render-inventory.sh - emit credentials as ``lookup('ansible.builtin.env', ...)`` expressions instead of literal values, so the AMT password and TLS fingerprint never touch disk. Also accept ``AMT_HOST``, ``AMT_PORT`` and ``AMT_REDIRECTION_PORT``, matching the variables the lab context provides."
