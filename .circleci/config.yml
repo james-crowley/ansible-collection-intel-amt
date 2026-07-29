@@ -123,19 +123,78 @@ commands:
 
   install-lab-ansible-venv:
     description: >-
-      Install ansible-core 2.17 into a workspace virtualenv -- the runner is rootless with a
-      read-only root filesystem and ships Python 3.10 -- and build+install this collection
-      from the checkout, so qualification runs against the code under test, on the oldest
-      ansible-core series the collection claims to support.
+      Install ansible-core 2.18.18+ into a workspace virtualenv -- the runner is rootless with
+      a read-only root filesystem, so nothing may be installed system-wide -- and build+install
+      this collection from the checkout, so qualification runs against the code under test.
+      The interpreter is chosen at runtime, not assumed: bare `python3` on this host is still
+      the system Python 3.10, which ansible-core 2.18 cannot run on at all.
     steps:
       - run:
           name: Install ansible-core into a workspace virtualenv
           command: |
-            python3 --version
-            python3 -m venv .venv
+            # ansible-core 2.18.18 is the first release that fixes
+            # GHSA-w8p5-mx5w-cpqj [HIGH] (argument injection in `ansible-galaxy role
+            # install`); the whole 2.17 line is EOL and will never be fixed, so the pin
+            # has to sit at >= 2.18.18. ~=2.18.18 takes 2.18.x patches but not 2.19,
+            # keeping hardware qualification on one deliberately chosen series.
+            #
+            # 2.18 requires Python 3.11+ on the controller, so the venv must NOT be
+            # built from bare `python3`: that is the host's system Python 3.10, which
+            # stays where it is. 3.12 is the target rather than the newest available:
+            # 2.18's supported controller range ends at 3.13, and 3.12 is also the
+            # newest version that can still run ansible-core 2.17 -- the collection's
+            # requires_ansible floor -- so one interpreter can reproduce a floor run by
+            # hand on this host. 3.14 is deliberately not a candidate: 2.18 does not
+            # support it. 3.11 and 3.13 are accepted fallbacks so a reinstalled runner
+            # does not silently block qualification.
+            #
+            # Nobody can log into this host from CI, so failing here with the full
+            # inventory of what was looked for and what exists beats a dependency
+            # resolver error forty lines later.
+            for candidate in python3.12 python3.11 python3.13; do
+              if command -v "$candidate" >/dev/null 2>&1; then
+                LAB_PYTHON="$(command -v "$candidate")"
+                break
+              fi
+            done
+            if [ -z "${LAB_PYTHON:-}" ]; then
+              # Pure-bash discovery on purpose: this branch has to be able to report
+              # what it found even on a host whose PATH is itself part of the problem.
+              available=""
+              IFS=':' read -r -a lab_path_dirs <<< "$PATH"
+              for dir in "${lab_path_dirs[@]}"; do
+                for exe in "$dir"/python3*; do
+                  if [ -x "$exe" ] && [ ! -d "$exe" ]; then
+                    name="${exe##*/}"
+                    case " $available " in
+                      *" $name "*) ;;
+                      *) available="$available $name" ;;
+                    esac
+                  fi
+                done
+              done
+              [ -n "$available" ] || available=" (no python3* executable at all)"
+              echo "ERROR: no usable Python interpreter for the lab virtualenv." >&2
+              echo "Looked for, in order: python3.12 (preferred), python3.11, python3.13." >&2
+              echo "Found on PATH:${available}" >&2
+              echo "Bare 'python3' is not a candidate: it is this host's system Python 3.10." >&2
+              echo "ansible-core 2.18+ requires Python 3.11+ on the controller, so no venv" >&2
+              echo "built from 3.10 can install the pinned version. Install python3.12 (and" >&2
+              echo "its matching venv package) on the runner host, then re-run." >&2
+              exit 1
+            fi
+            echo "Selected interpreter: ${LAB_PYTHON}"
+            "$LAB_PYTHON" --version
+            if ! "$LAB_PYTHON" -m venv .venv; then
+              echo "ERROR: '${LAB_PYTHON} -m venv' failed. On Debian/Ubuntu the stdlib venv" >&2
+              echo "module ships separately -- install the matching python3.X-venv package" >&2
+              echo "on the runner host." >&2
+              exit 1
+            fi
             . .venv/bin/activate
+            python --version
             python -m pip install --upgrade pip
-            python -m pip install "ansible-core~=2.17.0" -r requirements.txt
+            python -m pip install "ansible-core~=2.18.18" -r requirements.txt
             ansible --version
       - run:
           name: Install the collection from this checkout
