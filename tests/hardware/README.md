@@ -91,7 +91,100 @@ the example inventory) -- never from a file in this repository.
 
 Evidence this stage produces is written to `tests/hardware/output/`, which is
 also gitignored; the CircleCI job stores it as build artifacts instead
-(`store_artifacts: path: tests/hardware/output`).
+(`store_artifacts: path: tests/hardware/output`). Everything in that directory
+is redacted first -- see below.
+
+## Evidence redaction
+
+Six of the stage playbooks write JSON evidence into `tests/hardware/output/`,
+and CI publishes that directory as the `hardware-evidence` artifact. Those
+values come from firmware, so they describe a real machine on a real network.
+
+[`redact-evidence.py`](redact-evidence.py) rewrites every `.json` file in that
+directory in place, and every `hardware-*` job runs it via the shared
+`redact-hardware-evidence` command **immediately before `store_artifacts`**,
+with `when: always` so evidence written before a failing stage is covered too.
+
+### Why it exists
+
+**CircleCI masks context values in log output only. It does not mask
+`store_artifacts` content.** Holding `AMT_HOST` and friends in the restricted
+`amt-lab-runner` context therefore never censored the evidence files, and
+artifact visibility follows the project's "Free and Open Source" flag -- which
+made the published evidence world-readable. That flag is a checkbox, so the
+artifact has to be safe on its own rather than safe because of how the project
+happens to be configured today. A previous history rewrite deliberately removed
+exactly this class of data from the repository; leaking it through CI artifacts
+would defeat that work.
+
+It runs at the CI layer, once, rather than inside each playbook. Six write sites
+are six chances to forget, and a seventh playbook added later would leak by
+default. The right place to fix it is where the data leaves the machine.
+
+### What is redacted
+
+| Category | Examples |
+| --- | --- |
+| IPv4 and IPv6 addresses | `ip_address`, `default_gateway`, `subnet_mask`, `primary_dns`, `secondary_dns`, the address inside `operation.endpoint` |
+| MAC addresses | `mac_address` and `mac_address_raw`, colon- or dash-separated, any case |
+| UUIDs / platform GUIDs | `uuid`, dashed and 32-character compact forms |
+| SHA-256 fingerprints and digests | `operation.tls_peer_fingerprint`, bare 64-hex digests |
+| DNS names / FQDNs | `domain_name`, and any `label.label...tld` inside a message |
+| The AMT hostname | `hostname` -- a bare label matches no pattern, so the key is what identifies it |
+
+Strings are walked wherever they occur, including inside lists, nested
+dictionaries, and strings that merely *contain* an address rather than being one
+(`"WS-Man Get against 192.0.2.10:16993 failed"`). Keys are never rewritten.
+
+Each distinct value maps to a stable pseudonym for the whole run
+(`<redacted-ipv4-1>`, `<redacted-mac-1>`, ...), so an address appearing in three
+files is still recognisably one machine. Tokens are assigned in order of first
+appearance and are deliberately **not** derived from the value: a hash of an
+IPv4 address on a known /24 is a reversible oracle -- 254 guesses -- and a MAC on
+a known OUI is not much better.
+
+### What is deliberately preserved, and why
+
+Over-redaction is its own failure. The point of keeping these artifacts is that
+a reviewer can tell what the firmware actually did, and evidence scrubbed into
+uselessness is evidence that gets dropped a release later. So the following stay
+exactly as the firmware reported them:
+
+- Firmware `version` (`19.0.5`) and `bios_version`. Both are dotted and
+  TLD-shaped; the FQDN rule requires the label before the last one to contain a
+  letter, which is what keeps `EXAMPLE10H.86A.0000.2026.0101.0000` out of it.
+- Capability flags, `power_state`, `enabled_state`, `operational_status`,
+  `requested_state`, `link_policy` integers, `wake_on_lan_capable`.
+- `bytes_read` / `bytes_written`, `writable`, `session_id`, `error_class`,
+  `AMT_BootSettingData` fields, and every boolean.
+- Repository paths in the prose `note` and `diagnostic` fields
+  (`tests/hardware/README.md#...`): `md` and `yml` are TLD-shaped labels, and
+  redacting them would delete the pointer a reviewer is meant to follow.
+- Public standards domains inside WS-Man resource URIs (`intel.com`,
+  `schemas.dmtf.org`, `schemas.xmlsoap.org`, `w3.org`, `oasis-open.org`). Those
+  are protocol constants, not lab data.
+- The JSON structure itself: same keys, same nesting, same types.
+
+Redacting twice is a no-op, so a re-run cannot renumber the tokens.
+
+### Running and testing it by hand
+
+```bash
+python3 tests/hardware/redact-evidence.py tests/hardware/output
+```
+
+Stdlib only, and invoked with the system `python3` rather than the lab venv on
+purpose: the step runs even on the paths where `.venv` was never built. It never
+exits non-zero, including when the directory does not exist -- it must not turn a
+red job into a differently red one. It prints a per-category count of what it
+redacted, which is the line in the job log that tells a reviewer it actually ran.
+
+Unit tests live in
+[`tests/unit/hardware/test_redact_evidence.py`](../unit/hardware/test_redact_evidence.py).
+Every fixture there uses obviously fake values -- RFC 5737 TEST-NET-1, RFC 3849
+documentation IPv6, the RFC 7042 documentation MAC block, `.invalid` domains.
+**Never put a real lab value in a fixture**; a committed fixture is exactly the
+leak this script exists to prevent.
 
 ## The staged plan, and why it never runs in parallel
 

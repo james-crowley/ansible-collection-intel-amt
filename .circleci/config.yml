@@ -282,6 +282,29 @@ commands:
             # mismatch obvious instead of silently matching 0 hosts.
             cat tests/hardware/inventory.yml
 
+  redact-hardware-evidence:
+    description: >-
+      Replace identifying lab data in tests/hardware/output with stable pseudonyms,
+      immediately before store_artifacts publishes it. Six stage playbooks write evidence
+      there, so this runs once at the CI layer instead: six write sites are six chances to
+      forget, and a seventh playbook added later would leak by default. Redacting where the
+      data leaves the machine is the only version of this that stays correct.
+    steps:
+      - run:
+          name: Redact identifying data from the hardware evidence
+          # always, so evidence written before a stage failed is redacted too.
+          when: always
+          command: |
+            # CircleCI masks context values in LOG output only. It does not mask
+            # store_artifacts content, so holding AMT_HOST in a context never censored
+            # the evidence files. The published artifact has to be safe on its own:
+            # artifact visibility follows the project's "Free and Open Source" flag,
+            # which is a checkbox someone will flip again.
+            #
+            # System python3 on purpose. The script is stdlib-only, and this step runs
+            # even on the paths where .venv was never built or the install failed.
+            python3 tests/hardware/redact-evidence.py tests/hardware/output
+
   remove-lab-inventory:
     description: Remove the rendered inventory, always -- even on failure, so a resolvable secret lookup never lingers past the job that needed it.
     steps:
@@ -602,6 +625,7 @@ jobs:
             . .venv/bin/activate
             ansible-playbook tests/hardware/qualify_idempotent_reprobe.yml \
               -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -v
+      - redact-hardware-evidence
       - store_artifacts:
           path: tests/hardware/output
           destination: hardware-evidence
@@ -631,6 +655,7 @@ jobs:
             . .venv/bin/activate
             ansible-playbook tests/hardware/qualify_power.yml \
               -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -e amt_qualify_attended=false -v
+      - redact-hardware-evidence
       - store_artifacts:
           path: tests/hardware/output
           destination: hardware-evidence
@@ -662,6 +687,7 @@ jobs:
             . .venv/bin/activate
             ansible-playbook tests/hardware/qualify_media_attach.yml \
               -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -e amt_qualify_attended=false -v
+      - redact-hardware-evidence
       - store_artifacts:
           path: tests/hardware/output
           destination: hardware-evidence
@@ -695,6 +721,7 @@ jobs:
             . .venv/bin/activate
             ansible-playbook tests/hardware/qualify_writable_image.yml \
               -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -e amt_qualify_attended=false -v
+      - redact-hardware-evidence
       - store_artifacts:
           path: tests/hardware/output
           destination: hardware-evidence
@@ -736,6 +763,7 @@ jobs:
               -e amt_qualify_attended=false \
               -e amt_pxe_prereqs_confirmed=<< pipeline.parameters.pxe-prereqs-confirmed >> \
               -v
+      - redact-hardware-evidence
       - store_artifacts:
           path: tests/hardware/output
           destination: hardware-evidence

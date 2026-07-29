@@ -74,6 +74,13 @@ Report anything that contradicts the following, as each is intended behaviour:
   credentials cross into it as in-memory values and never appear in `argv` or the
   process environment where other local users could read them.
 - Session state files are created mode `0600`.
+- Hardware qualification evidence is redacted before CI publishes it. CircleCI
+  masks context values in **log output only** -- masking does not extend to
+  `store_artifacts` content -- so `tests/hardware/redact-evidence.py` runs
+  immediately before every `store_artifacts` of `tests/hardware/output`, and the
+  published artifact must be safe regardless of the project's artifact
+  visibility setting. See
+  [`tests/hardware/README.md`](tests/hardware/README.md#evidence-redaction).
 
 ## Scope
 
