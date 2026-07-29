@@ -17,9 +17,10 @@ implying a higher tier than it earns:
    still not the same as "tested on our hardware."
 2. **Unit/mock tested** — exercised by this collection's own test suite against
    deterministic fixtures/fakes, never against real AMT firmware.
-3. **Verified against real firmware** — as of 2026-07-28, against a lab
-   Intel AMT **16.1.30** endpoint via a self-hosted CircleCI runner, through all
-   seven qualification stages.
+3. **Verified against real firmware** — as of 2026-07-28, on two lab endpoints via
+   a self-hosted CircleCI runner: all eight qualification stages on machine 1
+   (Intel AMT **16.1.30**), and the three non-mutating stages on machine 2
+   (Intel AMT **19.0.5**).
 4. **Still unproven** — a short, specific list, kept honest.
 
 The collection is no longer "hardware-unverified". Hardware qualification found
@@ -89,18 +90,31 @@ about this.
 
 ## Tier 3: Verified against real firmware
 
-Verified 2026-07-28 against a lab endpoint reporting AMT **16.1.30**, driven from
-a self-hosted CircleCI runner (`crowley/amt-runner`, Python 3.10, ansible-core
-2.17) with TLS pinned to the endpoint's reviewed leaf certificate.
+Verified 2026-07-28 on the lab's self-hosted CircleCI runner (`crowley/amt-runner`,
+Python 3.10, ansible-core 2.17), with TLS pinned to each endpoint's own reviewed
+leaf certificate. **Two machines were involved, and they got different amounts of
+coverage — the difference matters, so it is recorded per stage:**
 
-| Stage | What real firmware confirmed |
-|---|---|
-| 1-2 read-only | `amt_info` over pinned TLS with HTTP Digest. Firmware version from `CIM_SoftwareIdentity`, all four capability flags, `EnabledState 32771` decoded as SOL+IDER, power state `2 -> on`, and the platform UUID |
-| 3 check mode | power and boot plans computed and **nothing mutated** |
-| 4 power | convergent `on` reported `changed: false` when already on; `off` reported `changed: true`; initial state restored afterwards |
-| 5 IDE-R media | the native Python IDE-R engine served a real bootable ISO to real firmware, and the boot was armed and reset issued |
-| 6 writable image | the device was presented **writable** — MODE_SENSE write-protect bit `0x00`, not `0x80` |
-| 7 native PXE | one-time PXE armed and read back as armed, reset issued and recovered, `AMT_BootSettingData` stable afterwards. This also settled issue #13: the prefixed-namespace EPR form **is** accepted by real firmware |
+- **`amt-lab-01` (machine 1), AMT 16.1.30** — completed **all eight** stages.
+- **`amt-lab-02` (machine 2), AMT 19.0.5** — completed only the three
+  **non-mutating** stages (1, 3, 8). The run then stopped at
+  `hardware-power-approval`, which was never approved, so machine 2 has **no**
+  power, media, writable-image, or PXE verification at all.
+
+The accurate one-line summary is therefore: *all eight stages on one machine;
+read-only facts, check-mode plans, and the idempotent re-probe reproduced on a
+second machine of a different firmware generation.*
+
+| Stage | Machines | What real firmware confirmed |
+|---|---|---|
+| 1 read-only | 1 and 2 | `amt_info` over pinned TLS with HTTP Digest. Firmware version from `CIM_SoftwareIdentity`, all four capability flags, power state `2 -> on`, the platform UUID, and `AMT_RedirectionService.EnabledState` decoded on two different values (`32769` = IDER only on machine 1; `32771` = SOL+IDER on machine 2) |
+| 2 identity cross-check | 1 and 2 | Each machine returned a **distinct** platform UUID, and both rendered with UUID version nibble `1` after the SMBIOS little-endian field reversal — independent corroboration of the byte-order fix on a second, unrelated GUID. This stage has **no playbook of its own**: it is the human review step inside `qualify_readonly.yml`, and its comparison is still a no-op because `amt_expected_uuid` has not been recorded for either machine yet |
+| 3 check mode | 1 and 2 | power and boot plans computed and **nothing mutated** |
+| 4 power | 1 only | convergent `on` reported `changed: false` when already on; `off` reported `changed: true`; initial state restored afterwards |
+| 5 IDE-R media | 1 only | the native Python IDE-R engine served a real bootable ISO to real firmware, and the boot was armed and reset issued |
+| 6 writable image | 1 only | the device was presented **writable** — MODE_SENSE write-protect bit `0x00`, not `0x80` |
+| 7 native PXE | 1 only | one-time PXE armed and read back as armed, reset issued and recovered, `AMT_BootSettingData` stable afterwards. This also settled issue #13: the prefixed-namespace EPR form **is** accepted by real firmware |
+| 8 idempotent re-probe | 1 and 2 | repeated reads reported `changed: false` and agreed with each other; no session or state was left drifting behind the stages above |
 
 Notably the same firmware **does** enforce its SOAP schema on `ChangeBootOrder` —
 it rejected an empty `<Source/>` with HTTP 400 — which is what makes the stage-7
@@ -124,12 +138,17 @@ A short list, deliberately.
   path for it, so stage 7 asserts `AMT_BootSettingData` stability instead. The
   headline claim that a one-time boot "does not persist" is therefore
   *inferred*, not directly measured.
-- **A second machine.** Everything above is one endpoint, one firmware version.
-  Theta is available and would prove repeatability; until it runs, treat AMT
-  16.1.30 as the only qualified generation.
-- **Any firmware generation other than 16.1.30**, including the Small Business
-  Mode / no-TLS path, which is inferred from `parmstro`'s reporting rather than
-  observed here.
+- **The destructive stages on a second machine.** Machine 2 got stages 1, 3 and 8
+  only, because `hardware-power-approval` was never approved for that run. Nothing
+  about power control, IDE-R media, the writable-image path or native PXE has been
+  reproduced on any machine other than `amt-lab-01` — those four stages remain a
+  single-machine, single-firmware-generation result. Machine 2 shows that the
+  read-only and check-mode paths are not a fluke of one endpoint; it does not show
+  that the mutating ones are not.
+- **Anything mutating on a firmware generation other than 16.1.30.** AMT 19.0.5 has
+  been read from and planned against (stages 1, 3, 8), never mutated. Every other
+  generation is untouched, including the Small Business Mode / no-TLS path, which is
+  inferred from `parmstro`'s reporting rather than observed here.
 
 ## Known open risks
 
@@ -227,12 +246,12 @@ now-consistent shape.
 
 ## Firmware-generation compatibility
 
-**Every row below except the TLS-availability one is inferred from public
-documentation (Intel's AMT Implementation and Reference Guide, MeshCentral's
-generation-conditional logic) and this collection's own reading of that
-documentation — not independently tested against a machine of that generation.**
-Only the TLS-availability finding is hardware-verified, and only for the one
-configuration `parmstro` actually tested.
+**Every row below is inferred from public documentation (Intel's AMT
+Implementation and Reference Guide, MeshCentral's generation-conditional logic)
+and this collection's own reading of that documentation — not independently tested
+against a machine of that generation — except the three rows marked otherwise:**
+the TLS-availability finding `parmstro` hardware-verified, and the two lab
+generations in Tier 3 above.
 
 | AMT generation | TLS (16993) | IDE-R | SOL | One-time PXE (`ForcePXEBoot`) | Status |
 |---|---|---|---|---|---|
@@ -241,6 +260,8 @@ configuration `parmstro` actually tested.
 | 10.x, Enterprise/other modes | Yes | Present | Present | Present | **Inferred** — not tested |
 | 11.x+ Enterprise | Yes | Present | Present | Present | **Inferred** — not tested |
 | 12.x+ | Yes, enhanced | Present | Present | Present | **Inferred** — not tested |
+| **16.1.30** (machine 1) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages** — the only generation this collection has ever mutated |
+| **19.0.5** (machine 2) | Yes, pinned | Advertised | Advertised | Advertised | **Hardware-verified read-only** (stages 1, 3, 8). Capability flags were read live and all four came back `true`; nothing was mutated |
 
 "Present" in the IDE-R/SOL/PXE columns means "AMT's published feature set for this
 generation includes it," per `docs/protocol-notes.md` §1.1 and Intel's own
@@ -254,10 +275,14 @@ rather than assume from this table. Never use this table as a substitute for a l
 
 ## What would move something from Tier 3 to Tier 1
 
-Per `docs/testing.md`'s qualification order: a read-only `amt_info` pass against real
-hardware first (cross-checked against an independent power probe and BIOS inventory),
-then check-mode plans, then attended power control, then IDE-R attach with a small
-test ISO, then the writable-image path, then one-time PXE, then an idempotent
-re-probe — one machine first, a second machine to prove repeatability, never both at
-once. Until that has actually run and its evidence is recorded here, this document's
-Tier 3 section stands as written.
+Per `docs/testing.md`'s qualification order, the eight stages in sequence: a
+read-only `amt_info` pass against real hardware (stage 1), a human cross-check of
+the reported facts against the physical machine (stage 2, no playbook of its own),
+check-mode plans (stage 3), then attended power control (4), IDE-R attach with a
+small test ISO (5), the writable-image path (6), one-time PXE (7), and an
+idempotent re-probe (8) — one machine all the way through first, a second machine
+afterwards to prove repeatability, never both cut over to a new stage at once.
+
+Stages 1, 3 and 8 have now cleared that bar on two machines. Stages 4 through 7
+have cleared it on one. Until they clear it on a second machine and that evidence
+is recorded above, this document's Tier 3 and Tier 4 sections stand as written.
