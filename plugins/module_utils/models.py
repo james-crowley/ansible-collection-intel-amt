@@ -82,22 +82,40 @@ _OPERATIONAL_STATUS_TABLE: dict[int, str] = {
     19: "relocating",
 }
 
-#: ``AMT_EthernetPortSettings.LinkPolicy`` value whose presence means "keep the
-#: network link up regardless of host power state", i.e. the bit that makes an
-#: endpoint answerable (and wakeable) while powered off. See
-#: docs/protocol-notes.md s2.7.
-LINK_POLICY_ALWAYS_ON = 16
+#: ``AMT_EthernetPortSettings.LinkPolicy`` values, from the vendor reference
+#: implementation: ``device-management-toolkit/go-wsman-messages``
+#: ``pkg/wsman/amt/ethernetport`` (``decoder.go`` named constants, ``types.go``
+#: ``ValueMap={1, 14, 16, 224}`` / ``Values={available on S0 AC, available on Sx
+#: AC, available on S0 DC, available on Sx DC}``). See docs/protocol-notes.md
+#: s2.7.
+#:
+#: ``Sx`` is any non-S0 ACPI state -- sleep, hibernate, soft-off. ``AC``/``DC``
+#: is the power source. The enum therefore crosses two axes, and there is **no**
+#: "always on" value: the table this replaced invented one at ``16``, which is
+#: really S0 DC. That inversion is what ``_LINK_POLICY_SX_VALUES`` below fixes.
+LINK_POLICY_S0_AC = 1
+LINK_POLICY_SX_AC = 14
+LINK_POLICY_S0_DC = 16
+LINK_POLICY_SX_DC = 224
 
-#: The ``LinkPolicy`` values this collection can name. Corroborated on real AMT
-#: 10.0.56 hardware only for 1, 14 and 16 (the set one live machine returned);
-#: 2 and 15 are the documented AC/DC sleep counterparts and have not been
-#: observed. Reported values outside this table are still surfaced raw.
+#: The two values that mean "the link is maintained while the host is *not* in
+#: S0" -- i.e. while it is asleep, hibernating or off. Presence of either is what
+#: makes an endpoint answerable (and so wakeable) over WS-Man in that state; the
+#: pair differ only in whether the machine is on mains or battery.
+_LINK_POLICY_SX_VALUES = (LINK_POLICY_SX_AC, LINK_POLICY_SX_DC)
+
+#: Only the four values Intel's enum actually defines. Deliberately no more:
+#: this table previously carried ``2: sx_ac`` and ``15: sx_dc`` transcribed from
+#: ``parmstro``'s constants file, neither of which is in the vendor enum, and
+#: naming them lent invented meanings the same authority as real ones. A value
+#: outside this table now decodes to ``unknown(<raw>)`` -- passed through and
+#: visibly unnamed, which is what go-wsman-messages itself does (its decoder
+#: returns "Value not found in map").
 _LINK_POLICY_TABLE: dict[int, str] = {
-    1: "s0_ac",  # powered on, AC
-    2: "sx_ac",  # sleep/hibernate, AC
-    14: "s0_dc",  # powered on, DC
-    15: "sx_dc",  # sleep/hibernate, DC
-    LINK_POLICY_ALWAYS_ON: "always_on",  # network link always on -- the WoL-capable bit
+    LINK_POLICY_S0_AC: "s0_ac",  # available on S0 AC -- powered on, mains
+    LINK_POLICY_SX_AC: "sx_ac",  # available on Sx AC -- asleep/off, mains
+    LINK_POLICY_S0_DC: "s0_dc",  # available on S0 DC -- powered on, battery
+    LINK_POLICY_SX_DC: "sx_dc",  # available on Sx DC -- asleep/off, battery
 }
 
 
@@ -293,6 +311,15 @@ class EthernetSettings:
       from a ``ping_response_enabled`` option), which is one of the reasons
       this collection derives protocol facts from their research notes rather
       than adopting their modules.
+    * ``wake_on_lan_capable`` means precisely *``LinkPolicy`` includes an Sx
+      value, so the network link is maintained while the host is not in S0*. The
+      name is imperfect -- AMT's own wake plumbing (``IdleWakeTimeout``, the MEBx
+      ``Intel ME ON in Host Sleep States`` setting) is adjacent but distinct, and
+      this field reads only ``LinkPolicy``. It is kept anyway: it shipped in
+      0.2.0 and 0.3.0, removing a return key is a breaking change, and one
+      correct field under an approximate name beats two fields whose only
+      difference a caller has to look up. The precise meaning is stated here, in
+      ``docs/amt_info.md`` and in the module's RETURN block.
     """
 
     mac_address: str | None = None
@@ -327,11 +354,17 @@ class EthernetSettings:
             ip_sync_enabled=optional_bool(instance.get("IpSyncEnabled")),
             link_policy=policies,
             link_policy_names=[_decode(_LINK_POLICY_TABLE, value) for value in policies] if policies is not None else None,
+            # True when *either* Sx value is present -- Sx AC (14) or Sx DC
+            # (224). Both mean the link survives the host leaving S0; they
+            # differ only in power source, and an endpoint that maintains the
+            # link on battery but not mains (or vice versa) is still an endpoint
+            # this field must report as reachable-while-off.
+            #
             # None, not False, when the property is absent: "this firmware did
             # not tell us" and "this link will not stay up while powered off"
             # are different diagnoses, and only the second one explains why
             # `amt_power state=on` cannot reach the endpoint.
-            wake_on_lan_capable=(LINK_POLICY_ALWAYS_ON in policies) if policies is not None else None,
+            wake_on_lan_capable=(any(value in _LINK_POLICY_SX_VALUES for value in policies)) if policies is not None else None,
         )
 
 

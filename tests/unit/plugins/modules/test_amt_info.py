@@ -210,7 +210,7 @@ class TestFactsToResult:
         assert amt["network"]["mac_address_raw"] == "00-00-5E-00-53-01"
         assert amt["network"]["ip_address"] == "192.0.2.10"
         assert amt["network"]["link_policy"] == [1, 14, 16]
-        assert amt["network"]["link_policy_names"] == ["s0_ac", "s0_dc", "always_on"]
+        assert amt["network"]["link_policy_names"] == ["s0_ac", "sx_ac", "s0_dc"]
         assert amt["network"]["wake_on_lan_capable"] is True
         assert amt["network"]["ip_sync_enabled"] is False
         assert amt["system_state"]["element_name"] == "ManagedSystem"

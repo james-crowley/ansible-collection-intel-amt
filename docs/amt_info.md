@@ -87,8 +87,8 @@ Everything is nested under a single `amt` key (`type: dict`, `returned: success`
 | `amt.network.link_is_up` | `bool` | when available | `AMT_EthernetPortSettings.LinkIsUp`. |
 | `amt.network.ip_sync_enabled` | `bool` | when available | `AMT_EthernetPortSettings.IpSyncEnabled` — whether AMT **shares the host OS's IP address**. Not a ping toggle. |
 | `amt.network.link_policy` | `list[int]` | when available | Raw `AMT_EthernetPortSettings.LinkPolicy`. `null` if the property is absent, `[]` if present but empty. |
-| `amt.network.link_policy_names` | `list[str]` | when available | `link_policy` decoded element-wise: `s0_ac` (1), `sx_ac` (2), `s0_dc` (14), `sx_dc` (15), `always_on` (16); anything else `unknown(<raw>)`. |
-| `amt.network.wake_on_lan_capable` | `bool` | when available | Derived: whether `link_policy` contains `16`. `null` when `LinkPolicy` was not reported at all. |
+| `amt.network.link_policy_names` | `list[str]` | when available | `link_policy` decoded element-wise: `s0_ac` (1), `sx_ac` (14), `s0_dc` (16), `sx_dc` (224); anything else `unknown(<raw>)`. |
+| `amt.network.wake_on_lan_capable` | `bool` | when available | Derived: whether `link_policy` contains an **Sx** value — `14` (Sx AC) or `224` (Sx DC). `null` when `LinkPolicy` was not reported at all. |
 | `amt.system_state.element_name` | `str` | when available | `CIM_ComputerSystem.ElementName` (read instead of `Name`, which is just the selector value). |
 | `amt.system_state.enabled_state` | `int` | when available | Raw DMTF `CIM_ComputerSystem.EnabledState`. |
 | `amt.system_state.enabled_state_text` | `str` | when available | `enabled_state` decoded per DMTF; see the table below. |
@@ -113,62 +113,68 @@ every other module in this collection returns, per issue #22, so that a caller c
 result. `previous`/`desired`/`observed` are deliberately left `null` rather than
 populated with something invented for a module that has no mutation to describe.
 
-### `wake_on_lan_capable`: what both lab machines actually reported
+### `wake_on_lan_capable`: what it means and what both lab machines report
 
-`wake_on_lan_capable` is derived, not read: it is `true` only when
-`AMT_EthernetPortSettings.LinkPolicy` contains `16`. **Both** lab machines report it
-`false`, and they agree on why:
+`wake_on_lan_capable` is derived, not read. It is `true` when
+`AMT_EthernetPortSettings.LinkPolicy` contains an **Sx** value — `14` (Sx AC) or `224`
+(Sx DC) — meaning AMT maintains the network link while the host is *not* in S0: asleep,
+hibernating, or off. `LinkPolicy` crosses two axes, ACPI state (S0 versus any Sx) and
+power source (AC versus DC), and its four values are the whole enum:
+
+| Value | Meaning | Implies reachable while off? |
+|---|---|---|
+| `1` | available on S0 AC — powered on, mains | No |
+| `14` | available on Sx AC — asleep/off, mains | **Yes** |
+| `16` | available on S0 DC — powered on, battery | No |
+| `224` | available on Sx DC — asleep/off, battery | **Yes** |
+
+The table is vendor-sourced: `device-management-toolkit/go-wsman-messages`
+`pkg/wsman/amt/ethernetport`. See [Protocol notes](protocol-notes.md) §2.7 for the
+citation and for the correction history — 0.2.0 and 0.3.0 shipped a wrong table
+transcribed from a third party and returned the **inverse** of this field on
+mains-powered hardware.
+
+**Both** lab machines report `[1, 14]`, so both are `true`:
 
 | | 16.1.30 (machine 1) | 19.0.5 (machine 2) |
 |---|---|---|
 | `network.link_policy` | `[1, 14]` | `[1, 14]` |
-| `network.link_policy_names` | `["s0_ac", "s0_dc"]` | `["s0_ac", "s0_dc"]` |
-| `16` ("network link always on") present? | **No** | **No** |
-| `network.wake_on_lan_capable` | `false` | `false` |
+| `network.link_policy_names` | `["s0_ac", "sx_ac"]` | `["s0_ac", "sx_ac"]` |
+| An Sx value present? | **Yes** (`14`) | **Yes** (`14`) |
+| `network.wake_on_lan_capable` | `true` | `true` |
 
-`s0_ac` and `s0_dc` are both **S0** policies — S0 is the powered-on ACPI state — one
-for AC power and one for battery. Read literally, that is AMT keeping its network
-link up only while the host is already running.
+Firmware configuration on one of these machines was checked independently: its MEBx
+`ME ON in Host Sleep States` is set to *"Desktop: ON in S0, ME Wake in S3, S4-5"* — the
+wake-capable option — and its `Idle Timeout` reads `65535`, matching the
+`idle_wake_timeout` this module reports. So the MEBx screen and the corrected
+`LinkPolicy` table agree with each other, and it was the old derivation that disagreed
+with both. Note that `LinkPolicy` governs whether the network **link** is maintained
+while the MEBx setting governs whether the **ME itself** is powered; they are related
+but not the same field, and this module reads only the former.
 
-> **The raw values are hardware fact; the value table interpreting them is not.**
-> That both machines return `[1, 14]` is measured. The mapping of `1`, `14` and `16`
-> to those meanings comes from `parmstro`'s constants table, corroborated by a single
-> dump of *their* machine showing `[1, 14, 16]` — see `docs/protocol-notes.md` §2.7.
-> No Intel documentation for this enum has been read directly, so the table is Tier 1
-> only in the weak sense of "a third party's hardware", not "a vendor reference".
->
-> There is a specific reason to hold it loosely. Intel's own AMT documentation states
-> that after network access is activated, the power policy is set to
-> *"ON in S0, ME Wake in S3, S4-5"* — a wake-capable policy — which does not sit
-> comfortably beside an S0-only `LinkPolicy` on two freshly provisioned machines. Note
-> also that `LinkPolicy` governs whether the network **link** is maintained, while the
-> MEBx setting `Intel ME ON in Host Sleep States` governs whether the **ME itself** is
-> powered; these interact but are not the same field, and this collection reads only
-> the former.
->
-> **Before acting on a `false` here, confirm it out of band**: the AMT Web UI's
-> *Power Policies* page, or Intel Manageability Commander's `Power Policy` row, both
-> report the active policy without a reboot. If those disagree with this field, the
-> value table above is what is wrong, not the firmware.
+**Why this is still the field to check first when a power-on fails.** An endpoint whose
+`LinkPolicy` carries no Sx value cannot be reached over WS-Man once the host leaves S0.
+`amt_power state=on` against it fails as `error_class: connection` — the same shape as a
+wrong address, a dead switch port, or a firewall rule. That is a diagnosis you will not
+reach by re-checking the inventory, which is exactly why the field is surfaced. The
+example further down this page turns it into a pre-flight warning. A `true` here is not a
+guarantee that a wake will succeed; it is the removal of one specific, easily-missed
+explanation for why it did not.
 
-**Why this is the field to check first when a power-on fails.** If that reading holds
-in practice, `amt_power state=on` against a genuinely powered-off endpoint cannot
-reach the management plane at all, and the failure arrives as
-`error_class: connection` — the same shape as a wrong address, a dead switch port, or
-a firewall rule. That is a diagnosis you will not reach by re-checking the inventory,
-which is exactly why the field is surfaced. The example further down this page turns
-it into a pre-flight warning.
+**What has not been established.** No qualification stage powers a machine off,
+independently confirms it is off, and then tries to reach it, so reachability-while-off
+remains empirically untested on both machines — the evidence now points *towards* it
+rather than against it, which is a different thing from having measured it. Machine 1's
+stage 4 did report an `off` transition and then a successful restore; under the old table
+that sat awkwardly beside "unreachable while off", and with `14` = Sx AC it reconciles
+cleanly. See [Capability matrix](capability-matrix.md) Tier 4.
 
-**What has not been established.** Nothing in the hardware evidence shows whether
-either machine can or cannot be woken from off by AMT. No qualification stage powers
-a machine off, independently confirms it is off, and then tries to reach it. Machine
-1's stage 4 did report an `off` transition and a restore, which sits awkwardly beside
-an endpoint that is unreachable while off — most plausibly it was already off when the
-stage began, making both transitions no-ops, but that is a reading of the result and
-not something the result says. So: the policy value that would *guarantee* link-up-
-while-off is absent on both machines, its absence is the first thing to suspect if a
-remote power-on ever fails, and whether wake-from-off works here is untested. See
-[Capability matrix](capability-matrix.md) Tier 4.
+**About the name.** This field reads only `LinkPolicy`. AMT's own wake plumbing — the
+MEBx sleep-state setting, `IdleWakeTimeout`, a magic packet actually arriving — is
+adjacent but distinct, so `wake_on_lan_capable` is an approximate name for "the link is
+maintained outside S0". It is kept regardless: it shipped in 0.2.0 and 0.3.0 and removing
+a return key is a breaking change, and a correct field under an imperfect name is better
+than two fields whose difference a caller has to look up.
 
 `null` rather than `false` still means something different and is worth keeping
 straight: `LinkPolicy` was not reported at all, so nothing is known either way. Both
@@ -295,10 +301,10 @@ Diagnosing the failure mode that looks like a network fault but is not:
 - name: Warn when this endpoint will not answer WS-Man while powered off
   ansible.builtin.debug:
     msg: >-
-      LinkPolicy is {{ amt.amt.network.link_policy }} and lacks 16 (network link always on),
-      so this endpoint drops off the network when the host powers down. A subsequent
-      `amt_power state=on` will fail looking like a connection fault rather than a
-      configuration one.
+      LinkPolicy is {{ amt.amt.network.link_policy }} and carries no Sx value (14 = Sx AC,
+      224 = Sx DC), so this endpoint drops off the network when the host leaves S0. A
+      subsequent `amt_power state=on` will fail looking like a connection fault rather
+      than a configuration one.
   when:
     - amt.amt.network is not none
     - amt.amt.network.wake_on_lan_capable is false
@@ -379,10 +385,11 @@ compare caller-supplied identity.
   back populated here on 16.1.30 and 19.0.5. Every generation outside those three
   is still unverified for them. See [Capability matrix](capability-matrix.md) Tier 3.
 - **Whether this module can be reached at all while the target is powered off is
-  untested**, and both lab machines report `wake_on_lan_capable: false` — see the
-  subsection above. That is the expected explanation for a remote power-on failing
-  with `error_class: connection`; it is not a demonstration that wake-from-off is
-  broken, because no test has tried it.
+  untested**, though both lab machines now report `wake_on_lan_capable: true` — see
+  the subsection above. No stage powers a machine off, confirms it, and then tries to
+  reach it, so the evidence points towards reachability rather than establishing it. A
+  `false` on some other endpoint remains the first explanation to check when a remote
+  power-on fails with `error_class: connection`.
 - `amt.system_state.operational_status` is an **array** (`uint16[]`), hardware-
   confirmed as such by both lab generations returning a single-element list. Do not
   treat it as a scalar even where only one element is present.

@@ -89,11 +89,15 @@ for exactly what is verified, on which machine, what is only mock-tested, and wh
 remains unproven — the distinction matters and is kept current.
 
 Still pre-1.0: a genuinely non-zero IDE-R **write** has not been observed, because
-that needs an operating system on the target that writes. And one finding worth
-knowing before you rely on remote power-on — both lab machines report
-`wake_on_lan_capable: false`, so neither is known to keep its network link up while
-powered off. Whether they can be woken from off by AMT is **untested** either way;
-see [`docs/capability-matrix.md`](docs/capability-matrix.md) Tier 4.
+that needs an operating system on the target that writes. And one thing worth knowing
+before you rely on remote power-on — both lab machines report
+`wake_on_lan_capable: true` (their `LinkPolicy` carries `14`, "available on Sx AC"),
+but whether either can actually be reached over WS-Man while off is **untested**: no
+stage powers a machine off, confirms it, and then tries to reach it. See
+[`docs/capability-matrix.md`](docs/capability-matrix.md) Tier 4. **If you used
+`wake_on_lan_capable` in 0.2.0 or 0.3.0, re-read it** — the value table behind it was
+wrong and the boolean was inverted on mains-powered hardware; see the `CHANGELOG` for
+0.4.0.
 
 ## Requirements
 

@@ -141,7 +141,7 @@
           - info_plain.amt.network.link_is_up == true
           - info_plain.amt.network.ip_sync_enabled == false
           - info_plain.amt.network.link_policy == [1, 14, 16]
-          - info_plain.amt.network.link_policy_names == ['s0_ac', 's0_dc', 'always_on']
+          - info_plain.amt.network.link_policy_names == ['s0_ac', 'sx_ac', 's0_dc']
           - info_plain.amt.network.wake_on_lan_capable == true
         fail_msg: >-
           AMT_EthernetPortSettings instance 0 did not come through. The mock requires the exact

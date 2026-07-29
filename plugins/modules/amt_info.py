@@ -71,8 +71,9 @@ EXAMPLES = r"""
 - name: Warn when this endpoint will not answer WS-Man while powered off
   ansible.builtin.debug:
     msg: >-
-      LinkPolicy {{ amt.amt.network.link_policy }} lacks 16 (network link always on), so
-      a later amt_power state=on will fail looking like a network fault rather than the
+      LinkPolicy {{ amt.amt.network.link_policy }} carries no Sx value (14 = Sx AC, 224 =
+      Sx DC), so the link is maintained only while the host is running and a later
+      amt_power state=on will fail looking like a network fault rather than the
       configuration issue it is.
   when:
     - amt.amt.network is not none
@@ -253,29 +254,39 @@ amt:
           type: bool
         link_policy:
           description: >-
-            Raw C(LinkPolicy) values. V(1) = S0 (powered on) on AC, V(2) = Sx
-            (sleep/hibernate) on AC, V(14) = S0 on DC, V(15) = Sx on DC, V(16) =
-            network link always on. V(null) when the property is absent, V([])
-            when it is present but empty.
+            Raw C(LinkPolicy) values -- which host power states and power sources
+            AMT keeps the network link up in. V(1) = available on S0 AC, V(14) =
+            available on Sx AC, V(16) = available on S0 DC, V(224) = available on
+            Sx DC. S0 is "host powered on", Sx is any other ACPI state (sleep,
+            hibernate, off); AC/DC is the power source. There is no
+            "always on" value. V(null) when the property is absent, V([]) when it
+            is present but empty.
           type: list
           elements: int
-          sample: [1, 14, 16]
+          sample: [1, 14]
         link_policy_names:
           description: >-
             RV(amt.network.link_policy) decoded, element-wise, into
-            V(s0_ac)/V(sx_ac)/V(s0_dc)/V(sx_dc)/V(always_on). A value outside that
-            table renders as V(unknown(<raw>)) rather than being dropped.
+            V(s0_ac)/V(sx_ac)/V(s0_dc)/V(sx_dc). Only those four values are defined
+            by Intel; anything else renders as V(unknown(<raw>)) rather than being
+            dropped. B(Changed in 0.4.0) -- V(14) now correctly decodes to V(sx_ac)
+            and V(16) to V(s0_dc), and V(always_on) is gone.
           type: list
           elements: str
-          sample: ["s0_ac", "s0_dc", "always_on"]
+          sample: ["s0_ac", "sx_ac"]
         wake_on_lan_capable:
           description: >-
-            Derived: whether C(LinkPolicy) contains V(16) (network link always on).
-            An endpoint without it does not answer WS-Man while powered off, so
-            C(amt_power) with C(state=on) fails there in a way that looks like a
-            network fault rather than a configuration one. V(null) when
-            C(LinkPolicy) was not reported at all -- unknown is not the same
-            finding as V(false).
+            Derived: whether C(LinkPolicy) contains an B(Sx) value -- V(14) (Sx AC)
+            or V(224) (Sx DC) -- meaning AMT maintains the network link while the
+            host is asleep, hibernating or off. An endpoint with only S0 values
+            (V(1), V(16)) does not answer WS-Man in those states, so C(amt_power)
+            with C(state=on) fails there in a way that looks like a network fault
+            rather than a configuration one. V(null) when C(LinkPolicy) was not
+            reported at all -- unknown is not the same finding as V(false).
+            B(Changed in 0.4.0) -- 0.2.0 and 0.3.0 keyed this off V(16), which is
+            in fact "S0 DC", and so returned the inverse answer on mains-powered
+            hardware. The name is kept for compatibility even though it reads only
+            C(LinkPolicy) and not AMT's wake settings.
           type: bool
     system_state:
       description: >-

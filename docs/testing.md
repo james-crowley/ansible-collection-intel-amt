@@ -298,5 +298,6 @@ What it still does not cover is listed as Tier 4 in
 [`capability-matrix.md`](capability-matrix.md): a non-zero IDE-R write, whether a
 PXE exchange actually occurred, AMT's internal one-shot role bit, the sleep and
 hibernate power actions, whether either endpoint answers WS-Man at all while
-powered off (both report `wake_on_lan_capable: false`, and no stage powers a machine
-off and then tries to reach it), and any firmware generation other than those two.
+powered off (both report `wake_on_lan_capable: true`, but no stage powers a machine
+off, confirms it, and then tries to reach it), and any firmware generation other than
+those two.

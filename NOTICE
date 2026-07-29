@@ -80,13 +80,29 @@ behaviour were reimplemented in Python from these sources.
    code 11, Diagnostic Interrupt/NMI, rather than 10, Master Bus Reset). Its
    research notes are the trustworthy artefact; its code is not.
 
+   WHAT WAS TAKEN AND LATER REVERSED: their AMT_EthernetPortSettings LinkPolicy
+   value table (1: s0_ac, 2: sx_ac, 14: s0_dc, 15: sx_dc, 16: always_on). This
+   collection used it in 0.2.0 and 0.3.0 and it is WRONG. Against the vendor
+   enum, 14 is "available on Sx AC" (not S0 DC), 16 is "available on S0 DC"
+   (not an "always on" bit -- no such value exists), 2 and 15 are not defined
+   values at all, and 224 ("available on Sx DC") is missing. The table was
+   replaced in 0.4.0 with the vendor one; see attribution 4 below.
+
+   That makes this the SECOND wrong table from this source, after the power
+   constants noted above. Their dumped property values and class/selector
+   findings have held up against real firmware on two generations; their
+   constants and derived meanings have now been wrong twice. Note also that a
+   hardware dump corroborates that a value was RETURNED, never what it MEANS --
+   this collection cited their machine returning [1, 14, 16] as corroboration
+   for the table, which it never was. Do not adopt a third value table from
+   this source without checking it against a vendor reference first.
+
    Specifically derived, per file:
      - plugins/module_utils/models.py -- the AMT_GeneralSettings,
        AMT_EthernetPortSettings and CIM_ComputerSystem property names parsed by
-       EthernetSettings.from_instance() and SystemState.from_instance(), and the
-       AMT_EthernetPortSettings LinkPolicy value table (1/2/14/15/16), whose
-       values 1, 14 and 16 are corroborated by a live reading in
-       development/research/AMT_RESOURCE_DISCOVERY.md. The DMTF EnabledState and
+       EthernetSettings.from_instance() and SystemState.from_instance(). The
+       LinkPolicy value table is NO LONGER from this source (see above); it is
+       from go-wsman-messages, attribution 4. The DMTF EnabledState and
        OperationalStatus tables are from the DMTF CIM schema, not from that
        project (whose own decoding covers only OperationalStatus 0 and 2).
      - plugins/module_utils/client.py -- the InstanceID selector string
@@ -112,3 +128,46 @@ behaviour were reimplemented in Python from these sources.
    Copyright Intel Corporation. Consulted as documentation for power state
    transitions, boot configuration, redirection enablement, manageability port
    assignments, and security considerations.
+
+--------------------------------------------------------------------------------
+4. go-wsman-messages
+--------------------------------------------------------------------------------
+   Copyright (c) Intel Corporation 2023
+   License: Apache License, Version 2.0
+   Source: https://github.com/device-management-toolkit/go-wsman-messages
+           (formerly open-amt-cloud-toolkit/go-wsman-messages; both paths serve
+           the same content)
+
+   Consulted as a vendor reference implementation of the AMT WS-Man classes.
+   NO CODE was taken -- this is a Go library and this collection is Python.
+   What was taken is protocol fact: class definitions, property names, and
+   enumeration value tables, read directly from the source at tag v2.48.3.
+
+   Files consulted:
+     pkg/wsman/amt/ethernetport/decoder.go
+     pkg/wsman/amt/ethernetport/types.go
+     pkg/wsman/wsmantesting/responses/amt/boot/capabilities/get.xml
+     pkg/wsman/amt/boot/types.go
+     pkg/wsman/cim/software/types.go
+
+   Specifically derived, per file:
+     - plugins/module_utils/models.py -- the AMT_EthernetPortSettings
+       LinkPolicy value table (1 = available on S0 AC, 14 = available on Sx AC,
+       16 = available on S0 DC, 224 = available on Sx DC, and no other defined
+       value), from the named constants in ethernetport/decoder.go and the
+       ValueMap/Values schema annotation in ethernetport/types.go. This
+       REPLACES a wrong table previously taken from parmstro/intel_amt; see
+       attribution 2 and docs/protocol-notes.md section 2.7.
+     - plugins/module_utils/boot.py, plugins/module_utils/redirection_service.py
+       -- the AMT_BootCapabilities property names, confirmed against the real
+       firmware response fixture in wsmantesting/responses.
+     - plugins/module_utils/client.py -- that the AMT firmware version lives on
+       CIM_SoftwareIdentity (InstanceID == "AMT", VersionString).
+
+   You may obtain a copy of the Apache License, Version 2.0 at:
+     http://www.apache.org/licenses/LICENSE-2.0
+   A copy is included at licenses/Apache-2.0.txt
+
+   NOTE ON LICENSE COMPATIBILITY: as with MeshCentral above, Apache-2.0 is
+   one-way compatible with GPLv3. Nothing here is a code derivation in any
+   case; the facts consulted are enumeration values and property names.
