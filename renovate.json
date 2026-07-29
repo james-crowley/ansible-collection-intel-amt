@@ -34,12 +34,12 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "The single ansible-core pin used by the hardware job, which must stay compatible with the lab runner's Python 3.10. This is the only ansible-core version Renovate can meaningfully manage here: the sanity and unit matrices are comma-separated LISTS of supported versions, not single pins, so there is no 'current version' for Renovate to bump. Widening or narrowing that support matrix is a deliberate policy decision no bot can make. Be aware that the ansible-core packageRule below caps this at <2.18 via allowedVersions, which means Renovate will NOT raise 2.18+/2.19+ here and will not list them on the Dependency Dashboard either -- read that rule's description for why, and watch ansible-core releases yourself rather than expecting the dashboard to.",
+      "description": "The single ansible-core pin used by the hardware qualification job -- the `install-lab-ansible-venv` command in .circleci/config.yml, currently `ansible-core~=2.18.18`. This is the only ansible-core version Renovate can meaningfully manage here: the sanity and unit matrices are comma-separated LISTS of supported versions, not single pins, so there is no 'current version' for Renovate to bump. Widening or narrowing that support matrix is a deliberate policy decision no bot can make. There is no longer an allowedVersions cap on ansible-core, so updates to this pin are raised normally and do appear on the Dependency Dashboard; they still never automerge -- see the ansible-core packageRule below. Two things matchStrings must keep doing. It must match the pin's ACTUAL shape, which is a full three-part version: the previous pattern `ansible-core~=(?<currentValue>\\d+\\.\\d+)\\.0` assumed a trailing literal `.0` and matched NOTHING once the pin became 2.18.18, which would have silently un-managed it with no error anywhere. Do not reintroduce a fixed digit count. It must also keep NOT matching `ansible-core~=<< parameters.ansible-core-version >>.0` in the sanity and units jobs, which is a CircleCI parameter substitution rather than a version string -- the leading `\\d+` is what excludes it, so keep the value anchored to a digit.",
       "managerFilePatterns": [
         "/^\\.circleci/config\\.yml$/"
       ],
       "matchStrings": [
-        "ansible-core~=(?<currentValue>\\d+\\.\\d+)\\.0"
+        "ansible-core~=(?<currentValue>\\d+\\.\\d+(?:\\.\\d+)*)"
       ],
       "depNameTemplate": "ansible-core",
       "datasourceTemplate": "pypi",
@@ -49,16 +49,14 @@
   "packageRules": [
     {
       "description": [
-        "ansible-core is the collection's compatibility contract, not an ordinary dependency. meta/runtime.yml declares a floor, the sanity/unit matrices enumerate versions, and the hardware job is constrained by the lab runner's Python. A bump here is a deliberate support-policy decision, so it gets its own PR and never automerges.",
-        "allowedVersions: '<2.18' -- READ THIS BEFORE REMOVING IT. This is an explicit, documented risk acceptance, not a claim that 2.17 is safe. The only version string the custom regex manager above can see is the single `ansible-core~=2.17.0` pin installed into a venv on the self-hosted lab runner (the install-lab-ansible-venv command in .circleci/config.yml). That host runs Python 3.10; ansible-core 2.18+ requires Python 3.11+ on the controller, so the upgrade is not merely undesirable there, it is impossible until the host's Python moves. The units matrix encodes the same constraint as an exclude.",
-        "The constraint therefore suppresses a REAL advisory, and that is the whole reason it needs this note. GHSA-w8p5-mx5w-cpqj [HIGH], argument injection in `ansible-galaxy role install` leading to arbitrary code execution, covers >= 2.17.0b1, < 2.18.18rc1 and is first fixed in 2.18.18rc1. There is no fix in the 2.17 line -- that branch is EOL -- so no version satisfying this cap will ever clear the advisory. Renovate will keep proposing 2.18+/2.19+ against a line that cannot accept it, and each such PR is unmergeable rather than merely unreviewed.",
-        "Why the residual risk is judged low, stated precisely: the vulnerable code path is `ansible-galaxy role install`, and the hardware playbooks under tests/hardware/ do not invoke it -- the job's only ansible-galaxy calls are `collection build` and `collection install` of this repository's own artifact. That is an argument about reachability on this specific runner, NOT a claim that the installed ansible-core is unaffected: the vulnerable code is present, and anything that later adds a role install to that venv reopens the exposure. The runner is also on a private lab network behind the run-hardware-tests parameter, a manual approval, a project-restricted context, and a main-only branch filter.",
-        "REMOVAL CONDITION: drop allowedVersions as soon as the lab runner host is on Python 3.11 or newer, and move the pin to >= 2.18.18 in the same change. Do not instead raise requires_ansible in meta/runtime.yml -- that floor is a consumer-facing minimum, not a pin, and raising it would drop Python 3.10 support for consumers without protecting anyone already on a patched release."
+        "ansible-core is the collection's compatibility contract, not an ordinary dependency. meta/runtime.yml declares a floor, the sanity/unit matrices enumerate versions, and the hardware job carries a single pin of its own. A bump here is a deliberate support-policy decision, so it gets its own PR and never automerges.",
+        "There is deliberately no allowedVersions cap. There used to be one, '<2.18', because the self-hosted lab runner host had only Python 3.10 and ansible-core 2.18+ requires Python 3.11+ on the controller, which made the upgrade impossible rather than merely unwanted. That is history: the host now has Python 3.12, install-lab-ansible-venv builds its virtualenv from an explicitly versioned interpreter instead of bare `python3`, and the pin is `ansible-core~=2.18.18`. Nothing holds this package below 2.18 any more, and nothing should.",
+        "What replaced the cap is a per-bump check, not a static bound: whatever version this pin moves to must support the Python the lab virtualenv is actually built from. That is 3.12, with 3.11 and 3.13 accepted as fallbacks. ansible-core 2.20+ requires Python 3.12+, so a fallback-3.11 runner would not satisfy it. Confirm the pairing in the PR rather than assuming the runner can host any release.",
+        "meta/runtime.yml's `requires_ansible: '>=2.17.0'` is a consumer-facing minimum, not a pin, and must not be dragged along to match the hardware pin. Raising it would drop Python 3.10 support for everyone consuming this collection, which is a separate and far larger decision than choosing what the lab runner qualifies on."
       ],
       "matchPackageNames": [
         "ansible-core"
       ],
-      "allowedVersions": "<2.18",
       "automerge": false,
       "separateMajorMinor": true,
       "separateMinorPatch": true,
@@ -72,7 +70,7 @@
       ],
       "prBodyNotes": [
         ":warning: Raising or dropping an ansible-core version is a support-policy change. Before merging, check: `meta/runtime.yml` requires_ansible floor; the sanity and unit matrices in `.circleci/config.yml`; whether `tests/sanity/ignore-*.txt` files need adding or removing; and whether the module boilerplate requirement changed (it changed incompatibly at 2.17). The hardware job is separately constrained by the lab runner's Python version.",
-        ":lock: This package is capped at `<2.18` by `allowedVersions`, which knowingly holds the lab-runner pin on a line affected by GHSA-w8p5-mx5w-cpqj [HIGH] (`ansible-galaxy role install` argument injection; no fix exists in the EOL 2.17 line). See this rule's `description` in `renovate.json` for the full reasoning, the reachability argument, and the condition for removing the cap. If you are here to lift the cap, confirm the lab runner host is on Python 3.11+ first -- otherwise the resulting pin cannot install."
+        ":snake: If this PR touches the hardware pin in `install-lab-ansible-venv`, confirm the proposed version supports the Python that command actually selects on the lab runner -- `python3.12` preferred, `python3.11`/`python3.13` as fallbacks, never the host's system Python 3.10. The job prints the interpreter it chose, so check a recent hardware run's log rather than guessing. A pin the runner cannot install fails at dependency resolution, not at review."
       ]
     },
     {
