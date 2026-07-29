@@ -1,0 +1,11 @@
+---
+bugfixes:
+  - "CI - hardware evidence is now published when a stage FAILS. None of the five C(store_artifacts) steps carried
+    C(when: always), and CircleCI skips steps after a failed one, so failure evidence was never actually stored --
+    while C(note-recovery-path-on-failure) told the operator it had been. A failed stage is exactly when the evidence
+    matters. Safe to publish now that C(redact-hardware-evidence) also runs C(when: always) ahead of it."
+  - "CI - the C(export-hardware-limit) step said \"Destructive stages restricted to\", but C(hardware-limit) restricts
+    every stage including the read-only ones. Corrected, so the log does not understate the flag's reach."
+  - "README - the CircleCI badge is static again. A live badge needs the Free and Open Source project flag, which makes
+    artifacts world-readable; artifacts from runs predating C(redact-evidence.py) are still unredacted and cannot be
+    deleted. The comment records that the blocker is retention, not code, so the badge is not flipped back prematurely."
