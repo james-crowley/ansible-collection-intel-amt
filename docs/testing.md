@@ -187,17 +187,25 @@ every job log records which one actually ran. `python3.14` is deliberately not a
 candidate: ansible-core 2.18 does not support it.
 
 **What the recorded qualifications ran on.** The Tier 3 evidence in
-`docs/capability-matrix.md` spans two environments, and neither record is
-retroactively edited — each states the environment its run actually used:
+`docs/capability-matrix.md` comes from three runs across two environments, and no
+record is retroactively edited — each states the environment its own run used:
 
-- **Machine 1 (AMT 16.1.30), 2026-07-28** — Python 3.10, ansible-core 2.17.
-- **Machine 2 (AMT 19.0.5), 2026-07-29** — Python 3.12.13, ansible-core 2.18.18,
-  the configuration described above. This was the first hardware run to reach the
-  lab at all under it: a `.circleci/config.yml` parse error meant every hardware
-  trigger since v0.1.0 errored before any job started, so nothing had exercised
-  the 3.12/2.18 path until this run.
+- **Machine 1 (AMT 16.1.30), 2026-07-28** — all eight stages, on Python 3.10 with
+  ansible-core 2.17.
+- **Machine 2 (AMT 19.0.5), 2026-07-29** — all eight stages, on Python 3.12.13,
+  ansible-core 2.18.18, the configuration described above. This was the first
+  hardware run to reach the lab at all under it: a `.circleci/config.yml` parse
+  error meant every hardware trigger since v0.1.0 errored before any job started,
+  so nothing had exercised the 3.12/2.18 path until this run.
+- **Machine 1 again, 2026-07-29** — the read-only stages only (1, 3, 8), via
+  `hardware-tests`, limited with `hardware-limit=amt-lab-01`, on the same
+  ansible-core 2.18.18 lab virtualenv `install-lab-ansible-venv` builds for every
+  hardware job. Nothing was mutated, and none of the stage 4-7 approvals were
+  requested. Its purpose was narrow: read machine 1 with v0.2.0's fact code, which
+  its 2026-07-28 evidence predated. Machine 1's mutating result therefore still
+  rests on the 2026-07-28 run, in the environment recorded for it above.
 
-That second run **clears GHSA-w8p5-mx5w-cpqj [HIGH] for the lab runner**: the 2.17
+Machine 2's run **clears GHSA-w8p5-mx5w-cpqj [HIGH] for the lab runner**: the 2.17
 line it previously used is EOL and permanently affected, and the runner is now
 demonstrably executing on 2.18.18, the first release carrying the fix.
 
@@ -270,15 +278,18 @@ Being explicit, because the gap matters:
 
 This collection is protocol-complete, test-covered, and **hardware-qualified on two
 machines** — precisely: **all eight stages against AMT 16.1.30 (`amt-lab-01`,
-2026-07-28) and all eight against AMT 19.0.5 (`amt-lab-02`, 2026-07-29)**. Machine
-2's run was limited to that machine alone (`hardware-limit=amt-lab-02`), so machine
-1 was untouched by it. Qualification found six defects the first two tiers could not
-have found, which is the concrete argument for this tier existing rather than a
-theoretical one.
+2026-07-28) and all eight against AMT 19.0.5 (`amt-lab-02`, 2026-07-29)**, each run
+limited to the machine it qualified (`hardware-limit`), so neither touched the other.
+A read-only re-run against machine 1 on 2026-07-29 then read that machine with
+v0.2.0's fact code, which closed the last coverage difference between the two:
+`amt_info`'s network and system-state facts are now confirmed populated on both
+generations rather than on 19.0.5 alone. Qualification found six defects the first
+two tiers could not have found, which is the concrete argument for this tier existing
+rather than a theoretical one.
 
 What it still does not cover is listed as Tier 4 in
 [`capability-matrix.md`](capability-matrix.md): a non-zero IDE-R write, whether a
 PXE exchange actually occurred, AMT's internal one-shot role bit, the sleep and
-hibernate power actions, `amt_info`'s network and system-state facts on 16.1.30
-(read on 19.0.5 only, because machine 1 has not been re-run since v0.2.0 added
-them), and any firmware generation other than those two.
+hibernate power actions, whether either endpoint answers WS-Man at all while
+powered off (both report `wake_on_lan_capable: false`, and no stage powers a machine
+off and then tries to reach it), and any firmware generation other than those two.

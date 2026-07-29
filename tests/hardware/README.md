@@ -96,9 +96,11 @@ is redacted first -- see below.
 
 ## Evidence redaction
 
-Six of the stage playbooks write JSON evidence into `tests/hardware/output/`,
-and CI publishes that directory as the `hardware-evidence` artifact. Those
-values come from firmware, so they describe a real machine on a real network.
+Six of the stage playbooks have a task that writes JSON evidence into
+`tests/hardware/output/` (stage 3's does not actually produce a file in CI -- see
+"Verified on real evidence" below), and CI publishes that directory as the
+`hardware-evidence` artifact. Those values come from firmware, so they describe a
+real machine on a real network.
 
 [`redact-evidence.py`](redact-evidence.py) rewrites every `.json` file in that
 directory in place, and every `hardware-*` job runs it via the shared
@@ -167,6 +169,44 @@ exactly as the firmware reported them:
 
 Redacting twice is a no-op, so a re-run cannot renumber the tokens.
 
+### Verified on real evidence, not only on unit tests
+
+The redactor shipped with unit tests and no live exercise. On **2026-07-29** it ran
+for the first time against real hardware evidence, on the read-only re-run of
+machine 1, and it worked:
+
+```
+redact-evidence: 2 JSON file(s) rewritten, 21 value(s) redacted
+  ipv4: 11 occurrence(s), 3 distinct value(s)
+  mac: 4 occurrence(s), 2 distinct value(s)
+  uuid: 2 occurrence(s), 1 distinct value(s)
+  fqdn: 2 occurrence(s), 1 distinct value(s)
+  hostname: 2 occurrence(s), 1 distinct value(s)
+```
+
+Three things that run established, which unit tests could not:
+
+- **The published artifact is clean.** The `hardware-evidence` artifact from that run
+  was independently swept for IPv4, MAC and UUID patterns afterwards: **zero hits**.
+  That is the check that matters, because it tests the artifact a stranger can
+  download rather than the script's own report of itself.
+- **The diagnostic substance survived.** Firmware version, BIOS version, the
+  `link_policy` integers, the enabled/operational/requested states and the byte
+  counters all came through intact, which is the over-redaction failure mode this
+  section's preservation rules exist to prevent. The evidence was still readable as
+  evidence.
+- **Stable pseudonyms do what they are for.** `primary_dns` and `secondary_dns` both
+  mapped to the *same* token, correctly preserving the fact that this machine points
+  at one DNS server twice without disclosing which server. A per-occurrence random
+  token would have hidden that; a hash of the value would have disclosed it.
+
+Two files rather than three, for a three-stage run, is expected and is worth knowing
+about: `qualify_checkmode.yml`'s evidence-writing `ansible.builtin.copy` carries no
+`check_mode: false`, and stage 3 runs under `--check`, so stage 3 writes no evidence
+file at all. Only stages 1 and 8 produced one. Nothing leaked as a result — a file
+that does not exist cannot be published — but do not read a stage-3 evidence file's
+absence from an artifact as a redaction failure.
+
 ### Running and testing it by hand
 
 ```bash
@@ -180,7 +220,9 @@ red job into a differently red one. It prints a per-category count of what it
 redacted, which is the line in the job log that tells a reviewer it actually ran.
 
 Unit tests live in
-[`tests/unit/hardware/test_redact_evidence.py`](../unit/hardware/test_redact_evidence.py).
+[`tests/unit/hardware/test_redact_evidence.py`](../unit/hardware/test_redact_evidence.py),
+and they remain the only place the behaviour is exercised deterministically — the
+live run above confirms it, but a hardware run is not a regression test.
 Every fixture there uses obviously fake values -- RFC 5737 TEST-NET-1, RFC 3849
 documentation IPv6, the RFC 7042 documentation MAC block, `.invalid` domains.
 **Never put a real lab value in a fixture**; a committed fixture is exactly the
@@ -245,12 +287,13 @@ machine to compare against while recovering the other.
 
 ### Where the lab actually stands
 
-Stated precisely, because what differs between the two runs still matters:
+Stated precisely, because which run established what still matters:
 
 | Machine | Firmware | Stages completed | Run date |
 |---|---|---|---|
 | `amt-lab-01` | AMT 16.1.30 | **All eight** (1, 2, 3, 4, 5, 6, 7, 8) | 2026-07-28 |
 | `amt-lab-02` | AMT 19.0.5 | **All eight** (1, 2, 3, 4, 5, 6, 7, 8) | 2026-07-29 |
+| `amt-lab-01` | AMT 16.1.30 | Read-only re-run (1, 3, 8), nothing mutated | 2026-07-29 |
 
 Machine 2 cleared its four mutating approvals on 2026-07-29, so power control,
 IDE-R media, the writable-image path and native PXE are reproduced on a second
@@ -259,11 +302,23 @@ second machine of the same one. That run was limited to machine 2 alone
 (`hardware-limit=amt-lab-02`), so machine 1 was untouched by it, exactly as the
 "never cut both machines over at once" rule above asks.
 
-Coverage is **not** identical between the two runs, and the difference is not
-about stages: `amt_info`'s network and system-state facts (added in v0.2.0) came
-back populated from 19.0.5, and have never been read on 16.1.30, because machine
-1 has not been re-run since. See
-[`docs/capability-matrix.md`](../../docs/capability-matrix.md) Tier 3 and Tier 4.
+**Coverage is now the same on both generations.** It was not: `amt_info`'s network
+and system-state facts (added in v0.2.0) had come back populated from 19.0.5 only,
+because machine 1's evidence predated the code that reads them. The 2026-07-29
+read-only re-run of machine 1 (`hardware-limit=amt-lab-01`, `hardware-tests` only,
+no mutating approval requested) closed that: **every one of those fields came back
+populated on 16.1.30 too**. Machine 1's mutating result still rests on its
+2026-07-28 run -- the re-run did not, and was not meant to, re-establish it. See
+[`docs/capability-matrix.md`](../../docs/capability-matrix.md) Tier 3.
+
+One result from that re-run is worth reading before you trust a remote power-on:
+**both** machines report `link_policy` `[1, 14]` (`s0_ac`, `s0_dc`) and therefore
+`wake_on_lan_capable: false`, with `16` ("network link always on") absent on both.
+Whether either machine can be woken from off by AMT is **untested** -- no stage
+powers a machine off, confirms it, and then tries to reach it -- so that is a thing
+to suspect first if stage 4 or a real power-on ever fails on a genuinely off
+machine, not a known defect. It is Tier 4 in
+[`docs/capability-matrix.md`](../../docs/capability-matrix.md).
 
 Stage 2's automatic comparison is also live now: `amt_expected_uuid` is recorded
 for machine 2, and the 2026-07-29 run matched it. Recorded from a value this

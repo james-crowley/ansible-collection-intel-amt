@@ -113,6 +113,67 @@ every other module in this collection returns, per issue #22, so that a caller c
 result. `previous`/`desired`/`observed` are deliberately left `null` rather than
 populated with something invented for a module that has no mutation to describe.
 
+### `wake_on_lan_capable`: what both lab machines actually reported
+
+`wake_on_lan_capable` is derived, not read: it is `true` only when
+`AMT_EthernetPortSettings.LinkPolicy` contains `16`. **Both** lab machines report it
+`false`, and they agree on why:
+
+| | 16.1.30 (machine 1) | 19.0.5 (machine 2) |
+|---|---|---|
+| `network.link_policy` | `[1, 14]` | `[1, 14]` |
+| `network.link_policy_names` | `["s0_ac", "s0_dc"]` | `["s0_ac", "s0_dc"]` |
+| `16` ("network link always on") present? | **No** | **No** |
+| `network.wake_on_lan_capable` | `false` | `false` |
+
+`s0_ac` and `s0_dc` are both **S0** policies — S0 is the powered-on ACPI state — one
+for AC power and one for battery. Read literally, that is AMT keeping its network
+link up only while the host is already running.
+
+> **The raw values are hardware fact; the value table interpreting them is not.**
+> That both machines return `[1, 14]` is measured. The mapping of `1`, `14` and `16`
+> to those meanings comes from `parmstro`'s constants table, corroborated by a single
+> dump of *their* machine showing `[1, 14, 16]` — see `docs/protocol-notes.md` §2.7.
+> No Intel documentation for this enum has been read directly, so the table is Tier 1
+> only in the weak sense of "a third party's hardware", not "a vendor reference".
+>
+> There is a specific reason to hold it loosely. Intel's own AMT documentation states
+> that after network access is activated, the power policy is set to
+> *"ON in S0, ME Wake in S3, S4-5"* — a wake-capable policy — which does not sit
+> comfortably beside an S0-only `LinkPolicy` on two freshly provisioned machines. Note
+> also that `LinkPolicy` governs whether the network **link** is maintained, while the
+> MEBx setting `Intel ME ON in Host Sleep States` governs whether the **ME itself** is
+> powered; these interact but are not the same field, and this collection reads only
+> the former.
+>
+> **Before acting on a `false` here, confirm it out of band**: the AMT Web UI's
+> *Power Policies* page, or Intel Manageability Commander's `Power Policy` row, both
+> report the active policy without a reboot. If those disagree with this field, the
+> value table above is what is wrong, not the firmware.
+
+**Why this is the field to check first when a power-on fails.** If that reading holds
+in practice, `amt_power state=on` against a genuinely powered-off endpoint cannot
+reach the management plane at all, and the failure arrives as
+`error_class: connection` — the same shape as a wrong address, a dead switch port, or
+a firewall rule. That is a diagnosis you will not reach by re-checking the inventory,
+which is exactly why the field is surfaced. The example further down this page turns
+it into a pre-flight warning.
+
+**What has not been established.** Nothing in the hardware evidence shows whether
+either machine can or cannot be woken from off by AMT. No qualification stage powers
+a machine off, independently confirms it is off, and then tries to reach it. Machine
+1's stage 4 did report an `off` transition and a restore, which sits awkwardly beside
+an endpoint that is unreachable while off — most plausibly it was already off when the
+stage began, making both transitions no-ops, but that is a reading of the result and
+not something the result says. So: the policy value that would *guarantee* link-up-
+while-off is absent on both machines, its absence is the first thing to suspect if a
+remote power-on ever fails, and whether wake-from-off works here is untested. See
+[Capability matrix](capability-matrix.md) Tier 4.
+
+`null` rather than `false` still means something different and is worth keeping
+straight: `LinkPolicy` was not reported at all, so nothing is known either way. Both
+machines reported it, so neither is that case.
+
 ### DMTF state tables
 
 `amt.system_state.enabled_state_text` (DMTF `CIM_EnabledLogicalElement.EnabledState`):
@@ -308,24 +369,29 @@ compare caller-supplied identity.
   four capability flags, redirection state, power state and platform UUID came back
   from real firmware. It remains unverified on every generation other than those two
   — see the [Capability matrix](capability-matrix.md).
-- **The network and system-state facts are hardware-verified on 19.0.5 only.**
-  `amt.network`, `amt.system_state`, `amt.bios_version` and the six extra
-  `AMT_GeneralSettings` fields came back **fully populated** from real AMT 19.0.5
-  firmware on 2026-07-29 — nothing `null`, no class faulted. They are **still
-  unverified on 16.1.30**: that machine has not been re-run since these fields were
-  added in v0.2.0. Their property names were originally derived from *someone else's*
-  AMT 10.0.56 hardware dump (`parmstro`, GPL-3.0-or-later), which the 19.0.5 read
-  confirms resolve on firmware this collection can reach. See
-  [Capability matrix](capability-matrix.md) Tier 3.
+- **The network and system-state facts are hardware-verified on both lab
+  generations.** `amt.network`, `amt.system_state`, `amt.bios_version` and the six
+  extra `AMT_GeneralSettings` fields came back **fully populated** from real AMT
+  19.0.5 and real AMT 16.1.30 firmware on 2026-07-29 — nothing `null`, no class
+  faulted, on either. Their property names were originally derived from *someone
+  else's* AMT 10.0.56 hardware dump (`parmstro`, GPL-3.0-or-later), so these fields
+  now rest on evidence spanning three firmware generations: named on 10.0.56, read
+  back populated here on 16.1.30 and 19.0.5. Every generation outside those three
+  is still unverified for them. See [Capability matrix](capability-matrix.md) Tier 3.
+- **Whether this module can be reached at all while the target is powered off is
+  untested**, and both lab machines report `wake_on_lan_capable: false` — see the
+  subsection above. That is the expected explanation for a remote power-on failing
+  with `error_class: connection`; it is not a demonstration that wake-from-off is
+  broken, because no test has tried it.
 - `amt.system_state.operational_status` is an **array** (`uint16[]`), hardware-
-  confirmed as such by 19.0.5 returning a single-element list. Do not treat it as a
-  scalar even where only one element is present.
-- `amt.bios_version` was the weakest-evidenced field in the module and is only partly
-  still so. The source notes claim `CIM_BIOSElement` works on AMT 10.0.56 but record
+  confirmed as such by both lab generations returning a single-element list. Do not
+  treat it as a scalar even where only one element is present.
+- `amt.bios_version` was the weakest-evidenced field in the module and is much less
+  so now. The source notes claim `CIM_BIOSElement` works on AMT 10.0.56 but record
   no dumped value, and the implementation they claim it from swallows failure to
-  `None`, so their result proves nothing either way. AMT 19.0.5 did return a value;
-  16.1.30 has never been asked, and `null` remains legitimate on firmware that does
-  not expose the class.
+  `None`, so their result proves nothing either way. Both lab generations have now
+  returned a value. `null` remains legitimate on firmware that does not expose the
+  class, which is why it is still read through the optional path.
 - `amt.network` covers `AMT_EthernetPortSettings` **instance 0 only**. Multi-NIC parts
   expose higher indices; this module does not look for them, and an endpoint with no
   instance 0 reports `amt.network: null` rather than failing.

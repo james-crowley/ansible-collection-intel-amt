@@ -75,9 +75,12 @@ seven playbooks.)
 All eight stages have now completed on **`amt-lab-01`, AMT 16.1.30** (2026-07-28)
 and on **`amt-lab-02`, AMT 19.0.5** (2026-07-29) — so power control, IDE-R media,
 the writable-image path and native PXE are verified on two machines across two
-firmware generations. Coverage is not identical: `amt_info`'s network and
-system-state facts came back populated on 19.0.5 and have **never been read on
-16.1.30**, because machine 1 has not been re-run since v0.2.0 added them.
+firmware generations. **Both machines are fully qualified, and coverage is now the
+same on both**: a read-only re-run against machine 1 on 2026-07-29 returned
+`amt_info`'s network and system-state facts fully populated there too, so the
+v0.2.0 facts no longer rest on one generation. They now rest on three generations'
+worth of evidence — named from a third party's AMT 10.0.56 dump, read back
+populated here on 16.1.30 and 19.0.5.
 
 That qualification found six real defects that the unit and mock-integration
 tiers could not have found, including one that made IDE-R and BIOS boot
@@ -86,7 +89,11 @@ for exactly what is verified, on which machine, what is only mock-tested, and wh
 remains unproven — the distinction matters and is kept current.
 
 Still pre-1.0: a genuinely non-zero IDE-R **write** has not been observed, because
-that needs an operating system on the target that writes.
+that needs an operating system on the target that writes. And one finding worth
+knowing before you rely on remote power-on — both lab machines report
+`wake_on_lan_capable: false`, so neither is known to keep its network link up while
+powered off. Whether they can be woken from off by AMT is **untested** either way;
+see [`docs/capability-matrix.md`](docs/capability-matrix.md) Tier 4.
 
 ## Requirements
 

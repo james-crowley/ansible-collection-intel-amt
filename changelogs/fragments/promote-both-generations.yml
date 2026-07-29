@@ -1,0 +1,35 @@
+---
+minor_changes:
+  - "docs - promote C(amt_info)'s network, system-state and BIOS facts to hardware-verified on B(both) lab firmware
+    generations. A read-only re-run of C(amt-lab-01) (AMT 16.1.30) on 2026-07-29, limited with
+    C(hardware-limit=amt-lab-01) and mutating nothing, returned every one of those fields populated -- nothing null, no
+    class faulted -- which is what machine 1's 2026-07-28 evidence could not show, because it predated the code that
+    reads them. The per-generation caveat is removed from the capability matrix, C(amt_info)'s documentation, the
+    testing guide, the hardware README and the README project status. These fields now rest on three firmware
+    generations' worth of evidence: named from a third party's AMT 10.0.56 dump, read back populated by this collection
+    on 16.1.30 and 19.0.5. C(link_policy_names) and C(requested_state) are recorded as additionally confirmed
+    populated, and C(operational_status)'s array shape plus C(idle_wake_timeout)'s C(65535) are now confirmed on two
+    generations rather than one."
+  - "docs - record that B(both) lab machines report C(wake_on_lan_capable = false). Both returned C(link_policy)
+    C([1, 14]) -- C(s0_ac), C(s0_dc), meaning link-up only while the host is already powered on -- with value C(16)
+    (\"network link always on\") B(absent on both). That is the diagnostic value C(docs/amt_info.md) claims for the
+    field, now measured rather than hypothetical: if a remote power-on against a genuinely off endpoint ever fails as
+    C(error_class: connection), this is the first thing to suspect. Deliberately B(not) claimed: that wake-from-off is
+    broken, or that it works. No stage powers a machine off, confirms it is off, and then tries to reach it; machine
+    1's stage-4 C(off) and restore are consistent with a machine that was already off. Added to Tier 4 as a specific
+    named gap."
+  - "docs - record that C(tests/hardware/redact-evidence.py) is verified against real hardware evidence, not only
+    against its unit tests. Its first live run rewrote two JSON files and redacted 21 values across five categories,
+    and the published artifact was independently swept for IPv4, MAC and UUID patterns afterwards with zero hits.
+    Diagnostic substance survived intact (firmware and BIOS versions, C(link_policy) integers, states, byte counters),
+    and C(primary_dns)/C(secondary_dns) mapped to the same pseudonym -- correctly preserving that they are one server
+    without disclosing which -- which is the stable-pseudonym design working as intended."
+  - "docs - correct the quoted unit-test count in the capability matrix from 531 to 761, measured the same way
+    (C(pytest --collect-only) against the staged collection tree). The existing framing is kept: it is a point
+    measurement that will drift as tests are added, not a promise."
+known_issues:
+  - "hardware - C(tests/hardware/qualify_checkmode.yml) writes no evidence file. Its
+    C(ansible.builtin.copy) evidence task carries no C(check_mode: false) and stage 3 runs under C(--check), so the
+    C(-qualify_checkmode.json) file is never created and never appears in the C(hardware-evidence) artifact. Observed
+    on the 2026-07-29 re-run, where a three-stage run produced two evidence files. Nothing leaks as a result -- a file
+    that does not exist cannot be published -- but stage 3 leaves no reviewable record of the plans it computed."
