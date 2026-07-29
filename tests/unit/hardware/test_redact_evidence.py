@@ -77,7 +77,7 @@ EVIDENCE: dict[str, Any] = {
         "dhcp_enabled": True,
         "link_is_up": True,
         "link_policy": [1, 14, 16],
-        "link_policy_names": ["s0_ac", "s0_dc", "always_on"],
+        "link_policy_names": ["s0_ac", "sx_ac", "s0_dc"],
         "wake_on_lan_capable": True,
     },
     "system_state": {
@@ -115,7 +115,7 @@ PRESERVED_VALUES: tuple[Any, ...] = (
     "get_facts",
     "admin",
     "s0_ac",
-    "always_on",
+    "sx_ac",
     "ok",
     "on",
 )

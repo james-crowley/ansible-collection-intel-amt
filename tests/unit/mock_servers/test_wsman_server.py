@@ -406,10 +406,12 @@ class TestEthernetPortSettingsAndSystemState:
         assert _find_all_text(root, "LinkPolicy") == ["1", "14", "16"]
 
     def test_link_policy_is_settable_so_a_test_can_take_away_wake_capability(self, server):
-        server.state.ethernet_link_policy = [1, 14]
+        # S0 AC + S0 DC and no Sx value: link maintained only while the host is
+        # running, which is the shape that makes `wake_on_lan_capable` false.
+        server.state.ethernet_link_policy = [1, 16]
         resp = _post(server, _get_xml(AMT_ETHERNET_PORT_SETTINGS, self.ETHERNET_SELECTOR))
         root = ET.fromstring(resp.content)  # noqa: S314
-        assert _find_all_text(root, "LinkPolicy") == ["1", "14"]
+        assert _find_all_text(root, "LinkPolicy") == ["1", "16"]
 
     def test_an_absent_port_faults_so_the_client_degrades_rather_than_failing(self, server):
         server.state.ethernet_port_present = False

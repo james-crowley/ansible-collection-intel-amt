@@ -10,7 +10,10 @@ from typing import ClassVar
 import pytest
 
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.models import (
-    LINK_POLICY_ALWAYS_ON,
+    LINK_POLICY_S0_AC,
+    LINK_POLICY_S0_DC,
+    LINK_POLICY_SX_AC,
+    LINK_POLICY_SX_DC,
     RECEIPT_SCHEMA,
     AmtFacts,
     BootConfiguration,
@@ -165,11 +168,67 @@ class TestEthernetSettings:
         assert settings.mac_address is None
         assert settings.mac_address_raw is None
 
+    def test_regression_link_policy_1_and_14_is_wake_capable(self):
+        # REGRESSION GUARD for the inverted `wake_on_lan_capable` shipped in 0.2.0
+        # and 0.3.0. Both lab machines report exactly `[1, 14]`. 14 is `Sx AC`
+        # (link maintained while the host is asleep or off, on mains) per
+        # go-wsman-messages `pkg/wsman/amt/ethernetport`; the old table called it
+        # `s0_dc` and keyed the boolean off 16 as an invented "always on", so
+        # every mains-powered desktop got `false` when the truth is `true`. The
+        # MEBx screen on one of those machines reads "ON in S0, ME Wake in S3,
+        # S4-5", which agrees with the corrected table and not with the old one.
+        settings = EthernetSettings.from_instance({"LinkPolicy": ["1", "14"]})
+        assert settings.link_policy == [1, 14]
+        assert settings.link_policy_names == ["s0_ac", "sx_ac"]
+        assert settings.wake_on_lan_capable is True
+
+    @pytest.mark.parametrize(
+        ("value", "name"),
+        [
+            (LINK_POLICY_S0_AC, "s0_ac"),
+            (LINK_POLICY_SX_AC, "sx_ac"),
+            (LINK_POLICY_S0_DC, "s0_dc"),
+            (LINK_POLICY_SX_DC, "sx_dc"),
+        ],
+    )
+    def test_every_authoritative_link_policy_value_decodes_to_its_vendor_name(self, value, name):
+        # The whole enum, exactly as go-wsman-messages defines it:
+        # ValueMap={1, 14, 16, 224} / Values={available on S0 AC, available on
+        # Sx AC, available on S0 DC, available on Sx DC}. Nothing else is named.
+        settings = EthernetSettings.from_instance({"LinkPolicy": [str(value)]})
+        assert settings.link_policy == [value]
+        assert settings.link_policy_names == [name]
+
+    def test_sx_dc_224_is_recognised_and_wake_capable(self):
+        # 224 was missing from the table entirely, so a battery-powered endpoint
+        # that does maintain its link while asleep decoded as `unknown(224)` and
+        # reported `wake_on_lan_capable: false`.
+        settings = EthernetSettings.from_instance({"LinkPolicy": ["1", "224"]})
+        assert settings.link_policy == [1, 224]
+        assert settings.link_policy_names == ["s0_ac", "sx_dc"]
+        assert settings.wake_on_lan_capable is True
+
+    def test_wake_on_lan_is_false_when_only_s0_values_are_present(self):
+        # S0 AC + S0 DC: the link is maintained on mains and on battery, but only
+        # while the host is already running. Nothing here says the endpoint
+        # answers WS-Man once it leaves S0, so `amt_power state=on` against it
+        # may fail looking exactly like a network fault. 16 being present is
+        # specifically *not* enough -- it used to be the whole test.
+        settings = EthernetSettings.from_instance({"LinkPolicy": ["1", "16"]})
+        assert settings.link_policy == [1, 16]
+        assert settings.link_policy_names == ["s0_ac", "s0_dc"]
+        assert settings.wake_on_lan_capable is False
+
+    def test_wake_on_lan_is_false_for_s0_ac_alone(self):
+        settings = EthernetSettings.from_instance({"LinkPolicy": ["1"]})
+        assert settings.link_policy == [LINK_POLICY_S0_AC]
+        assert settings.wake_on_lan_capable is False
+
     def test_link_policy_repeated_plain_elements(self):
         # The shape AMT's schema implies (LinkPolicy is a uint32 array).
         settings = EthernetSettings.from_instance({"LinkPolicy": ["1", "14", "16"]})
         assert settings.link_policy == [1, 14, 16]
-        assert settings.link_policy_names == ["s0_ac", "s0_dc", "always_on"]
+        assert settings.link_policy_names == ["s0_ac", "sx_ac", "s0_dc"]
         assert settings.wake_on_lan_capable is True
 
     def test_link_policy_nested_policy_value_elements(self):
@@ -181,22 +240,14 @@ class TestEthernetSettings:
         assert settings.wake_on_lan_capable is True
 
     def test_link_policy_single_nested_wrapper_holding_several_values(self):
-        settings = EthernetSettings.from_instance({"LinkPolicy": {"PolicyValue": ["1", "16"]}})
-        assert settings.link_policy == [1, 16]
+        settings = EthernetSettings.from_instance({"LinkPolicy": {"PolicyValue": ["1", "224"]}})
+        assert settings.link_policy == [1, 224]
         assert settings.wake_on_lan_capable is True
 
     def test_link_policy_single_value_is_not_mistaken_for_a_character_sequence(self):
-        settings = EthernetSettings.from_instance({"LinkPolicy": "16"})
-        assert settings.link_policy == [LINK_POLICY_ALWAYS_ON]
+        settings = EthernetSettings.from_instance({"LinkPolicy": "14"})
+        assert settings.link_policy == [LINK_POLICY_SX_AC]
         assert settings.wake_on_lan_capable is True
-
-    def test_wake_on_lan_is_false_when_the_always_on_value_is_absent(self):
-        # A machine whose LinkPolicy lacks 16 will not answer WS-Man while powered
-        # off, so `amt_power state=on` fails there in a way that looks like a
-        # network fault. Reporting this read-only turns that into a diagnosis.
-        settings = EthernetSettings.from_instance({"LinkPolicy": ["1", "14"]})
-        assert settings.link_policy == [1, 14]
-        assert settings.wake_on_lan_capable is False
 
     def test_empty_link_policy_is_an_empty_list_and_not_wake_capable(self):
         settings = EthernetSettings.from_instance({"LinkPolicy": ""})
@@ -213,10 +264,22 @@ class TestEthernetSettings:
         assert settings.wake_on_lan_capable is None
 
     def test_unrecognised_link_policy_value_is_kept_and_named_with_its_raw_value(self):
-        settings = EthernetSettings.from_instance({"LinkPolicy": ["16", "99"]})
-        assert settings.link_policy == [16, 99]
-        assert settings.link_policy_names == ["always_on", "unknown(99)"]
+        settings = EthernetSettings.from_instance({"LinkPolicy": ["14", "99"]})
+        assert settings.link_policy == [14, 99]
+        assert settings.link_policy_names == ["sx_ac", "unknown(99)"]
         assert settings.wake_on_lan_capable is True
+
+    @pytest.mark.parametrize("undefined", ["2", "15"])
+    def test_values_absent_from_the_vendor_enum_are_passed_through_unnamed(self, undefined):
+        # 2 and 15 came from parmstro's constants file as `sx_ac`/`sx_dc`. They
+        # are not in Intel's enum, so they are no longer named -- but they are
+        # still surfaced raw and rendered `unknown(<raw>)` rather than dropped.
+        # Inventing a name for an undefined value is what caused this bug; the
+        # fix is to stop naming them, not to stop reporting them.
+        settings = EthernetSettings.from_instance({"LinkPolicy": ["1", undefined]})
+        assert settings.link_policy == [1, int(undefined)]
+        assert settings.link_policy_names == ["s0_ac", f"unknown({undefined})"]
+        assert settings.wake_on_lan_capable is False
 
     def test_non_numeric_link_policy_entries_are_dropped_rather_than_raising(self):
         settings = EthernetSettings.from_instance({"LinkPolicy": ["1", "junk", "16"]})
