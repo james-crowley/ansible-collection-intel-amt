@@ -198,6 +198,18 @@ releases:
         fingerprint each AMT port offers. It sends no credentials and mutates nothing,
         so it is safe to run before an endpoint's identity is established, and it
         produces the reviewed pin the credentialed stages require.
+      - 'CI - build the lab runner''s qualification virtualenv from an explicitly
+        versioned Python interpreter instead of bare ``python3``, which on that host
+        is still the system Python 3.10 and cannot run ansible-core 2.18 at all. The
+        command prefers ``python3.12``, falls back to ``python3.11``/``python3.13``,
+        and fails immediately -- naming what it looked for and what it found -- when
+        none of them exists, rather than letting the problem surface forty lines later
+        as a pip resolution error nobody can debug without logging into the host.
+        It echoes the interpreter it chose and that interpreter''s version, so every
+        job log records which one actually ran. 3.12 rather than the newest available
+        Python for two reasons: ansible-core 2.18''s supported controller range ends
+        at 3.13, and 3.12 is also the newest version that can still run ansible-core
+        2.17, the collection''s declared floor.'
       - CI - hardware-in-the-loop jobs target the ``crowley/amt-runner`` self-hosted
         resource class and run under the ``amt-lab-runner`` context, which is restricted
         to this project alone so no other project in the organisation can borrow the
@@ -231,8 +243,8 @@ releases:
         that preserve both properties the tests rely on, and real AMT addresses and
         reviewed fingerprints are replaced with placeholders in maintainer documentation.
       - Documentation now records that the collection is hardware-qualified against
-        a single Intel AMT 16.1.30 endpoint through all seven qualification stages,
-        and states specifically what remains unproven -- a non-zero IDE-R write, whether
+        an Intel AMT 16.1.30 endpoint through all eight qualification stages, and
+        states specifically what remains unproven -- a non-zero IDE-R write, whether
         a PXE exchange occurred, AMT's internal one-shot role bit, a second machine,
         and any other firmware generation.
       - Extend ``AmtFacts`` with ``reported_hostname``, ``capabilities``, and ``redirection``
@@ -296,6 +308,17 @@ releases:
       - plugins/module_utils/redirection_service.py - WS-Man view of redirection-service
         capability/enablement plus an injectable TCP reachability probe, kept separate
         from the stateful IDE-R/SOL session transport (https://github.com/james-crowley/ansible-collection-intel-amt/pull/13).
+      - 'renovate.json - drop the ``allowedVersions: ''<2.18''`` cap on ansible-core.
+        Its own documented removal condition, the lab runner host being on Python
+        3.11 or newer, is now met, so the cap no longer suppresses anything and the
+        risk-acceptance note explaining it has been removed rather than left behind
+        as stale warning text. Renovate will now raise 2.18+ updates for the hardware
+        pin and list them on the Dependency Dashboard.'
+      - renovate.json - repair the custom regex manager for the hardware ansible-core
+        pin. Its pattern assumed a trailing literal ``.0`` (``ansible-core~=(?<currentValue>\d+\.\d+)\.0``)
+        and so matched nothing once the pin became 2.18.18, which would have left
+        the only ansible-core version Renovate can see silently unmanaged, with no
+        error anywhere to reveal it.
       - 'roles/amt_baremetal_install - new reusable role that drives a complete unattended
         bare-metal install lifecycle (validate -> probe -> attach media -> arm one-time
         boot -> reset -> observe -> wait for hand-off -> detach) on top of amt_info,
@@ -358,15 +381,28 @@ releases:
       release_summary: "First release. Manages Intel AMT / vPro endpoints from Ansible:
         capability\ndiscovery, power control, one-time boot selection, redirection-service
         state,\nand native IDE-R virtual media \u2014 a bootable ISO and a writable
-        image served to a\nmachine's firmware without shelling out to MeshCmd or Node.js.\n\nQualified
-        against two physical machines running Intel AMT 16.1.30, through all\nseven
-        hardware stages: read-only facts, check-mode plans, power on/off, IDE-R\nmedia
-        attach and boot, a writable image, native one-time PXE, and an idempotent\nre-probe.\n\nSee
-        ``docs/capability-matrix.md`` for what is verified against real firmware,\nwhat
-        is only covered by mock fixtures, and what remains unproven. That\ndistinction
-        is maintained deliberately, and the \"still unproven\" list is short\nand
-        specific rather than absent.\n"
+        image served to a\nmachine's firmware without shelling out to MeshCmd or Node.js.\n\nHardware-qualified,
+        with the coverage recorded precisely because it is uneven: all eight\nstages
+        passed on one machine running AMT 16.1.30 -- read-only facts, an\nidentity
+        cross-check, check-mode plans, power on/off, IDE-R media attach and\nboot,
+        a writable image, native one-time PXE, and an idempotent re-probe --\nwhile
+        a second machine running AMT 19.0.5 reproduced only the three\nnon-mutating
+        stages. Power, media, the writable-image path and PXE are\ntherefore a single-machine,
+        single-firmware-generation result.\n\nSee ``docs/capability-matrix.md`` for
+        what is verified against real firmware,\nwhat is only covered by mock fixtures,
+        and what remains unproven. That\ndistinction is maintained deliberately, and
+        the \"still unproven\" list is short\nand specific rather than absent.\n"
       security_fixes:
+      - CI - move the self-hosted lab runner's hardware-qualification virtualenv off
+        ansible-core 2.17 and onto ``ansible-core~=2.18.18``. The 2.17 line is affected
+        by GHSA-w8p5-mx5w-cpqj [HIGH] -- argument injection in ``ansible-galaxy role
+        install`` leading to arbitrary code execution -- and that line is EOL, so
+        no 2.17 release will ever carry the fix. 2.18.18 is the first release that
+        does. The pin had been held at 2.17 only because the runner host had nothing
+        but Python 3.10 and ansible-core 2.18+ requires 3.11+ on the controller; the
+        host now has Python 3.12, so the blocker is gone rather than merely accepted.
+        Nothing changes for consumers -- ``requires_ansible`` stays at ``>=2.17.0``,
+        which is a floor and not a pin.
       - IDE-R write payloads are bounded against the transfer length declared by the
         WRITE CDB, and MediaImage refuses any write that would extend the backing
         file. Previously a host could declare a small write, pass the bounds check,
@@ -379,6 +415,13 @@ releases:
       - The redirection session refuses to downgrade to cleartext or cnonce-less digest
         authentication, and verifies a pinned TLS leaf certificate before transmitting
         any bytes (https://github.com/james-crowley/ansible-collection-intel-amt/pull/14).
+      - amt_media - decide attach failure from whether the session daemon is still
+        alive, rather than from whether it managed to write an error state before
+        the timeout. Only an explicit error state used to fail the module, so a daemon
+        killed during the digest handshake -- which is exactly what bad credentials
+        cause -- could fall through to a success receipt depending on timing. A failed
+        attach reporting success is the worst available outcome for a module whose
+        job is to serve boot media (https://github.com/james-crowley/ansible-collection-intel-amt/issues/44).
       - amt_media - require O(tls_fingerprint) when O(use_tls=true), and reject O(ca_path)
         outright. The redirection plane is a raw TLS socket whose only trust mode
         is leaf pinning; TLS without a pin is encrypted but unauthenticated, and silently
@@ -397,6 +440,7 @@ releases:
     - 7-amt-media-integration.yml
     - 7-amt-media.yml
     - 9-11-baremetal-role.yml
+    - attach-failure-detection.yml
     - canonical-uuid.yml
     - ci-runner-lockdown.yml
     - community-files.yml
@@ -413,6 +457,7 @@ releases:
     - release-summary.yml
     - role-connection-defaults.yml
     - role-power-on-when-off.yml
+    - runner-python-and-ansible-core.yml
     - scheduled-drift-detection.yml
     - stage4-restore-key.yml
     - stage6-reread-connection.yml

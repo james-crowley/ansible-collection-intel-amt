@@ -7,8 +7,11 @@ SPDX-License-Identifier: GPL-3.0-or-later
 # Ansible Collection: `james_crowley.intel_amt`
 
 <!-- Badges must stay on ONE line. GitHub renders the soft line break between two
-     badge links as a <br>, which stacks them vertically instead of forming a row. -->
-[![Galaxy](https://img.shields.io/badge/dynamic/json?label=galaxy&query=%24.data.collection.latest_version.version&url=https%3A%2F%2Fgalaxy.ansible.com%2Fapi%2Fv2%2Fcollections%2Fjames_crowley%2Fintel_amt%2F&color=blue)](https://galaxy.ansible.com/ui/repo/published/james_crowley/intel_amt/) [![CircleCI](https://dl.circleci.com/status-badge/img/gh/james-crowley/ansible-collection-intel-amt/tree/main.svg?style=shield)](https://dl.circleci.com/status-badge/redirect/gh/james-crowley/ansible-collection-intel-amt/tree/main) [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE) [![ansible-core](https://img.shields.io/badge/ansible--core-%3E%3D2.17-blue.svg)](https://docs.ansible.com/) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/) [![Status: pre-release](https://img.shields.io/badge/status-pre--release-orange.svg)](#project-status)
+     badge links as a <br>, which stacks them vertically instead of forming a row.
+     The Galaxy badge reads the v3 published-collection index, not the v2 API:
+     v2 no longer returns JSON for this path, so shields.io rendered "resource
+     not found" against it. Verified against a published collection before use. -->
+[![Galaxy](https://img.shields.io/badge/dynamic/json?label=galaxy&query=%24.highest_version.version&url=https%3A%2F%2Fgalaxy.ansible.com%2Fapi%2Fv3%2Fplugin%2Fansible%2Fcontent%2Fpublished%2Fcollections%2Findex%2Fjames_crowley%2Fintel_amt%2F&color=blue)](https://galaxy.ansible.com/ui/repo/published/james_crowley/intel_amt/) [![CircleCI](https://dl.circleci.com/status-badge/img/gh/james-crowley/ansible-collection-intel-amt/tree/main.svg?style=shield)](https://dl.circleci.com/status-badge/redirect/gh/james-crowley/ansible-collection-intel-amt/tree/main) [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE) [![ansible-core](https://img.shields.io/badge/ansible--core-%3E%3D2.17-blue.svg)](https://docs.ansible.com/) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/) [![Status: pre-release](https://img.shields.io/badge/status-pre--release-orange.svg)](#project-status)
 
 Out-of-band management of **Intel AMT / vPro** machines from Ansible — power
 control, one-time boot selection, redirection state, and **native IDE-R virtual
