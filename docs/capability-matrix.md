@@ -78,6 +78,51 @@ This is the bulk of the collection's verification effort:
   path that verifies bytes actually land in the backing image). See
   `docs/testing.md` for how to run these and exactly what they do and do not prove.
 
+### `amt_info`'s network and system-state facts — Tier 2, and specifically not Tier 3
+
+`amt.network` (`AMT_EthernetPortSettings` instance 0), `amt.system_state`
+(`CIM_ComputerSystem`), `amt.bios_version` (`CIM_BIOSElement`) and the five extra
+`AMT_GeneralSettings` fields (`domain_name`, `idle_wake_timeout`,
+`ping_response_enabled`, `rmcp_ping_response_enabled`, `network_interface_enabled`,
+`ddns_update_enabled`) sit here rather than in Tier 1 or Tier 3, and the distinction is
+the whole point of this document:
+
+- **Not Tier 3.** No lab machine has ever returned any of these. They are
+  **unverified on AMT 16.1.30 and 19.0.5** — the two generations every other
+  `amt_info` fact *is* hardware-verified on. Nothing in the qualification stages
+  reads them.
+- **Not Tier 1 either**, with one exception below. Tier 1 means verified against an
+  authoritative source: a vendor reference implementation or a real firmware response
+  fixture. What these rest on is a third party's hardware dump of *one* machine
+  (`parmstro`, Intel NUC5i5MYBE, AMT **10.0.56** build 3002,
+  `development/research/AMT_RESOURCE_DISCOVERY.md`, GPL-3.0-or-later) — property names
+  and observed values, transcribed into `docs/protocol-notes.md` §2.7. That is real
+  hardware evidence, but from someone else's lab, on a firmware generation this
+  collection has never touched, and the surrounding project's *code* is demonstrably
+  unreliable (three of its ten modules report success while doing nothing; its power
+  constants map `reset` to CIM code 11, Diagnostic Interrupt/NMI, rather than 10,
+  Master Bus Reset). Property names from those notes were used; no code was.
+- **What is actually proven here** is this collection's own behaviour: parsing of every
+  property, MAC normalization from dash, colon and bare-hex input, `LinkPolicy` decode
+  including the empty and absent cases, both candidate `LinkPolicy` wire shapes, every
+  DMTF `EnabledState` and `OperationalStatus` value, and graceful `null` degradation
+  when any class faults — plus an end-to-end pass of `amt_info` against the mock
+  WS-Man server, which serves the MAC dash-separated and requires the exact `Get`
+  selector for `AMT_EthernetPortSettings` because that is what real AMT 10 does.
+- **The one Tier 1 row here** is the DMTF decoding itself: `EnabledState` and
+  `OperationalStatus` come from the DMTF CIM schema, not from anyone's dump. The
+  source project's implementation decodes only `OperationalStatus` values 0 and 2 and
+  omits `EnabledState` 4 (shutting down) entirely; the full standard tables are
+  implemented here instead.
+- **Evidence is weakest for `bios_version`.** `CIM_BIOSElement` is listed as working in
+  the source notes but no value was ever dumped, and the implementation they claim it
+  from swallows failure to `None` — so their "pass" is not evidence. It is read through
+  the optional path with an `Enumerate` fallback and is expected to be `null` on some
+  firmware.
+
+The honest one-line summary: *derived from someone else's AMT 10.0.56 hardware dump,
+mock-tested here, unverified on any machine this collection has access to.*
+
 What mock testing genuinely buys: confidence that this collection's own code
 correctly implements *its own understanding* of the protocol, consistently, across
 every option combination, error path, and check-mode branch this test suite

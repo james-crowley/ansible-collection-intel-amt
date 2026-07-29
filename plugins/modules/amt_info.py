@@ -17,6 +17,18 @@ description:
     degrades the corresponding capability to V(false)/unknown rather than
     failing the whole read.
   - This module never mutates anything and always reports C(changed=false).
+  - >-
+    Round-trip cost. One invocation performs ten WS-Man HTTP requests: eight
+    C(Get) operations plus an C(Enumerate)/C(Pull) pair for
+    C(CIM_SoftwareIdentity). Three of the C(Get)s are new in this release --
+    C(AMT_EthernetPortSettings) instance 0, C(CIM_ComputerSystem) with selector
+    C(Name=ManagedSystem), and C(CIM_BIOSElement). The C(CIM_ComputerSystem)
+    read had previously been removed precisely to save a round trip, when it
+    existed only to source a C(UUID) property that class does not define; it is
+    back because it does define the three state fields under
+    RV(amt.system_state). C(CIM_BIOSElement) may cost one further
+    C(Enumerate)/C(Pull) pair, but only on firmware where the bare C(Get)
+    faults.
 version_added: 0.1.0
 author:
   - Jim Crowley (@james-crowley)
@@ -55,6 +67,24 @@ EXAMPLES = r"""
     that:
       - amt.amt.reachable
       - amt.amt.capabilities.storage_redirection
+
+- name: Warn when this endpoint will not answer WS-Man while powered off
+  ansible.builtin.debug:
+    msg: >-
+      LinkPolicy {{ amt.amt.network.link_policy }} lacks 16 (network link always on), so
+      a later amt_power state=on will fail looking like a network fault rather than the
+      configuration issue it is.
+  when:
+    - amt.amt.network is not none
+    - amt.amt.network.wake_on_lan_capable is false
+
+- name: Cross-check both identity anchors before doing anything destructive
+  ansible.builtin.assert:
+    that:
+      - amt.amt.uuid == amt_expected_uuid
+      - amt.amt.network.mac_address == (amt_expected_mac | lower)
+    fail_msg: Endpoint evidence disagrees with the reviewed inventory binding; refusing to proceed.
+  when: amt_expected_uuid is defined and amt_expected_mac is defined
 """
 
 RETURN = r"""
@@ -96,6 +126,49 @@ amt:
         This is firmware-observed evidence, not a value taken from inventory.
       type: str
       returned: when available
+    domain_name:
+      description: >-
+        Domain name the firmware reports (C(AMT_GeneralSettings.DomainName)).
+        Firmware-observed, not an inventory value, and read from the same
+        instance as RV(amt.hostname) at no extra WS-Man round trip.
+      type: str
+      returned: when available
+      sample: amt.example.invalid
+    idle_wake_timeout:
+      description: >-
+        C(AMT_GeneralSettings.IdleWakeTimeout), in minutes -- how long AMT stays
+        awake in a low-power state before returning to sleep.
+      type: int
+      returned: when available
+      sample: 1
+    ping_response_enabled:
+      description: >-
+        C(AMT_GeneralSettings.PingResponseEnabled) -- whether AMT answers ICMP
+        echo. This is the ping-response toggle; RV(amt.network.ip_sync_enabled)
+        is not, despite what some other tooling implies.
+      type: bool
+      returned: when available
+    rmcp_ping_response_enabled:
+      description: C(AMT_GeneralSettings.RmcpPingResponseEnabled) -- whether AMT answers RMCP ping.
+      type: bool
+      returned: when available
+    network_interface_enabled:
+      description: C(AMT_GeneralSettings.NetworkInterfaceEnabled) -- whether AMT's own network interface is enabled.
+      type: bool
+      returned: when available
+    ddns_update_enabled:
+      description: C(AMT_GeneralSettings.DDNSUpdateEnabled) -- whether AMT registers itself in DNS via dynamic update.
+      type: bool
+      returned: when available
+    bios_version:
+      description: >-
+        Host BIOS version from C(CIM_BIOSElement.Version) -- the platform's BIOS, not
+        the AMT firmware version (that is RV(amt.version)). This is the least
+        well-evidenced field this module returns; see the module documentation and
+        C(docs/capability-matrix.md). V(null) whenever the class or property is absent.
+      type: str
+      returned: when available
+      sample: EXAMPLE10H.86A.0000.2026.0101.0000
     power_state:
       description: Current power state, normalized from the CIM power-state table.
       type: dict
@@ -123,6 +196,141 @@ amt:
         storage_redirection:
           description: Whether C(AMT_BootCapabilities) reports IDE-R (storage redirection) support.
           type: bool
+    network:
+      description: >-
+        C(AMT_EthernetPortSettings) instance 0 -- the wired port AMT itself answers
+        on -- read with an explicit C(Get) selector
+        (C(InstanceID="Intel(r) AMT Ethernet Port Settings 0")). V(null) when the
+        class or that instance is absent. Instance 0 only. Higher indices exist on
+        multi-NIC parts and are deliberately not looked for.
+      type: dict
+      returned: when available
+      contains:
+        mac_address:
+          description: >-
+            C(MACAddress), normalized to colon-separated lowercase. A second
+            independent identity anchor alongside RV(amt.uuid), and the value a
+            PXE reservation is keyed on. Real firmware has been observed
+            returning this dash-separated, so it is normalized on ingest;
+            RV(amt.network.mac_address_raw) keeps the original.
+          type: str
+          sample: "00:00:5e:00:53:01"
+        mac_address_raw:
+          description: C(MACAddress) exactly as the firmware reported it, separators and case included.
+          type: str
+          sample: 00-00-5e-00-53-01
+        ip_address:
+          description: C(IPAddress) -- AMT's IPv4 address.
+          type: str
+          sample: 192.0.2.10
+        subnet_mask:
+          description: C(SubnetMask).
+          type: str
+          sample: 255.255.255.0
+        default_gateway:
+          description: C(DefaultGateway).
+          type: str
+          sample: 192.0.2.1
+        primary_dns:
+          description: C(PrimaryDNS).
+          type: str
+          sample: 192.0.2.2
+        secondary_dns:
+          description: C(SecondaryDNS).
+          type: str
+          sample: 192.0.2.3
+        dhcp_enabled:
+          description: C(DHCPEnabled) -- whether AMT obtains its address by DHCP.
+          type: bool
+        link_is_up:
+          description: C(LinkIsUp) -- whether the port reports link at the time of the read.
+          type: bool
+        ip_sync_enabled:
+          description: >-
+            C(IpSyncEnabled) -- whether AMT shares the host operating system's IP
+            address rather than holding its own. This is B(not) a ping-response
+            toggle; RV(amt.ping_response_enabled) is that.
+          type: bool
+        link_policy:
+          description: >-
+            Raw C(LinkPolicy) values. V(1) = S0 (powered on) on AC, V(2) = Sx
+            (sleep/hibernate) on AC, V(14) = S0 on DC, V(15) = Sx on DC, V(16) =
+            network link always on. V(null) when the property is absent, V([])
+            when it is present but empty.
+          type: list
+          elements: int
+          sample: [1, 14, 16]
+        link_policy_names:
+          description: >-
+            RV(amt.network.link_policy) decoded, element-wise, into
+            V(s0_ac)/V(sx_ac)/V(s0_dc)/V(sx_dc)/V(always_on). A value outside that
+            table renders as V(unknown(<raw>)) rather than being dropped.
+          type: list
+          elements: str
+          sample: ["s0_ac", "s0_dc", "always_on"]
+        wake_on_lan_capable:
+          description: >-
+            Derived: whether C(LinkPolicy) contains V(16) (network link always on).
+            An endpoint without it does not answer WS-Man while powered off, so
+            C(amt_power) with C(state=on) fails there in a way that looks like a
+            network fault rather than a configuration one. V(null) when
+            C(LinkPolicy) was not reported at all -- unknown is not the same
+            finding as V(false).
+          type: bool
+    system_state:
+      description: >-
+        C(CIM_ComputerSystem) state, read with selector C(Name=ManagedSystem).
+        V(null) when the class is absent. This read costs one WS-Man round trip
+        that a previous release removed; it is back for these fields and B(not)
+        for a UUID, which this class does not carry (RV(amt.uuid) comes from
+        C(CIM_ComputerSystemPackage.PlatformGUID)).
+      type: dict
+      returned: when available
+      contains:
+        element_name:
+          description: C(ElementName) -- the system's own label. Read instead of C(Name), which is just the selector value.
+          type: str
+          sample: ManagedSystem
+        enabled_state:
+          description: Raw DMTF C(EnabledState) integer.
+          type: int
+          sample: 2
+        enabled_state_text:
+          description: >-
+            C(EnabledState) decoded per DMTF -- V(unknown) (0), V(other) (1),
+            V(enabled) (2), V(disabled) (3), V(shutting_down) (4),
+            V(not_applicable) (5), V(enabled_but_offline) (6), V(in_test) (7),
+            V(deferred) (8), V(quiesce) (9), V(starting) (10). A value outside the
+            table renders as V(unknown(<raw>)).
+          type: str
+          sample: enabled
+        requested_state:
+          description: >-
+            Raw DMTF C(RequestedState) integer. Reported raw and undecoded on
+            purpose - no value table for it is claimed here. AMT 10 has been
+            observed reporting V(12), which DMTF defines as "Not Applicable".
+          type: int
+          sample: 12
+        operational_status:
+          description: >-
+            Raw DMTF C(OperationalStatus) values. Always a list: CIM types this
+            property as an array, and firmware reporting a single value is simply
+            an array of one.
+          type: list
+          elements: int
+          sample: [2]
+        operational_status_text:
+          description: >-
+            C(OperationalStatus) decoded element-wise per DMTF -- V(unknown) (0),
+            V(other) (1), V(ok) (2), V(degraded) (3), V(stressed) (4),
+            V(predictive_failure) (5), V(error) (6), V(non_recoverable_error) (7),
+            V(starting) (8), V(stopping) (9), V(stopped) (10), V(in_service) (11),
+            V(no_contact) (12), V(lost_communication) (13), V(aborted) (14),
+            V(dormant) (15), V(supporting_entity_in_error) (16), V(completed) (17),
+            V(power_mode) (18), V(relocating) (19).
+          type: list
+          elements: str
+          sample: ["ok"]
     redirection_status:
       description: >-
         Current C(AMT_RedirectionService) enablement, distinct from what the
@@ -238,6 +446,10 @@ def facts_to_result(client: AmtClient) -> dict:
     if facts.redirection is not None:
         redirection_status = dataclasses.asdict(facts.redirection)
 
+    # Additive only. Every key that existed before keeps its name, position and
+    # shape -- roles/amt_baremetal_install, the integration targets and
+    # tests/hardware all read `amt.capabilities.*`, `amt.reachable` and
+    # `amt.power_state.*` and must not have to change.
     return {
         "reachable": True,
         "version": facts.version,
@@ -248,6 +460,15 @@ def facts_to_result(client: AmtClient) -> dict:
         "power_state": power_state,
         "capabilities": dataclasses.asdict(facts.capabilities),
         "redirection_status": redirection_status,
+        "domain_name": facts.reported_domain_name,
+        "idle_wake_timeout": facts.idle_wake_timeout,
+        "ping_response_enabled": facts.ping_response_enabled,
+        "rmcp_ping_response_enabled": facts.rmcp_ping_response_enabled,
+        "network_interface_enabled": facts.network_interface_enabled,
+        "ddns_update_enabled": facts.ddns_update_enabled,
+        "network": dataclasses.asdict(facts.network) if facts.network is not None else None,
+        "system_state": dataclasses.asdict(facts.system_state) if facts.system_state is not None else None,
+        "bios_version": facts.bios_version,
     }
 
 

@@ -40,9 +40,15 @@ from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors imp
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.models import (
     AmtCapabilities,
     AmtFacts,
+    EthernetSettings,
     OperationReceipt,
     PowerState,
     RedirectionState,
+    SystemState,
+    optional_bool,
+    optional_int,
+    optional_str,
+    truthy,
 )
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.wsman import (
     EndpointReference,
@@ -59,8 +65,16 @@ if TYPE_CHECKING:
 _DEGRADABLE_ERRORS: tuple[type[AmtError], ...] = (ProtocolError, UnsupportedCapabilityError)
 
 #: The ``CIM_ComputerSystem`` selector RequestPowerStateChange's
-#: ``ManagedElement`` must name, per docs/protocol-notes.md s2.4.
+#: ``ManagedElement`` must name, per docs/protocol-notes.md s2.4. The same
+#: selector addresses the instance for the state read in :meth:`get_facts`.
 _MANAGED_SYSTEM_SELECTOR = {"Name": "ManagedSystem"}
+
+#: ``AMT_EthernetPortSettings`` instance 0 -- the wired port AMT itself uses.
+#: Instance 0 only: multi-NIC parts expose higher indices, this collection does
+#: not assume they exist, and a missing instance degrades rather than failing.
+#: A ``Get`` with this exact selector is mandatory -- ``Enumerate`` on
+#: ``AMT_``-prefixed classes is HTTP 400 on AMT 10 (docs/protocol-notes.md s2.7).
+_ETHERNET_PORT_0_SELECTOR = {"InstanceID": "Intel(r) AMT Ethernet Port Settings 0"}
 
 
 class PowerAction(str, Enum):
@@ -123,15 +137,6 @@ _ACTION_EXPECTED_STATE: dict[PowerAction, str] = {
     PowerAction.RESET: "on",
     PowerAction.REBOOT: "on",
 }
-
-
-def _truthy(value: Any) -> bool:
-    """Interpret a WS-Man boolean property, which arrives as element text (a string)."""
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return False
-    return str(value).strip().lower() in ("true", "1", "yes")
 
 
 def _canonical_uuid(value: str) -> str:
@@ -214,6 +219,31 @@ class AmtClient:
         ``False`` rather than failing the whole read. A genuine transport
         failure (connection/auth/TLS/timeout) is not tolerated here and
         propagates to the caller unchanged.
+
+        **Round-trip cost.** Eight WS-Man operations, ten HTTP requests
+        (``Enumerate CIM_SoftwareIdentity`` costs an Enumerate plus one Pull):
+
+        ===================================================  =====  =========
+        Operation                                            Verb   Since
+        ===================================================  =====  =========
+        ``AMT_GeneralSettings``                              Get    0.1.0
+        ``AMT_SetupAndConfigurationService``                 Get    0.1.0
+        ``CIM_AssociatedPowerManagementService``             Get    0.1.0
+        ``AMT_BootCapabilities``                             Get    0.1.0
+        ``AMT_RedirectionService``                           Get    0.1.0
+        ``CIM_SoftwareIdentity``                             Enum   0.1.0
+        ``CIM_ComputerSystemPackage``                        Get    0.1.0
+        ``AMT_EthernetPortSettings`` (instance 0)            Get    **new**
+        ``CIM_ComputerSystem`` (``Name=ManagedSystem``)      Get    **new**
+        ``CIM_BIOSElement``                                  Get    **new**
+        ===================================================  =====  =========
+
+        The ``CIM_ComputerSystem`` read is deliberately *reintroduced*: it was
+        removed in 0.1.0 because it existed only to source a ``UUID`` property
+        that class does not have. It is back to source ``EnabledState`` /
+        ``RequestedState`` / ``OperationalStatus`` / ``ElementName``, which it
+        does have. The UUID still comes from
+        ``CIM_ComputerSystemPackage.PlatformGUID`` and must not be read here.
         """
         general = self._get_optional("AMT_GeneralSettings")
         setup = self._get_optional("AMT_SetupAndConfigurationService")
@@ -227,19 +257,20 @@ class AmtClient:
 
         capabilities = AmtCapabilities(
             power=power_state is not None,
-            boot_once_pxe=_truthy(boot_caps.get("ForcePXEBoot")) if boot_caps else False,
-            sol=_truthy(boot_caps.get("SOL")) if boot_caps else False,
-            storage_redirection=_truthy(boot_caps.get("IDER")) if boot_caps else False,
+            boot_once_pxe=truthy(boot_caps.get("ForcePXEBoot")) if boot_caps else False,
+            sol=truthy(boot_caps.get("SOL")) if boot_caps else False,
+            storage_redirection=truthy(boot_caps.get("IDER")) if boot_caps else False,
         )
 
         redirection_state = None
         if redirection is not None:
             redirection_state = RedirectionState.from_enabled_state(
                 redirection.get("EnabledState", -1),
-                listener_enabled=_truthy(redirection.get("ListenerEnabled")),
+                listener_enabled=truthy(redirection.get("ListenerEnabled")),
             )
 
         version = self._get_amt_version()
+        general_settings = general or {}
 
         return AmtFacts(
             version=version,
@@ -247,12 +278,21 @@ class AmtClient:
             control_mode=(setup or {}).get("ProvisioningMode"),
             provisioning_state=(setup or {}).get("ProvisioningState"),
             power_state=power_state,
-            reported_hostname=(general or {}).get("HostName"),
+            reported_hostname=general_settings.get("HostName"),
             capabilities=capabilities,
             redirection=redirection_state,
+            reported_domain_name=optional_str(general_settings.get("DomainName")),
+            idle_wake_timeout=optional_int(general_settings.get("IdleWakeTimeout")),
+            ping_response_enabled=optional_bool(general_settings.get("PingResponseEnabled")),
+            rmcp_ping_response_enabled=optional_bool(general_settings.get("RmcpPingResponseEnabled")),
+            network_interface_enabled=optional_bool(general_settings.get("NetworkInterfaceEnabled")),
+            ddns_update_enabled=optional_bool(general_settings.get("DDNSUpdateEnabled")),
+            network=self._get_ethernet_settings(),
+            system_state=self._get_system_state(),
+            bios_version=self._get_bios_version(),
         )
 
-    def _get_optional(self, resource_class: str) -> dict[str, Any] | None:
+    def _get_optional(self, resource_class: str, *, selectors: dict[str, str] | None = None) -> dict[str, Any] | None:
         """``Get`` a class that a firmware may legitimately not implement.
 
         Returns ``None`` on the degradable errors (protocol/unsupported --
@@ -260,11 +300,88 @@ class AmtClient:
         the derived capability rather than aborting. Anything else (a real
         connection/auth/TLS/timeout failure) is not this method's to hide and
         is left to propagate.
+
+        ``selectors`` addresses one specific instance. It is not optional
+        stylistic detail for ``AMT_``-prefixed classes: on AMT 10,
+        ``Enumerate`` returns HTTP 400 for ``AMT_EthernetPortSettings``,
+        ``AMT_GeneralSettings``, ``AMT_BootCapabilities``,
+        ``AMT_BootSettingData`` and ``AMT_TLSSettingData``, while a ``Get``
+        with an exact selector works -- see docs/protocol-notes.md s2.7.
         """
         try:
-            return self._wsman.get(resource_class)
+            return self._wsman.get(resource_class, selectors=selectors)
         except _DEGRADABLE_ERRORS:
             return None
+
+    def _get_ethernet_settings(self) -> EthernetSettings | None:
+        """Read ``AMT_EthernetPortSettings`` instance 0: MAC, IPv4, DHCP, link state, link policy.
+
+        Instance 0 is the wired port AMT itself answers on. Higher indices exist
+        on multi-NIC parts; this deliberately does not look for them, and an
+        endpoint that has no instance 0 (or no such class) yields ``None``
+        rather than failing the read.
+
+        Read with an explicit ``Get`` selector, never ``Enumerate`` -- see
+        :meth:`_get_optional`.
+        """
+        instance = self._get_optional("AMT_EthernetPortSettings", selectors=_ETHERNET_PORT_0_SELECTOR)
+        if not instance:
+            return None
+        return EthernetSettings.from_instance(instance)
+
+    def _get_system_state(self) -> SystemState | None:
+        """Read ``CIM_ComputerSystem``'s enabled/requested/operational state.
+
+        This class was **removed** from facts gathering in 0.1.0 and is
+        reintroduced here on purpose, so the reasoning is worth stating rather
+        than leaving to archaeology. It was removed because it was only ever
+        read to source a ``UUID`` property that ``CIM_ComputerSystem`` does not
+        define, making it a wasted round trip that returned nothing usable. It
+        is back because ``EnabledState``, ``RequestedState``,
+        ``OperationalStatus`` and ``ElementName`` *are* defined on it and are
+        genuinely useful state. The UUID still comes from
+        ``CIM_ComputerSystemPackage.PlatformGUID`` (see
+        :meth:`_get_system_uuid`) -- do not reintroduce that defect alongside
+        the round trip.
+        """
+        instance = self._get_optional("CIM_ComputerSystem", selectors=_MANAGED_SYSTEM_SELECTOR)
+        if not instance:
+            return None
+        return SystemState.from_instance(instance)
+
+    def _get_bios_version(self) -> str | None:
+        """Read the host BIOS version from ``CIM_BIOSElement.Version``.
+
+        This is the **weakest-evidenced** of the facts gathered here.
+        ``parmstro``'s notes claim the class works on AMT 10.0.56 but never
+        record a dumped value, and their implementation swallows any failure to
+        ``None``, so their "it works" proves nothing either way. It is therefore
+        read strictly through the optional-degradation path: a fault yields
+        ``None`` and the module still succeeds.
+
+        ``CIM_BIOSElement`` has no obvious singleton selector, so a bare ``Get``
+        is tried first and ``Enumerate`` is used as a fallback -- a class with no
+        selector may require enumeration, and AMT's WS-Man implementation is
+        selective about which verb it accepts per class (docs/protocol-notes.md
+        s2.7). Note this is the *host BIOS* version, not the AMT firmware
+        version, which comes from ``CIM_SoftwareIdentity``.
+        """
+        instance = self._get_optional("CIM_BIOSElement")
+        version = optional_str((instance or {}).get("Version"))
+        if version is not None:
+            return version
+
+        try:
+            instances = self._wsman.enumerate("CIM_BIOSElement")
+        except _DEGRADABLE_ERRORS:
+            return None
+        for candidate in instances or ():
+            if not isinstance(candidate, dict):
+                continue
+            version = optional_str(candidate.get("Version"))
+            if version is not None:
+                return version
+        return None
 
     def _get_amt_version(self) -> str | None:
         """Read the AMT firmware version from ``CIM_SoftwareIdentity``.

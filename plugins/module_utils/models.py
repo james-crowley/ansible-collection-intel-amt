@@ -40,6 +40,177 @@ _POWER_STATE_TABLE: dict[int, str] = {
     13: "off",  # Off - Hard Graceful
 }
 
+#: DMTF ``CIM_EnabledLogicalElement.EnabledState``, per docs/protocol-notes.md s2.7.
+#: The full standard table, including ``4`` (shutting down) -- a partial table
+#: would report a real transitional state as "unknown".
+_ENABLED_STATE_TABLE: dict[int, str] = {
+    0: "unknown",
+    1: "other",
+    2: "enabled",
+    3: "disabled",
+    4: "shutting_down",
+    5: "not_applicable",
+    6: "enabled_but_offline",
+    7: "in_test",
+    8: "deferred",
+    9: "quiesce",
+    10: "starting",
+}
+
+#: DMTF ``CIM_ManagedSystemElement.OperationalStatus``, per docs/protocol-notes.md
+#: s2.7. Typed by CIM as an *array*, so it is decoded element-wise.
+_OPERATIONAL_STATUS_TABLE: dict[int, str] = {
+    0: "unknown",
+    1: "other",
+    2: "ok",
+    3: "degraded",
+    4: "stressed",
+    5: "predictive_failure",
+    6: "error",
+    7: "non_recoverable_error",
+    8: "starting",
+    9: "stopping",
+    10: "stopped",
+    11: "in_service",
+    12: "no_contact",
+    13: "lost_communication",
+    14: "aborted",
+    15: "dormant",
+    16: "supporting_entity_in_error",
+    17: "completed",
+    18: "power_mode",
+    19: "relocating",
+}
+
+#: ``AMT_EthernetPortSettings.LinkPolicy`` value whose presence means "keep the
+#: network link up regardless of host power state", i.e. the bit that makes an
+#: endpoint answerable (and wakeable) while powered off. See
+#: docs/protocol-notes.md s2.7.
+LINK_POLICY_ALWAYS_ON = 16
+
+#: The ``LinkPolicy`` values this collection can name. Corroborated on real AMT
+#: 10.0.56 hardware only for 1, 14 and 16 (the set one live machine returned);
+#: 2 and 15 are the documented AC/DC sleep counterparts and have not been
+#: observed. Reported values outside this table are still surfaced raw.
+_LINK_POLICY_TABLE: dict[int, str] = {
+    1: "s0_ac",  # powered on, AC
+    2: "sx_ac",  # sleep/hibernate, AC
+    14: "s0_dc",  # powered on, DC
+    15: "sx_dc",  # sleep/hibernate, DC
+    LINK_POLICY_ALWAYS_ON: "always_on",  # network link always on -- the WoL-capable bit
+}
+
+
+def truthy(value: Any) -> bool:
+    """Interpret a WS-Man boolean property, which arrives as element text (a string)."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in ("true", "1", "yes")
+
+
+def optional_bool(value: Any) -> bool | None:
+    """Like :func:`truthy`, but keeps "the firmware did not report this" distinct from ``False``.
+
+    A property a firmware generation simply does not implement must not read as
+    "the feature is switched off" -- an operator acting on that difference would
+    be acting on an invention.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return truthy(value)
+
+
+def optional_int(value: Any) -> int | None:
+    """Coerce WS-Man element text to ``int``, or ``None`` if it is absent/not a number."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def optional_str(value: Any) -> str | None:
+    """Coerce WS-Man element text to a non-empty ``str``, or ``None``."""
+    if value is None or isinstance(value, (dict, list)):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _decode(table: dict[int, str], value: int) -> str:
+    """Name a DMTF enumeration value, keeping an unrecognised one visible as ``unknown(<raw>)``."""
+    return table.get(value, f"unknown({value})")
+
+
+def _normalize_mac(value: str) -> str:
+    """Render a MAC address colon-separated and lowercase, whatever separator firmware used.
+
+    Real AMT 10.0.56 returns ``MACAddress`` **dash**-separated and lowercase
+    (observed on the hardware ``parmstro`` dumped; the value itself is that lab's
+    and is deliberately not reproduced here), while ``parmstro``'s own documented
+    RETURN sample claims colons. Both shapes are
+    therefore in circulation for the same property, and a MAC is about to be
+    used as an identity anchor and as a PXE reservation key -- comparisons that
+    a stray separator silently breaks. So normalize on ingest and keep the raw
+    reading alongside it.
+
+    Anything that is not six hex octets (or twelve bare hex characters) is
+    returned stripped but otherwise unchanged: an unexpected shape is better
+    surfaced verbatim than mangled into a confident lie about an identity.
+    Never raises.
+    """
+    text = value.strip()
+    compact = text.replace("-", "").replace(":", "").replace(".", "")
+    if len(compact) != 12:
+        return text
+    try:
+        int(compact, 16)
+    except ValueError:
+        return text
+    lowered = compact.lower()
+    return ":".join(lowered[i : i + 2] for i in range(0, 12, 2))
+
+
+def _link_policy_values(value: Any) -> list[int] | None:
+    """Flatten ``AMT_EthernetPortSettings.LinkPolicy`` into a list of ints.
+
+    The wire shape is not settled by the evidence available. AMT's schema types
+    ``LinkPolicy`` as a ``uint32`` array, which WS-Man renders as a repeated
+    plain element (``<LinkPolicy>16</LinkPolicy>`` x N, parsed here into a list
+    of strings). ``parmstro``'s module code instead looks for ``<PolicyValue>``
+    children inside a ``LinkPolicy`` wrapper, and their hardware notes only
+    record the decoded result (``[1, 14, 16]``), never the XML -- so neither
+    shape can be ruled out. Both are accepted rather than betting on one, since
+    the cost of being wrong is a silently empty policy list and a
+    ``wake_on_lan_capable`` that reads ``false`` on a machine that is in fact
+    wakeable.
+
+    Returns ``None`` when the property is absent entirely (unknown), and ``[]``
+    when it is present but carries no values (genuinely no policies).
+    """
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return []
+
+    candidates: list[Any] = value if isinstance(value, list) else [value]
+    values: list[int] = []
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            nested = candidate.get("PolicyValue")
+            nested_list = nested if isinstance(nested, list) else [nested]
+            values.extend(number for item in nested_list if (number := optional_int(item)) is not None)
+            continue
+        number = optional_int(candidate)
+        if number is not None:
+            values.append(number)
+    return values
+
 
 @dataclass(frozen=True, slots=True)
 class PowerState:
@@ -99,6 +270,120 @@ class AmtCapabilities:
 
 
 @dataclass(frozen=True, slots=True)
+class EthernetSettings:
+    """``AMT_EthernetPortSettings`` instance 0, per docs/protocol-notes.md s2.7.
+
+    Every field is optional: this whole class is read through the
+    optional-degradation path, and a firmware generation that omits an
+    individual property must yield ``None`` for it rather than a fabricated
+    default.
+
+    Two fields carry more meaning than their names suggest:
+
+    * ``mac_address`` is normalized (colon-separated, lowercase) while
+      ``mac_address_raw`` preserves exactly what firmware said. The MAC is a
+      **second independent identity anchor** alongside the platform GUID, and
+      it is what a PXE reservation is keyed on, so the normalized form exists
+      to make comparisons work and the raw form exists so the evidence is not
+      lost.
+    * ``ip_sync_enabled`` is ``IpSyncEnabled``, which means *AMT shares the
+      host OS's IP address*. It is **not** a ping-response toggle;
+      ``AMT_GeneralSettings.PingResponseEnabled`` is that. ``parmstro``'s
+      ``amt_network_settings`` conflates the two (it writes ``IpSyncEnabled``
+      from a ``ping_response_enabled`` option), which is one of the reasons
+      this collection derives protocol facts from their research notes rather
+      than adopting their modules.
+    """
+
+    mac_address: str | None = None
+    mac_address_raw: str | None = None
+    ip_address: str | None = None
+    subnet_mask: str | None = None
+    default_gateway: str | None = None
+    primary_dns: str | None = None
+    secondary_dns: str | None = None
+    dhcp_enabled: bool | None = None
+    link_is_up: bool | None = None
+    ip_sync_enabled: bool | None = None
+    link_policy: list[int] | None = None
+    link_policy_names: list[str] | None = None
+    wake_on_lan_capable: bool | None = None
+
+    @classmethod
+    def from_instance(cls, instance: dict[str, Any]) -> EthernetSettings:
+        """Build from a parsed ``Get AMT_EthernetPortSettings`` response instance."""
+        raw_mac = optional_str(instance.get("MACAddress"))
+        policies = _link_policy_values(instance.get("LinkPolicy"))
+        return cls(
+            mac_address=_normalize_mac(raw_mac) if raw_mac else None,
+            mac_address_raw=raw_mac,
+            ip_address=optional_str(instance.get("IPAddress")),
+            subnet_mask=optional_str(instance.get("SubnetMask")),
+            default_gateway=optional_str(instance.get("DefaultGateway")),
+            primary_dns=optional_str(instance.get("PrimaryDNS")),
+            secondary_dns=optional_str(instance.get("SecondaryDNS")),
+            dhcp_enabled=optional_bool(instance.get("DHCPEnabled")),
+            link_is_up=optional_bool(instance.get("LinkIsUp")),
+            ip_sync_enabled=optional_bool(instance.get("IpSyncEnabled")),
+            link_policy=policies,
+            link_policy_names=[_decode(_LINK_POLICY_TABLE, value) for value in policies] if policies is not None else None,
+            # None, not False, when the property is absent: "this firmware did
+            # not tell us" and "this link will not stay up while powered off"
+            # are different diagnoses, and only the second one explains why
+            # `amt_power state=on` cannot reach the endpoint.
+            wake_on_lan_capable=(LINK_POLICY_ALWAYS_ON in policies) if policies is not None else None,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SystemState:
+    """``CIM_ComputerSystem`` (selector ``Name=ManagedSystem``) state, per docs/protocol-notes.md s2.7.
+
+    ``operational_status`` is a **list**: CIM types
+    ``CIM_ManagedSystemElement.OperationalStatus`` as ``uint16[]``, and firmware
+    that reports a single value is just an array of length one. Collapsing it to
+    a scalar would silently drop every status after the first, which is exactly
+    the set that says *why* a system is degraded.
+
+    Raw values are kept alongside every decoded name, on the same reasoning as
+    :class:`PowerState`: a value outside the DMTF table this collection knows is
+    still evidence and must not be discarded.
+    """
+
+    element_name: str | None = None
+    enabled_state: int | None = None
+    enabled_state_text: str | None = None
+    requested_state: int | None = None
+    operational_status: list[int] | None = None
+    operational_status_text: list[str] | None = None
+
+    @classmethod
+    def from_instance(cls, instance: dict[str, Any]) -> SystemState:
+        """Build from a parsed ``Get CIM_ComputerSystem`` response instance."""
+        enabled_state = optional_int(instance.get("EnabledState"))
+        raw_status = instance.get("OperationalStatus")
+        statuses: list[int] | None = None
+        if raw_status is not None:
+            candidates = raw_status if isinstance(raw_status, list) else [raw_status]
+            statuses = [number for item in candidates if (number := optional_int(item)) is not None]
+        return cls(
+            # ElementName, not Name. Name is the WS-Man selector key
+            # ("ManagedSystem") and carries no information a caller did not
+            # already supply in order to address the instance.
+            element_name=optional_str(instance.get("ElementName")),
+            enabled_state=enabled_state,
+            # A value outside the DMTF table renders as unknown(<raw>) rather
+            # than a bare "unknown", which the table already uses for the
+            # defined value 0. The two are different findings and must not
+            # render identically.
+            enabled_state_text=_decode(_ENABLED_STATE_TABLE, enabled_state) if enabled_state is not None else None,
+            requested_state=optional_int(instance.get("RequestedState")),
+            operational_status=statuses,
+            operational_status_text=[_decode(_OPERATIONAL_STATUS_TABLE, value) for value in statuses] if statuses is not None else None,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AmtFacts:
     """Firmware-observed evidence only. Every field here came from a WS-Man response.
 
@@ -117,6 +402,21 @@ class AmtFacts:
     reported_hostname: str | None = None
     capabilities: AmtCapabilities = field(default_factory=AmtCapabilities)
     redirection: RedirectionState | None = None
+    #: The rest of the AMT_GeneralSettings instance already read for
+    #: reported_hostname -- surfaced at no extra WS-Man round trip.
+    reported_domain_name: str | None = None
+    idle_wake_timeout: int | None = None
+    ping_response_enabled: bool | None = None
+    rmcp_ping_response_enabled: bool | None = None
+    network_interface_enabled: bool | None = None
+    ddns_update_enabled: bool | None = None
+    #: AMT_EthernetPortSettings instance 0 (see EthernetSettings).
+    network: EthernetSettings | None = None
+    #: CIM_ComputerSystem enabled/requested/operational state (see SystemState).
+    system_state: SystemState | None = None
+    #: CIM_BIOSElement.Version -- host BIOS, not AMT firmware. `version` is the
+    #: AMT one; these two are routinely confused, so they are named apart.
+    bios_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -11,9 +11,9 @@ Read-only facts and capability discovery for an Intel AMT endpoint.
 ## Purpose
 
 `amt_info` reads whatever the firmware itself reports — provisioning state,
-current power state, and which boot/redirection capabilities are actually
-present — over WS-Man. It never mutates anything and always returns
-`changed: false`.
+current power state, network configuration, system state, and which
+boot/redirection capabilities are actually present — over WS-Man. It never
+mutates anything and always returns `changed: false`.
 
 Capabilities are discovered from live firmware responses (mainly
 `AMT_BootCapabilities`), never inferred from an AMT generation or SKU. If the
@@ -70,6 +70,32 @@ Everything is nested under a single `amt` key (`type: dict`, `returned: success`
 | `amt.redirection_status.listener_enabled` | `bool` | when available | `AMT_RedirectionService.ListenerEnabled`. |
 | `amt.redirection_status.ider_enabled` | `bool` | when available | Derived: `enabled_state` in `{32769, 32771}`. |
 | `amt.redirection_status.sol_enabled` | `bool` | when available | Derived: `enabled_state` in `{32770, 32771}`. |
+| `amt.domain_name` | `str` | when available | `AMT_GeneralSettings.DomainName`. |
+| `amt.idle_wake_timeout` | `int` | when available | `AMT_GeneralSettings.IdleWakeTimeout`, in minutes. |
+| `amt.ping_response_enabled` | `bool` | when available | `AMT_GeneralSettings.PingResponseEnabled` — ICMP echo. **This** is the ping toggle, not `amt.network.ip_sync_enabled`. |
+| `amt.rmcp_ping_response_enabled` | `bool` | when available | `AMT_GeneralSettings.RmcpPingResponseEnabled`. |
+| `amt.network_interface_enabled` | `bool` | when available | `AMT_GeneralSettings.NetworkInterfaceEnabled`. |
+| `amt.ddns_update_enabled` | `bool` | when available | `AMT_GeneralSettings.DDNSUpdateEnabled`. |
+| `amt.network.mac_address` | `str` | when available | `AMT_EthernetPortSettings.MACAddress` (instance 0), normalized to colon-separated lowercase. |
+| `amt.network.mac_address_raw` | `str` | when available | `AMT_EthernetPortSettings.MACAddress` exactly as firmware reported it. Real AMT 10 firmware returns **dashes**. |
+| `amt.network.ip_address` | `str` | when available | `AMT_EthernetPortSettings.IPAddress`. |
+| `amt.network.subnet_mask` | `str` | when available | `AMT_EthernetPortSettings.SubnetMask`. |
+| `amt.network.default_gateway` | `str` | when available | `AMT_EthernetPortSettings.DefaultGateway`. |
+| `amt.network.primary_dns` | `str` | when available | `AMT_EthernetPortSettings.PrimaryDNS`. |
+| `amt.network.secondary_dns` | `str` | when available | `AMT_EthernetPortSettings.SecondaryDNS`. |
+| `amt.network.dhcp_enabled` | `bool` | when available | `AMT_EthernetPortSettings.DHCPEnabled`. |
+| `amt.network.link_is_up` | `bool` | when available | `AMT_EthernetPortSettings.LinkIsUp`. |
+| `amt.network.ip_sync_enabled` | `bool` | when available | `AMT_EthernetPortSettings.IpSyncEnabled` — whether AMT **shares the host OS's IP address**. Not a ping toggle. |
+| `amt.network.link_policy` | `list[int]` | when available | Raw `AMT_EthernetPortSettings.LinkPolicy`. `null` if the property is absent, `[]` if present but empty. |
+| `amt.network.link_policy_names` | `list[str]` | when available | `link_policy` decoded element-wise: `s0_ac` (1), `sx_ac` (2), `s0_dc` (14), `sx_dc` (15), `always_on` (16); anything else `unknown(<raw>)`. |
+| `amt.network.wake_on_lan_capable` | `bool` | when available | Derived: whether `link_policy` contains `16`. `null` when `LinkPolicy` was not reported at all. |
+| `amt.system_state.element_name` | `str` | when available | `CIM_ComputerSystem.ElementName` (read instead of `Name`, which is just the selector value). |
+| `amt.system_state.enabled_state` | `int` | when available | Raw DMTF `CIM_ComputerSystem.EnabledState`. |
+| `amt.system_state.enabled_state_text` | `str` | when available | `enabled_state` decoded per DMTF; see the table below. |
+| `amt.system_state.requested_state` | `int` | when available | Raw DMTF `CIM_ComputerSystem.RequestedState`, undecoded on purpose. |
+| `amt.system_state.operational_status` | `list[int]` | when available | Raw DMTF `CIM_ComputerSystem.OperationalStatus`. Always a list — CIM types it as an array. |
+| `amt.system_state.operational_status_text` | `list[str]` | when available | `operational_status` decoded element-wise per DMTF; see the table below. |
+| `amt.bios_version` | `str` | when available | `CIM_BIOSElement.Version` — the **host BIOS**, not the AMT firmware version (`amt.version`). Weakest-evidenced field this module returns. |
 | `operation.schema` | `str` | always | Always `intel-amt-operation/v1`. |
 | `operation.action` | `str` | always | Always `get_facts`. |
 | `operation.endpoint` | `str` | always | `host:port` this read was performed against. |
@@ -86,6 +112,68 @@ every other module in this collection returns, per issue #22, so that a caller c
 `error_class`/`tls_peer_fingerprint` uniformly regardless of which module produced the
 result. `previous`/`desired`/`observed` are deliberately left `null` rather than
 populated with something invented for a module that has no mutation to describe.
+
+### DMTF state tables
+
+`amt.system_state.enabled_state_text` (DMTF `CIM_EnabledLogicalElement.EnabledState`):
+
+| 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `unknown` | `other` | `enabled` | `disabled` | `shutting_down` | `not_applicable` | `enabled_but_offline` | `in_test` | `deferred` | `quiesce` | `starting` |
+
+`amt.system_state.operational_status_text` (DMTF `CIM_ManagedSystemElement.OperationalStatus`):
+
+| Value | Name | Value | Name |
+|---|---|---|---|
+| 0 | `unknown` | 10 | `stopped` |
+| 1 | `other` | 11 | `in_service` |
+| 2 | `ok` | 12 | `no_contact` |
+| 3 | `degraded` | 13 | `lost_communication` |
+| 4 | `stressed` | 14 | `aborted` |
+| 5 | `predictive_failure` | 15 | `dormant` |
+| 6 | `error` | 16 | `supporting_entity_in_error` |
+| 7 | `non_recoverable_error` | 17 | `completed` |
+| 8 | `starting` | 18 | `power_mode` |
+| 9 | `stopping` | 19 | `relocating` |
+
+A value outside either table renders as `unknown(<raw>)` rather than a bare `unknown`,
+which both tables already use for the *defined* value `0`. The raw integer is always
+reported alongside the decoded name.
+
+### Round-trip cost
+
+One `amt_info` invocation performs **ten WS-Man HTTP requests**: eight `Get` operations
+plus an `Enumerate`/`Pull` pair for `CIM_SoftwareIdentity`.
+
+| WS-Man operation | Verb | Sources |
+|---|---|---|
+| `AMT_GeneralSettings` | `Get` | `hostname`, `domain_name`, `idle_wake_timeout`, `ping_response_enabled`, `rmcp_ping_response_enabled`, `network_interface_enabled`, `ddns_update_enabled` |
+| `AMT_SetupAndConfigurationService` | `Get` | `control_mode`, `provisioning_state` |
+| `CIM_AssociatedPowerManagementService` | `Get` | `power_state`, `capabilities.power` |
+| `AMT_BootCapabilities` | `Get` | `capabilities.boot_once_pxe`, `.sol`, `.storage_redirection` |
+| `AMT_RedirectionService` | `Get` | `redirection_status` |
+| `CIM_SoftwareIdentity` | `Enumerate`+`Pull` | `version` |
+| `CIM_ComputerSystemPackage` | `Get` | `uuid` |
+| `AMT_EthernetPortSettings` (instance 0) | `Get` | **new** — all of `network` |
+| `CIM_ComputerSystem` (`Name=ManagedSystem`) | `Get` | **new** — all of `system_state` |
+| `CIM_BIOSElement` | `Get` | **new** — `bios_version` |
+
+That is three more round trips than 0.1.0 made, and being blunt about one of them: the
+`CIM_ComputerSystem` read was **deliberately removed** in 0.1.0, with the changelog
+noting that "it existed only to source the UUID and contributed nothing else, so removing
+it also saves a WS-Man round trip per call." It is back. The justification is not that the
+saving did not matter — it is that the class now sources three genuinely useful state
+fields (`EnabledState`, `RequestedState`, `OperationalStatus`) plus `ElementName`, rather
+than a `UUID` property it never had. `amt.uuid` still comes from
+`CIM_ComputerSystemPackage.PlatformGUID` and is deliberately not read here.
+
+`CIM_BIOSElement` may cost one further `Enumerate`/`Pull` pair, but only on firmware where
+the bare `Get` faults.
+
+The three new reads all use `Get` with an explicit selector where the class has one.
+`Enumerate` is not used for any of them: on AMT 10 it returns HTTP 400 for
+`AMT_EthernetPortSettings` and several other `AMT_`-prefixed classes, while a `Get` with an
+exact selector works — see [protocol notes §2.7](protocol-notes.md#27-network-and-system-state-facts).
 
 Note that `amt.capabilities` (what firmware *supports*, per `AMT_BootCapabilities`) and
 `amt.redirection_status` (what is currently *enabled*, per `AMT_RedirectionService`) are
@@ -129,6 +217,49 @@ independent signal this module does not probe.
     that: amt.amt.capabilities.boot_once_pxe
     fail_msg: "Firmware does not advertise ForcePXEBoot; cannot proceed with a PXE-based install."
 ```
+
+Diagnosing the failure mode that looks like a network fault but is not:
+
+```yaml
+- name: Read AMT facts before trying to power a machine on
+  james_crowley.intel_amt.amt_info:
+    host: "{{ amt_host }}"
+    username: "{{ amt_username }}"
+    password: "{{ amt_password }}"
+    tls_fingerprint: "{{ amt_tls_fingerprint }}"
+  delegate_to: localhost
+  no_log: true
+  register: amt
+
+- name: Warn when this endpoint will not answer WS-Man while powered off
+  ansible.builtin.debug:
+    msg: >-
+      LinkPolicy is {{ amt.amt.network.link_policy }} and lacks 16 (network link always on),
+      so this endpoint drops off the network when the host powers down. A subsequent
+      `amt_power state=on` will fail looking like a connection fault rather than a
+      configuration one.
+  when:
+    - amt.amt.network is not none
+    - amt.amt.network.wake_on_lan_capable is false
+```
+
+Cross-checking identity against a second, independent anchor:
+
+```yaml
+- name: Refuse to act unless both identity anchors match the reviewed inventory binding
+  ansible.builtin.assert:
+    that:
+      - amt.amt.uuid == amt_expected_uuid
+      - amt.amt.network.mac_address == (amt_expected_mac | lower)
+    fail_msg: >-
+      Endpoint evidence disagrees with inventory. Do not proceed: a reset issued against
+      the wrong machine is not recoverable from Ansible.
+  when: amt_expected_uuid is defined and amt_expected_mac is defined
+```
+
+`amt.network.mac_address` is normalized to colon-separated lowercase precisely so a
+comparison like that one works; compare against `mac_address_raw` only if you deliberately
+want to detect a change in how the firmware formats it.
 
 ## Idempotence and check mode
 
@@ -178,3 +309,22 @@ compare caller-supplied identity.
   from real firmware. It is the only module in the collection verified on more than
   one generation, and it remains unverified on every generation other than those two
   — see the [Capability matrix](capability-matrix.md).
+- **The network and system-state facts are Tier 2, not Tier 3.** `amt.network`,
+  `amt.system_state`, `amt.bios_version` and the five extra `AMT_GeneralSettings`
+  fields are mock-tested here and derived from *someone else's* AMT 10.0.56 hardware
+  dump (`parmstro`, GPL-3.0-or-later). No lab machine has returned any of them: they
+  are **unverified on 16.1.30 and 19.0.5**, the two generations everything else in
+  this module is verified on. See [Capability matrix](capability-matrix.md) Tier 2.
+- `amt.bios_version` is the weakest-evidenced field in the module. The source notes
+  claim `CIM_BIOSElement` works on AMT 10.0.56 but record no dumped value, and the
+  implementation they claim it from swallows failure to `None`, so their result proves
+  nothing either way. Expect `null` and treat a value as a bonus.
+- `amt.network` covers `AMT_EthernetPortSettings` **instance 0 only**. Multi-NIC parts
+  expose higher indices; this module does not look for them, and an endpoint with no
+  instance 0 reports `amt.network: null` rather than failing.
+- `AMT_GeneralSettings.PowerSource` and `PrivacyLevel` are read by the same `Get` that
+  supplies `amt.hostname` but are deliberately **not** surfaced: both were dumped as
+  `0`, and nothing documents what their integers mean. An uninterpretable number in a
+  return value invites someone to invent a meaning for it.
+- IPv6 is not reported. `AMT_EthernetPortSettings` carries IPv6 properties; nothing in
+  the available hardware evidence dumps them, so they are not claimed here.

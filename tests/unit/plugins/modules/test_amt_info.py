@@ -12,7 +12,14 @@ from ansible.module_utils import basic
 from ansible.module_utils.common.text.converters import to_bytes
 
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import AuthenticationError
-from ansible_collections.james_crowley.intel_amt.plugins.module_utils.models import AmtCapabilities, AmtFacts, PowerState, RedirectionState
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.models import (
+    AmtCapabilities,
+    AmtFacts,
+    EthernetSettings,
+    PowerState,
+    RedirectionState,
+    SystemState,
+)
 from ansible_collections.james_crowley.intel_amt.plugins.modules import amt_info
 
 PASSWORD = "Sup3rSecret!"
@@ -65,7 +72,44 @@ def _full_facts() -> AmtFacts:
         reported_hostname="amt-host-07",
         capabilities=AmtCapabilities(power=True, boot_once_pxe=True, sol=True, storage_redirection=True),
         redirection=RedirectionState.from_enabled_state(32771, listener_enabled=True),
+        reported_domain_name="lab.example.invalid",
+        idle_wake_timeout=1,
+        ping_response_enabled=True,
+        rmcp_ping_response_enabled=True,
+        network_interface_enabled=True,
+        ddns_update_enabled=False,
+        # Obviously-fake values only: RFC 7042 documentation MAC, RFC 5737 TEST-NET-1
+        # addresses. A real MAC or IP must never enter this repository.
+        network=EthernetSettings.from_instance(
+            {
+                "MACAddress": "00-00-5E-00-53-01",
+                "IPAddress": "192.0.2.10",
+                "DHCPEnabled": "false",
+                "LinkIsUp": "true",
+                "IpSyncEnabled": "false",
+                "LinkPolicy": ["1", "14", "16"],
+            }
+        ),
+        system_state=SystemState.from_instance({"ElementName": "ManagedSystem", "EnabledState": "2", "RequestedState": "12", "OperationalStatus": ["2"]}),
+        bios_version="EXAMPLE10H.86A.0000.2026.0101.0000",
     )
+
+
+#: The exact `amt` keys 0.1.0 returned, in the order it returned them. New facts
+#: are additive: an existing consumer (roles/amt_baremetal_install, the
+#: integration targets, tests/hardware, the docs) must not have to change, and a
+#: key that quietly moved or changed shape would break it silently.
+LEGACY_AMT_KEYS = (
+    "reachable",
+    "version",
+    "uuid",
+    "control_mode",
+    "provisioning_state",
+    "hostname",
+    "power_state",
+    "capabilities",
+    "redirection_status",
+)
 
 
 class TestArgumentSpec:
@@ -137,6 +181,82 @@ class TestFactsToResult:
         assert amt["power_state"] is None
         assert amt["redirection_status"] is None
         assert amt["capabilities"] == {"power": False, "boot_once_pxe": False, "sol": False, "storage_redirection": False}
+        # Every new fact degrades the same way: null, never a module failure and
+        # never an invented default.
+        assert amt["network"] is None
+        assert amt["system_state"] is None
+        assert amt["bios_version"] is None
+        assert amt["domain_name"] is None
+        assert amt["idle_wake_timeout"] is None
+        assert amt["ping_response_enabled"] is None
+        assert amt["rmcp_ping_response_enabled"] is None
+        assert amt["network_interface_enabled"] is None
+        assert amt["ddns_update_enabled"] is None
+
+    def test_the_new_network_and_state_facts_are_shaped_into_the_amt_key(self):
+        client = Mock()
+        client.get_facts.return_value = _full_facts()
+
+        amt = amt_info.facts_to_result(client)
+
+        assert amt["domain_name"] == "lab.example.invalid"
+        assert amt["idle_wake_timeout"] == 1
+        assert amt["ping_response_enabled"] is True
+        assert amt["rmcp_ping_response_enabled"] is True
+        assert amt["network_interface_enabled"] is True
+        assert amt["ddns_update_enabled"] is False
+        assert amt["bios_version"] == "EXAMPLE10H.86A.0000.2026.0101.0000"
+        assert amt["network"]["mac_address"] == "00:00:5e:00:53:01"
+        assert amt["network"]["mac_address_raw"] == "00-00-5E-00-53-01"
+        assert amt["network"]["ip_address"] == "192.0.2.10"
+        assert amt["network"]["link_policy"] == [1, 14, 16]
+        assert amt["network"]["link_policy_names"] == ["s0_ac", "s0_dc", "always_on"]
+        assert amt["network"]["wake_on_lan_capable"] is True
+        assert amt["network"]["ip_sync_enabled"] is False
+        assert amt["system_state"]["element_name"] == "ManagedSystem"
+        assert amt["system_state"]["enabled_state_text"] == "enabled"
+        assert amt["system_state"]["operational_status_text"] == ["ok"]
+
+    def test_the_result_is_json_serializable(self):
+        # dataclasses.asdict on the two new nested types must produce plain
+        # dicts/lists; anything else fails at exit_json rather than here.
+        client = Mock()
+        client.get_facts.return_value = _full_facts()
+
+        assert json.loads(json.dumps(amt_info.facts_to_result(client)))["network"]["link_policy"] == [1, 14, 16]
+
+
+class TestBackwardCompatibility:
+    """The `amt` return key is additive only. Nothing existing may move or change shape.
+
+    Existing consumers are `roles/amt_baremetal_install` (which reads
+    `amt.reachable` and `amt.capabilities.*`), the integration targets,
+    `tests/hardware/`, and the documented return table.
+    """
+
+    def test_every_pre_existing_key_is_still_present_in_its_original_position(self):
+        client = Mock()
+        client.get_facts.return_value = _full_facts()
+
+        keys = list(amt_info.facts_to_result(client))
+
+        assert keys[: len(LEGACY_AMT_KEYS)] == list(LEGACY_AMT_KEYS)
+
+    def test_pre_existing_keys_keep_their_shape(self):
+        client = Mock()
+        client.get_facts.return_value = _full_facts()
+
+        amt = amt_info.facts_to_result(client)
+
+        assert amt["reachable"] is True
+        assert amt["hostname"] == "amt-host-07"
+        assert set(amt["power_state"]) == {"normalized", "raw"}
+        assert set(amt["capabilities"]) == {"power", "boot_once_pxe", "sol", "storage_redirection"}
+        assert set(amt["redirection_status"]) == {"enabled_state", "listener_enabled", "ider_enabled", "sol_enabled"}
+        # The MAC lives under `network`, not at the top level: a top-level
+        # `mac_address` would collide with the caller-supplied identity that
+        # models.CallerSuppliedIdentity deliberately keeps separate.
+        assert "mac_address" not in amt
 
 
 def _fake_wsman(*, tls_peer_fingerprint: str | None = None) -> Mock:

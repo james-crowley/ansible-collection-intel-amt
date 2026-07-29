@@ -20,6 +20,7 @@ import ssl
 import threading
 import uuid
 import warnings
+from typing import ClassVar
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -28,15 +29,18 @@ from requests.auth import HTTPDigestAuth
 from wsman_server import (
     AMT_BOOT_CAPABILITIES,
     AMT_BOOT_SETTING_DATA,
+    AMT_ETHERNET_PORT_SETTINGS,
     AMT_GENERAL_SETTINGS,
     AMT_REDIRECTION_SERVICE,
     AMT_SETUP_AND_CONFIGURATION_SERVICE,
     CIM_ASSOCIATED_POWER_MANAGEMENT_SERVICE,
+    CIM_BIOS_ELEMENT,
     CIM_BOOT_CONFIG_SETTING,
     CIM_BOOT_SERVICE,
     CIM_BOOT_SOURCE_SETTING,
     CIM_COMPUTER_SYSTEM,
     CIM_POWER_MANAGEMENT_SERVICE,
+    ETHERNET_PORT_0_INSTANCE_ID,
     WsmanMockServer,
 )
 
@@ -68,7 +72,7 @@ def _has_element(root: ET.Element, local_name: str) -> bool:
     return any(elem.tag.rsplit("}", 1)[-1] == local_name for elem in root.iter())
 
 
-def _envelope(action: str, resource_uri: str, body_xml: str = "") -> str:
+def _envelope(action: str, resource_uri: str, body_xml: str = "", *, header_extra_xml: str = "") -> str:
     message_id = f"uuid:{uuid.uuid4()}"
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -80,14 +84,24 @@ def _envelope(action: str, resource_uri: str, body_xml: str = "") -> str:
         "<a:To>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</a:To>"
         f"<w:ResourceURI>{resource_uri}</w:ResourceURI>"
         f"<a:MessageID>{message_id}</a:MessageID>"
+        f"{header_extra_xml}"
         "</s:Header>"
         f"<s:Body>{body_xml}</s:Body>"
         "</s:Envelope>"
     )
 
 
-def _get_xml(resource_uri: str) -> str:
-    return _envelope("http://schemas.xmlsoap.org/ws/2004/09/transfer/Get", resource_uri)
+def _selector_set_xml(selectors: dict[str, str]) -> str:
+    inner = "".join(f'<w:Selector Name="{name}">{value}</w:Selector>' for name, value in selectors.items())
+    return f"<w:SelectorSet>{inner}</w:SelectorSet>"
+
+
+def _get_xml(resource_uri: str, selectors: dict[str, str] | None = None) -> str:
+    return _envelope(
+        "http://schemas.xmlsoap.org/ws/2004/09/transfer/Get",
+        resource_uri,
+        header_extra_xml=_selector_set_xml(selectors) if selectors else "",
+    )
 
 
 def _put_xml(resource_uri: str, fields: dict[str, str]) -> str:
@@ -228,6 +242,7 @@ class TestCannedResponsesParseAsSoap:
             AMT_GENERAL_SETTINGS,
             AMT_SETUP_AND_CONFIGURATION_SERVICE,
             CIM_COMPUTER_SYSTEM,
+            CIM_BIOS_ELEMENT,
         ],
     )
     def test_get_response_is_well_formed_soap(self, server, resource_uri):
@@ -336,6 +351,120 @@ class TestEnumeratePullPaging:
 
         for field in ("IDER", "SOL", "ForcePXEBoot", "ForceHardDriveBoot", "BIOSSetup"):
             assert _find_text(get_root, field) == _find_text(pull_root, field)
+
+
+class TestEthernetPortSettingsAndSystemState:
+    """The facts added for `amt_info`'s network/state reads (docs/protocol-notes.md §2.7).
+
+    These must be answered the way real firmware answers them, not the way that
+    happens to be convenient: an exact `Get` selector (never `Enumerate`), a
+    dash-separated MAC, and `LinkPolicy`/`OperationalStatus` as repeated
+    elements rather than scalars.
+    """
+
+    ETHERNET_SELECTOR: ClassVar[dict[str, str]] = {"InstanceID": ETHERNET_PORT_0_INSTANCE_ID}
+
+    def test_instance_0_get_with_the_exact_selector_succeeds(self, server):
+        resp = _post(server, _get_xml(AMT_ETHERNET_PORT_SETTINGS, self.ETHERNET_SELECTOR))
+        assert resp.status_code == 200
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _find_text(root, "InstanceID") == ETHERNET_PORT_0_INSTANCE_ID
+
+    def test_get_without_a_selector_faults(self, server):
+        # AMT 10 requires the exact selector for this class; a bare Get answered
+        # with instance 0's data would let a client ship code real firmware rejects.
+        resp = _post(server, _get_xml(AMT_ETHERNET_PORT_SETTINGS))
+        assert resp.status_code == 500
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert root.find(f"{{{NS_S}}}Body/{{{NS_S}}}Fault") is not None
+
+    def test_a_higher_instance_index_faults_rather_than_returning_instance_0(self, server):
+        resp = _post(server, _get_xml(AMT_ETHERNET_PORT_SETTINGS, {"InstanceID": "Intel(r) AMT Ethernet Port Settings 1"}))
+        assert resp.status_code == 500
+
+    def test_mac_is_served_dash_separated_as_real_firmware_returned_it(self, server):
+        resp = _post(server, _get_xml(AMT_ETHERNET_PORT_SETTINGS, self.ETHERNET_SELECTOR))
+        mac = _find_text(ET.fromstring(resp.content), "MACAddress")  # noqa: S314
+        assert mac is not None
+        assert "-" in mac, "a colon-separated mock MAC would never exercise the client's normalization"
+
+    def test_mac_and_addresses_are_from_the_documentation_ranges(self, server):
+        resp = _post(server, _get_xml(AMT_ETHERNET_PORT_SETTINGS, self.ETHERNET_SELECTOR))
+        root = ET.fromstring(resp.content)  # noqa: S314
+        # RFC 7042 documentation MAC block and RFC 5737 TEST-NET-1. This repository
+        # is public; a real lab's MAC or IP must never appear in it.
+        assert _find_text(root, "MACAddress").upper().startswith("00-00-5E")
+        assert _find_text(root, "IPAddress").startswith("192.0.2.")
+
+    def test_link_policy_is_a_repeated_element_not_a_scalar(self, server):
+        resp = _post(server, _get_xml(AMT_ETHERNET_PORT_SETTINGS, self.ETHERNET_SELECTOR))
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _find_all_text(root, "LinkPolicy") == ["1", "14", "16"]
+
+    def test_link_policy_is_settable_so_a_test_can_take_away_wake_capability(self, server):
+        server.state.ethernet_link_policy = [1, 14]
+        resp = _post(server, _get_xml(AMT_ETHERNET_PORT_SETTINGS, self.ETHERNET_SELECTOR))
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _find_all_text(root, "LinkPolicy") == ["1", "14"]
+
+    def test_an_absent_port_faults_so_the_client_degrades_rather_than_failing(self, server):
+        server.state.ethernet_port_present = False
+        resp = _post(server, _get_xml(AMT_ETHERNET_PORT_SETTINGS, self.ETHERNET_SELECTOR))
+        assert resp.status_code == 500
+
+    def test_computer_system_reports_operational_status_as_an_array(self, server):
+        server.state.operational_status = [3, 5]
+        resp = _post(server, _get_xml(CIM_COMPUTER_SYSTEM, {"Name": "ManagedSystem"}))
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _find_all_text(root, "OperationalStatus") == ["3", "5"]
+
+    def test_computer_system_with_a_wrong_name_selector_faults(self, server):
+        resp = _post(server, _get_xml(CIM_COMPUTER_SYSTEM, {"Name": "NotTheManagedSystem"}))
+        assert resp.status_code == 500
+
+    def test_computer_system_carries_no_uuid_property(self, server):
+        # The original defect this class's reintroduction must not resurrect: the
+        # platform GUID comes from CIM_ComputerSystemPackage, and firmware does not
+        # expose a UUID here at all.
+        resp = _post(server, _get_xml(CIM_COMPUTER_SYSTEM, {"Name": "ManagedSystem"}))
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _find_text(root, "UUID") is None
+
+    def test_general_settings_carries_the_hardware_dumped_extras(self, server):
+        resp = _post(server, _get_xml(AMT_GENERAL_SETTINGS))
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _find_text(root, "IdleWakeTimeout") == "1"
+        assert _find_text(root, "DDNSUpdateEnabled") == "false"
+        assert _find_text(root, "RmcpPingResponseEnabled") == "true"
+        assert _find_text(root, "NetworkInterfaceEnabled") == "true"
+        # PowerSource/PrivacyLevel are on the real instance but are not surfaced by
+        # this collection, so they are not served here either -- serving them would
+        # invite someone to expose an integer nothing documents the meaning of.
+        assert _find_text(root, "PowerSource") is None
+        assert _find_text(root, "PrivacyLevel") is None
+
+    def test_bios_element_answers_a_bare_get(self, server):
+        resp = _post(server, _get_xml(CIM_BIOS_ELEMENT))
+        assert resp.status_code == 200
+        assert _find_text(ET.fromstring(resp.content), "Version") == server.state.bios_version  # noqa: S314
+
+    def test_bios_element_also_answers_enumerate_with_the_same_version(self, server):
+        # Which verb real firmware accepts for a selector-less class is unsettled,
+        # so both are served and the client must survive either.
+        resp = _post(server, _enumerate_xml(CIM_BIOS_ELEMENT))
+        context = _find_text(ET.fromstring(resp.content), "EnumerationContext")  # noqa: S314
+        assert context
+        resp = _post(server, _pull_xml(CIM_BIOS_ELEMENT, context))
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _has_element(root, "EndOfSequence")
+        assert _find_text(root, "Version") == server.state.bios_version
+
+    def test_bios_element_get_can_be_made_to_fault_leaving_only_enumerate(self, server):
+        server.faults.bios_element_get_faults = True
+        assert _post(server, _get_xml(CIM_BIOS_ELEMENT)).status_code == 500
+
+        resp = _post(server, _enumerate_xml(CIM_BIOS_ELEMENT))
+        assert resp.status_code == 200
 
 
 class TestStatefulness:
