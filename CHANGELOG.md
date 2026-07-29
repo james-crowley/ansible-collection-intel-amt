@@ -2,29 +2,67 @@
 
 **Topics**
 
-- <a href="#v0-3-0">v0\.3\.0</a>
+- <a href="#v0-3-1">v0\.3\.1</a>
     - <a href="#release-summary">Release Summary</a>
+    - <a href="#bugfixes">Bugfixes</a>
+- <a href="#v0-3-0">v0\.3\.0</a>
+    - <a href="#release-summary-1">Release Summary</a>
     - <a href="#minor-changes">Minor Changes</a>
     - <a href="#security-fixes">Security Fixes</a>
-    - <a href="#bugfixes">Bugfixes</a>
+    - <a href="#bugfixes-1">Bugfixes</a>
     - <a href="#known-issues">Known Issues</a>
     - <a href="#new-modules">New Modules</a>
 - <a href="#v0-2-0">v0\.2\.0</a>
-    - <a href="#release-summary-1">Release Summary</a>
-    - <a href="#minor-changes-1">Minor Changes</a>
-    - <a href="#bugfixes-1">Bugfixes</a>
-- <a href="#v0-1-0">v0\.1\.0</a>
     - <a href="#release-summary-2">Release Summary</a>
+    - <a href="#minor-changes-1">Minor Changes</a>
+    - <a href="#bugfixes-2">Bugfixes</a>
+- <a href="#v0-1-0">v0\.1\.0</a>
+    - <a href="#release-summary-3">Release Summary</a>
     - <a href="#minor-changes-2">Minor Changes</a>
     - <a href="#breaking-changes--porting-guide">Breaking Changes / Porting Guide</a>
     - <a href="#security-fixes-1">Security Fixes</a>
-    - <a href="#bugfixes-2">Bugfixes</a>
+    - <a href="#bugfixes-3">Bugfixes</a>
     - <a href="#new-modules-1">New Modules</a>
+
+<a id="v0-3-1"></a>
+## v0\.3\.1
+
+<a id="release-summary"></a>
+### Release Summary
+
+Patch release\, and worth taking if you read <code>amt\_info</code>\'s
+<code>amt\.network\.wake\_on\_lan\_capable</code> on 0\.2\.0 or 0\.3\.0 — <strong>it returned the inverse
+answer on mains\-powered hardware\.</strong>
+
+The <code>LinkPolicy</code> value table was taken from a third party\'s constants file and
+three of its five entries were wrong\. The authoritative values are <code>1</code> \= S0 AC\,
+<code>14</code> \= Sx AC\, <code>16</code> \= S0 DC\, <code>224</code> \= Sx DC\; there is no \"always on\" value\.
+Because <code>14</code> was mislabelled and <code>16</code> was believed to be a wake bit\,
+<code>wake\_on\_lan\_capable</code> tested for \"reachable while on battery\" and reported
+<code>false</code> for desktops that are in fact reachable while powered off\.
+
+<code>link\_policy\_names</code> values change accordingly\, and <code>wake\_on\_lan\_capable</code> now
+reports <code>null</code> rather than <code>false</code> when firmware does not expose <code>LinkPolicy</code>
+at all — \"firmware did not say\" and \"the link will not stay up\" are different
+diagnoses\, and only the second explains why a remote power\-on cannot reach an
+endpoint\.
+
+No other module is affected\, and no return key was added or removed\.
+
+<a id="bugfixes"></a>
+### Bugfixes
+
+* NOTICE / docs/protocol\-notes\.md / docs/capability\-matrix\.md \- re\-attribute the C\(LinkPolicy\) table to C\(go\-wsman\-messages\) and move it to Tier 1 \(vendor\-sourced\)\, keeping the C\(parmstro\) attribution for what that source genuinely supplied\: class names\, ResourceURIs\, selector strings and property names\. Record explicitly that their C\(LinkPolicy\) table was wrong\. This is the B\(second\) wrong table from that source \- their power constants already map C\(reset\) to CIM code 11 \(Diagnostic Interrupt/NMI\) rather than 10 \(Master Bus Reset\) \- so a third one should not be trusted without checking it against a vendor reference or a firmware fixture\.
+* amt\_info \- RV\(amt\.network\.link\_policy\_names\) decodes three of its five values differently\, so B\(stored or asserted output from 0\.2\.0 and 0\.3\.0 will not match\)\. V\(14\) is now V\(sx\_ac\) \(was V\(s0\_dc\)\) and V\(16\) is now V\(s0\_dc\) \(was V\(always\_on\)\)\; V\(224\) is newly recognised as V\(sx\_dc\)\; and V\(2\)/V\(15\)\, previously named V\(sx\_ac\)/V\(sx\_dc\)\, are not defined values in Intel\'s enum at all and now render as V\(unknown\(2\)\)/V\(unknown\(15\)\)\. They are still reported raw in RV\(amt\.network\.link\_policy\) rather than dropped \- inventing names for undefined values is what caused this bug\. Both lab machines report C\(link\_policy\) V\(\[1\, 14\]\)\, so their C\(link\_policy\_names\) changes from V\(\[s0\_ac\, s0\_dc\]\) to V\(\[s0\_ac\, sx\_ac\]\) and their C\(wake\_on\_lan\_capable\) from V\(false\) to V\(true\)\.
+* amt\_info \- RV\(amt\.network\.wake\_on\_lan\_capable\) returned the B\(inverse\) answer on mains\-powered hardware in 0\.2\.0 and 0\.3\.0\. It was derived from C\(LinkPolicy\) containing V\(16\)\, described as a I\(network link always on\) bit\. V\(16\) is in fact I\(available on S0 DC\) \- powered on\, running on battery \- so the field actually tested whether the endpoint stays reachable on battery\, and returned V\(false\) for every mains\-powered desktop that should have read V\(true\)\. It is now derived from the presence of an B\(Sx\) value\, V\(14\) \(Sx AC\) or V\(224\) \(Sx DC\)\, which is what I\(the link is maintained while the host is asleep\, hibernating or off\) actually means\. B\(Anyone who branched on this field in 0\.2\.0 or 0\.3\.0 should re\-read it\)\: a playbook that skipped a remote power\-on because the endpoint looked unwakeable was most likely skipping it on a machine that was wakeable all along\.
+* docs/amt\_info\.md / docs/capability\-matrix\.md \- rewrite the C\(wake\_on\_lan\_capable\) sections\. The old text presented V\(false\) on both lab machines as the operationally interesting finding\, and hedged it with a caveat that the value table was third\-party and should be confirmed via the AMT Web UI\. The caveat was correct that the table could not be trusted and wrong about what to do next\: the vendor reference settles it and was one request away\. The MEBx screen on one lab machine has since been read \- C\(ME ON in Host Sleep States\) is the wake\-capable option and C\(Idle Timeout\) is V\(65535\)\, matching the reported RV\(amt\.idle\_wake\_timeout\) \- so firmware configuration and the corrected table agree\, and it was this collection\'s derivation that disagreed with both\.
+* docs/capability\-matrix\.md \- the Tier 4 entry I\(whether either endpoint answers WS\-Man while powered off\) is rewritten rather than removed\. It is still untested\: no stage powers a machine off\, independently confirms it\, and then tries to reach it\. What changed is that the evidence now points towards reachability instead of against it\, which is weaker than a measurement and is recorded as such\. This also resolves a result the document previously called hard to square \- machine 1\'s stage 4 performed an C\(off\) transition and then a successful restore\, which fits an endpoint that is reachable while off on AC exactly as V\(14\) says it is\.
+* plugins/module\_utils/models\.py \- the C\(LinkPolicy\) value table came from C\(parmstro/intel\_amt\)\'s constants file and was wrong in three of its five entries\, with a fourth value missing\. It is replaced with the vendor table from C\(device\-management\-toolkit/go\-wsman\-messages\) C\(pkg/wsman/amt/ethernetport\) \(tag C\(v2\.48\.3\)\)\: V\(1\) \= available on S0 AC\, V\(14\) \= available on Sx AC\, V\(16\) \= available on S0 DC\, V\(224\) \= available on Sx DC\, and no other defined value\. There is no I\(always on\) value\; that entry was invented\. The module\-internal constant C\(LINK\_POLICY\_ALWAYS\_ON\) is gone\, replaced by C\(LINK\_POLICY\_S0\_AC\)/C\(LINK\_POLICY\_SX\_AC\)/C\(LINK\_POLICY\_S0\_DC\)/ C\(LINK\_POLICY\_SX\_DC\)\. C\(module\_utils\) is not a supported interface\, so this is not listed as a breaking change \- but anything importing that name will need updating\.
 
 <a id="v0-3-0"></a>
 ## v0\.3\.0
 
-<a id="release-summary"></a>
+<a id="release-summary-1"></a>
 ### Release Summary
 
 Additive release\. No return shape from 0\.2\.0 changed\, so this is a drop\-in upgrade\.
@@ -97,7 +135,7 @@ any stray double angle bracket\.
 * CI \- add C\(tests/hardware/redact\-evidence\.py\)\, run by a shared C\(redact\-hardware\-evidence\) command immediately before every C\(store\_artifacts\) of C\(tests/hardware/output\) with C\(when\: always\)\. It rewrites each JSON file in place\, replacing addresses\, MACs\, UUIDs\, fingerprints\, digests\, FQDNs and the AMT hostname with stable per\-run pseudonyms while preserving firmware and BIOS versions\, capability flags\, states\, byte counters and the JSON structure\. Applied once at the CI layer rather than in each of the six playbooks that write evidence\, so a playbook added later cannot leak by default\.
 * CI \- redact identifying lab data from hardware qualification evidence before CircleCI publishes it\. The five hardware jobs stored C\(tests/hardware/output\) as the C\(hardware\-evidence\) artifact unmodified\, so the JSON the stage playbooks write exposed the target\'s IPv4 address\, default gateway\, subnet mask\, DNS servers\, MAC address\, platform GUID and management domain name\. Holding those values as CircleCI context secrets did not prevent this\: B\(context masking applies to log output only and does not extend to C\(store\_artifacts\) content\)\, and artifact visibility follows the project\'s Free and Open Source flag\, which made the evidence world\-readable\.
 
-<a id="bugfixes"></a>
+<a id="bugfixes-1"></a>
 ### Bugfixes
 
 * CI \- add C\(scripts/check\-circleci\-tags\.sh\)\, run first in the lint job\, failing on any double\-angle\-bracket sequence in C\(\.circleci/config\.yml\) that is not a parameter tag \-\- including inside comments\, where it is equally fatal\. This is the regression guard for the above\, since the tool that ought to catch it does not\.
@@ -124,7 +162,7 @@ any stray double angle bracket\.
 <a id="v0-2-0"></a>
 ## v0\.2\.0
 
-<a id="release-summary-1"></a>
+<a id="release-summary-2"></a>
 ### Release Summary
 
 Additive release\. Nothing in 0\.1\.0\'s return shapes changed\, so this is a drop\-in
@@ -169,7 +207,7 @@ path in a way only a physical MEBx visit recovers\.
 * docs/protocol\-notes\.md \- new section 2\.7 recording the network and system\-state classes\, their selectors and their property tables\, plus the hardware\-verified finding that C\(Enumerate\) returns HTTP 400 on AMT 10 for C\(AMT\_EthernetPortSettings\)\, C\(AMT\_GeneralSettings\)\, C\(AMT\_BootCapabilities\)\, C\(AMT\_BootSettingData\) and C\(AMT\_TLSSettingData\) while C\(Get\) with an exact selector works\. This cuts against the enumerate\-first habit elsewhere in the client\, so the existing hardware\-verified C\(Enumerate\) call sites are left alone rather than swapped for an unverified verb\. Derived from parmstro/intel\_amt\'s hardware research notes\, with attribution recorded per file in C\(NOTICE\)\; protocol facts were taken\, no code was\.
 * tests \- the mock WS\-Man server answers the three new reads the way real firmware does\: it requires the exact C\(Get\) selector for C\(AMT\_EthernetPortSettings\) and faults without it\, serves the MAC dash\-separated\, renders C\(LinkPolicy\) and C\(OperationalStatus\) as repeated elements\, and can be started with C\(\-\-no\-ethernet\-port\) or C\(\-\-bios\-get\-faults\) so the integration target exercises graceful degradation and the C\(Enumerate\) fallback over a real socket rather than only where a unit test mocks the transport away\.
 
-<a id="bugfixes-1"></a>
+<a id="bugfixes-2"></a>
 ### Bugfixes
 
 * amt\_power \- a new test asserts that every C\(state\) choice except V\(query\) has an entry in both the action map and the expected\-state map\, and that the module\'s copy of the expected\-state map agrees with the client\'s\. The first guards the defect being fixed here \-\- three actions implemented but not reachable \-\- and the second guards check mode previewing a different outcome than a real run would produce\.
@@ -177,7 +215,7 @@ path in a way only a physical MEBx visit recovers\.
 <a id="v0-1-0"></a>
 ## v0\.1\.0
 
-<a id="release-summary-2"></a>
+<a id="release-summary-3"></a>
 ### Release Summary
 
 First release\. Manages Intel AMT / vPro endpoints from Ansible\: capability
@@ -269,7 +307,7 @@ and specific rather than absent\.
 * amt\_media \- require O\(tls\_fingerprint\) when O\(use\_tls\=true\)\, and reject O\(ca\_path\) outright\. The redirection plane is a raw TLS socket whose only trust mode is leaf pinning\; TLS without a pin is encrypted but unauthenticated\, and silently ignoring a supplied ca\_path would leave an operator believing the session was chain\-validated \([https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/pull/20](https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/pull/20)\)\.
 * amt\_media \- session state files are created mode 0600 rather than at the umask default\, so they are not readable by other local users even when the runtime directory already exists with laxer permissions \([https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/pull/20](https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/pull/20)\)\.
 
-<a id="bugfixes-2"></a>
+<a id="bugfixes-3"></a>
 ### Bugfixes
 
 * CI \- pin ansible\-core to 2\.17 in the hardware qualification job\. The lab runner image ships Python 3\.10 and ansible\-core 2\.19 requires 3\.11\+ on the controller\, so the job would have failed at dependency installation\. 2\.17 is also the collection\'s declared floor\, so hardware qualification now exercises the oldest version the collection claims to support\.
