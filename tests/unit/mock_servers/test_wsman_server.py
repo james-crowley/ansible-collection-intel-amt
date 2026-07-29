@@ -873,11 +873,7 @@ class TestEmptySourceIsRejected:
     def test_the_same_rule_guards_set_boot_config_role(self, server):
         # BootConfigSetting is EPR-typed too, validated by the same firmware schema
         # validator, so the observed rejection generalises rather than being invented.
-        body = (
-            f'<r:SetBootConfigRole_INPUT xmlns:r="{CIM_BOOT_SERVICE}">'
-            "<r:BootConfigSetting /><r:Role>1</r:Role>"
-            "</r:SetBootConfigRole_INPUT>"
-        )
+        body = f'<r:SetBootConfigRole_INPUT xmlns:r="{CIM_BOOT_SERVICE}"><r:BootConfigSetting /><r:Role>1</r:Role></r:SetBootConfigRole_INPUT>'
         xml = _envelope(f"{CIM_BOOT_SERVICE}/SetBootConfigRole", CIM_BOOT_SERVICE, body)
         assert _post(server, xml).status_code == 400
 
@@ -941,9 +937,7 @@ class TestParameterLookupIsNamespaceAndDepthAware:
 
     def test_a_parameter_in_the_wrong_namespace_does_not_count(self, server):
         body = (
-            f'<r:SetBootConfigRole_INPUT xmlns:r="{CIM_BOOT_SERVICE}">'
-            '<Role xmlns="http://example.invalid/wrong-namespace">1</Role>'
-            "</r:SetBootConfigRole_INPUT>"
+            f'<r:SetBootConfigRole_INPUT xmlns:r="{CIM_BOOT_SERVICE}"><Role xmlns="http://example.invalid/wrong-namespace">1</Role></r:SetBootConfigRole_INPUT>'
         )
         xml = _envelope(f"{CIM_BOOT_SERVICE}/SetBootConfigRole", CIM_BOOT_SERVICE, body)
         root = ET.fromstring(_post(server, xml).content)  # noqa: S314

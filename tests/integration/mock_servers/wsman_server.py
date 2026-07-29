@@ -361,7 +361,7 @@ class _UnknownResource(Exception):
     """Raised internally when no handler exists for a (ResourceURI, Action) pair."""
 
 
-class _HttpFault(Exception):  # noqa: N818 -- not an "Error": it *is* the modelled response
+class _HttpFault(Exception):
     """Reject a request at the HTTP layer, the way firmware does, instead of answering.
 
     A SOAP fault is a valid response to a request firmware *understood*; an HTTP 400 is
