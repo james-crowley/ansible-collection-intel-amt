@@ -312,12 +312,16 @@ populated on 16.1.30 too**. Machine 1's mutating result still rests on its
 [`docs/capability-matrix.md`](../../docs/capability-matrix.md) Tier 3.
 
 One result from that re-run is worth reading before you trust a remote power-on:
-**both** machines report `link_policy` `[1, 14]` (`s0_ac`, `s0_dc`) and therefore
-`wake_on_lan_capable: false`, with `16` ("network link always on") absent on both.
-Whether either machine can be woken from off by AMT is **untested** -- no stage
-powers a machine off, confirms it, and then tries to reach it -- so that is a thing
-to suspect first if stage 4 or a real power-on ever fails on a genuinely off
-machine, not a known defect. It is Tier 4 in
+**both** machines report `link_policy` `[1, 14]`, which is `s0_ac` plus `sx_ac` --
+`14` is "available on Sx AC", so both report `wake_on_lan_capable: true`. That is a
+correction: through 0.3.0 this collection decoded `14` as `s0_dc` and reported
+`false` here, from a value table that was wrong (see
+[`docs/capability-matrix.md`](../../docs/capability-matrix.md) Tier 1). Whether
+either machine can actually be reached over WS-Man while off is still **untested** --
+no stage powers a machine off, confirms it, and then tries to reach it -- so if
+stage 4 or a real power-on ever fails on a genuinely off machine, the link policy is
+no longer the first thing to suspect on these two, but nothing here demonstrates
+that a wake works either. It is Tier 4 in
 [`docs/capability-matrix.md`](../../docs/capability-matrix.md).
 
 Stage 2's automatic comparison is also live now: `amt_expected_uuid` is recorded

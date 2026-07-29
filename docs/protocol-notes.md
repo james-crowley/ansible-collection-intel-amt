@@ -306,15 +306,23 @@ Report all three separately — never collapse them into one boolean.
 
 ### 2.7 Network and system-state facts
 
-Everything in this subsection is derived from `parmstro`'s hardware research notes
+The class names, ResourceURIs, `InstanceID` selector strings and property names in this
+subsection are derived from `parmstro`'s hardware research notes
 (`development/research/AMT_RESOURCE_DISCOVERY.md` and
 `development/research/AMT_10_CAPABILITIES.md`, GPL-3.0-or-later), which record property
 values dumped from a real Intel NUC5i5MYBE running AMT 10.0.56 build 3002. **Protocol
 facts were taken from those notes; no code was taken from that collection**, and their
 module code and user-facing prose are explicitly *not* treated as reliable here — three
-of their ten modules report success while doing nothing, and their power constants map
-`reset` to CIM code 11 (Diagnostic Interrupt / NMI) rather than 10 (Master Bus Reset).
-See `NOTICE`.
+of their ten modules report success while doing nothing, their power constants map
+`reset` to CIM code 11 (Diagnostic Interrupt / NMI) rather than 10 (Master Bus Reset),
+and their `LinkPolicy` value table was wrong in three of its five entries (see the
+correction under `AMT_EthernetPortSettings` below). See `NOTICE`.
+
+The **`LinkPolicy` value table is the exception**: it is now taken from
+`device-management-toolkit/go-wsman-messages`, a vendor reference implementation, not
+from those notes. Property *names* from a hardware dump are good evidence; the *meaning*
+of an enumeration value is not something a dump can establish, and trusting a
+transcription for it is precisely what produced the 0.2.0/0.3.0 defect corrected below.
 
 **Corroborated on this collection's own hardware, on both generations.** Every fact in
 this subsection came back populated from AMT **19.0.5** and from AMT **16.1.30** — so
@@ -413,26 +421,61 @@ classes with different meanings.
 **Instance 0 only.** Multi-NIC parts expose higher indices. Do not assume they exist, and
 make a missing instance degrade to "unknown" rather than failing a read.
 
-`LinkPolicy` values (a live AMT 10.0.56 machine returned `[1, 14, 16]`):
+`LinkPolicy` values — **vendor-sourced**, from `device-management-toolkit/go-wsman-messages`
+`pkg/wsman/amt/ethernetport` (`decoder.go` named constants; `types.go` carries the schema
+annotation `ValueMap={1, 14, 16, 224}` / `Values={available on S0 AC, available on Sx AC,
+available on S0 DC, available on Sx DC}`, with the doc comment *"Enumeration values for
+link policy restrictions for better power consumption. If Intel® AMT will not be able to
+determine the exact power state, the more restrictive closest configuration applies."*):
 
-| Value | Meaning |
-|---|---|
-| 1 | S0 (powered on), AC |
-| 2 | Sx (sleep/hibernate), AC |
-| 14 | S0 (powered on), DC |
-| 15 | Sx (sleep/hibernate), DC |
-| 16 | Network link always on — **the WoL-capable bit** |
+| Value | Go constant | Meaning |
+|---|---|---|
+| 1 | `LinkPolicyS0AC` | available on S0 AC — host powered on, mains |
+| 14 | `LinkPolicySxAC` | available on Sx AC — host asleep/hibernating/off, mains |
+| 16 | `LinkPolicyS0DC` | available on S0 DC — host powered on, battery |
+| 224 | `LinkPolicySxDC` | available on Sx DC — host asleep/hibernating/off, battery |
 
-Only 1, 14 and 16 are hardware-corroborated (they are the set that machine returned);
-2 and 15 are the documented AC/DC sleep counterparts and have not been observed. Report
-the raw list as well as any derived boolean, so an unrecognised value stays visible.
+The enum crosses two axes — ACPI state (S0 versus any Sx) and power source (AC versus
+DC) — and **there is no "always on" value**. Those four are the whole enum; a value
+outside it is reported raw and named `unknown(<raw>)`, which is what go-wsman-messages
+itself does (its decoder returns the string `"Value not found in map"`).
 
-**Why `16` matters operationally.** An endpoint whose `LinkPolicy` omits `16` does not
-keep its network link up while the host is powered off, so it does not answer WS-Man at
-all in that state. `amt_power` with `state: on` against such an endpoint therefore fails
-looking exactly like a network fault — wrong VLAN, wrong address, firewall — when the
-actual cause is a link policy. Surfacing it read-only converts a confusing failure into
-a diagnosis.
+> **Correction, 2026-07-29 — the previous table here was wrong, and it came from
+> `parmstro`.** Their constants file gives `1: s0_ac, 2: sx_ac, 14: s0_dc, 15: sx_dc,
+> 16: always_on`. Three of those five entries are wrong: `14` is Sx AC and not S0 DC,
+> `16` is S0 DC and not an "always on" bit, and `2`/`15` are not in Intel's enum at all.
+> `224` (Sx DC) was missing entirely. This collection shipped that table in 0.2.0 and
+> 0.3.0, and because `wake_on_lan_capable` was derived from `16`, the boolean tested "is
+> this endpoint reachable while on battery?" and returned `false` on every mains-powered
+> desktop — the inverse of the truth. See `CHANGELOG` for 0.4.0.
+>
+> **This is the second wrong table from the same source.** The first is noted above:
+> their power constants map `reset` to CIM code 11 (Diagnostic Interrupt / NMI) rather
+> than 10 (Master Bus Reset). Their *research notes* — dumped property values, class
+> names, selector strings, which verb each class accepts — have held up. Their
+> *constants and derived meanings* have now been wrong twice. Do not adopt a third
+> table from them without checking it against go-wsman-messages or a firmware fixture
+> first, and do not treat "corroborated by their hardware dump" as covering the
+> meaning of a value — a dump corroborates that a value was *returned*, never what it
+> *means*.
+
+**Why the Sx values matter operationally.** An endpoint whose `LinkPolicy` carries
+neither `14` nor `224` keeps its network link up only while the host is in S0, so it
+does not answer WS-Man at all once the host sleeps or powers down. `amt_power` with
+`state: on` against such an endpoint therefore fails looking exactly like a network
+fault — wrong VLAN, wrong address, firewall — when the actual cause is a link policy.
+Surfacing it read-only converts a confusing failure into a diagnosis. The derived
+`wake_on_lan_capable` boolean is exactly this test: *is any Sx value present?*
+
+**Hardware agreement on the corrected table.** Both lab machines (AMT 16.1.30 and
+19.0.5) report `[1, 14]` — S0 AC plus Sx AC. The MEBx screen on one of them was
+photographed: `ME ON in Host Sleep States` is set to *"Desktop: ON in S0, ME Wake in S3,
+S4-5"*, the wake-capable option, and `Idle Timeout` reads `65535`, matching the
+`idle_wake_timeout` `amt_info` reports. Firmware configuration and the corrected table
+agree; it was the old derivation that disagreed with both. Note that `LinkPolicy`
+governs whether the network **link** is maintained while the MEBx setting governs
+whether the **ME itself** is powered — related, not the same field, and this collection
+reads only the former.
 
 **Wire shape of `LinkPolicy` is not settled.** AMT's schema types it as a `uint32` array,
 which WS-Man renders as a repeated plain element. `parmstro`'s module code instead parses

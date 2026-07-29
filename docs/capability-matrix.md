@@ -53,11 +53,47 @@ than in principle.
 | The five-step boot-configuration sequence (clear → mutate → Put → set role → set order) and its field delete-list | MeshCentral (`amt/amt-wsman.js`, `amt/amt.js`), Apache-2.0 | `plugins/module_utils/boot.py` |
 | The IDE-R/redirection wire framing (session start, digest auth over the binary protocol, SCSI command set, canned MODE_SENSE/GET_CONFIGURATION byte arrays) | MeshCentral (`amt/amt-redir-mesh.js`, `amt/amt-ider-module.js`), Apache-2.0 | `plugins/module_utils/redirection.py`, `plugins/module_utils/ider.py` |
 | AMT provisioned in Small Business Mode never opens port 16993 (no TLS at all) | **Hardware-verified** by `parmstro` on an Intel NUC5i5MYBE, AMT 10.0.56 build 3002 (`parmstro/intel_amt`, GPL-3.0-or-later, `development/research/AMT_10_TLS_LIMITATION.md`) | `plugins/doc_fragments/connection.py`, `plugins/module_utils/tls.py` (`enforce_transport_policy`) — this is *why* the plaintext opt-in exists at all |
+| `AMT_EthernetPortSettings.LinkPolicy` value table: 1 = S0 AC, 14 = Sx AC, 16 = S0 DC, 224 = Sx DC, and no other defined value | `device-management-toolkit/go-wsman-messages` `pkg/wsman/amt/ethernetport` — `decoder.go` named constants (`LinkPolicyS0AC`…`LinkPolicySxDC`), `types.go` schema annotation `ValueMap={1, 14, 16, 224}` / `Values={available on S0 AC, available on Sx AC, available on S0 DC, available on Sx DC}`. Read directly at tag `v2.48.3`, per `docs/protocol-notes.md` §2.7 | `plugins/module_utils/models.py` (`_LINK_POLICY_TABLE`, `wake_on_lan_capable`) |
 
 Every row above is a claim about the **protocol**, verified against something other
 than this collection's own code. None of them is a claim that this collection's
 *implementation* of the protocol has been exercised against real firmware — that is
 Tier 3.
+
+### Correction: the `LinkPolicy` row was previously wrong, and was not Tier 1
+
+The `LinkPolicy` row above is new in 0.4.0. Recorded here rather than silently
+substituted, because a matrix that quietly fixes a wrong claim is worth less than one
+that says what it got wrong.
+
+Through 0.2.0 and 0.3.0 this collection decoded `LinkPolicy` with a table transcribed
+from `parmstro`'s constants file — `1: s0_ac, 2: sx_ac, 14: s0_dc, 15: sx_dc,
+16: always_on` — and derived `wake_on_lan_capable` from the presence of `16`. Against
+the vendor enum, three of those five entries are wrong: `14` is **Sx AC**, not S0 DC;
+`16` is **S0 DC**, not an "always on" bit; `2` and `15` are not defined values at all.
+`224` (Sx DC) was missing. The consequence was a boolean that actually asked *"is this
+endpoint reachable while running on battery?"* and so returned `false` for every
+mains-powered desktop — the inverse of the correct answer.
+
+Two things that document was doing wrong, beyond the table itself:
+
+- **It carried the claim at the wrong tier.** These values sat in Tier 2 on the
+  reasoning that the source was "a third party's hardware", with `amt_info.md` adding a
+  caveat that the reader should confirm the field in the AMT Web UI. A caveat is not a
+  substitute for reading the vendor reference, which was one HTTP request away and
+  settles the question outright.
+- **It treated a hardware dump as corroborating a *meaning*.** `parmstro`'s machine
+  returned `[1, 14, 16]`, which was cited as corroboration. A dump corroborates that a
+  value was *returned*; it can never establish what the value *means*. Those are
+  different claims and were conflated.
+
+This is the **second** wrong table from that source — their power constants map `reset`
+to CIM code 11 (Diagnostic Interrupt / NMI) rather than 10 (Master Bus Reset), noted
+below and in `NOTICE`. Their research notes (class names, ResourceURIs, selector
+strings, property names, which verb each class accepts) have held up under hardware
+testing on two generations. Their *constants and derived meanings* have now been wrong
+twice. Any future value table from them belongs in Tier 1 only after being checked
+against go-wsman-messages or a real firmware fixture, and nowhere else until then.
 
 ---
 
@@ -124,11 +160,12 @@ made the hardware result legible the moment it arrived:
   rest on **three firmware generations' worth of evidence**: named from a third
   party's 10.0.56 dump, and read back populated by this collection on 16.1.30 and
   19.0.5.
-- **The one Tier 1 row here** is the DMTF decoding itself: `EnabledState` and
-  `OperationalStatus` come from the DMTF CIM schema, not from anyone's dump. The
-  source project's implementation decodes only `OperationalStatus` values 0 and 2 and
-  omits `EnabledState` 4 (shutting down) entirely; the full standard tables are
-  implemented here instead.
+- **The Tier 1 rows here** are the value tables, none of which come from anyone's dump.
+  `EnabledState` and `OperationalStatus` are the DMTF CIM schema; the source project's
+  implementation decodes only `OperationalStatus` values 0 and 2 and omits
+  `EnabledState` 4 (shutting down) entirely, so the full standard tables are
+  implemented here instead. `LinkPolicy` is go-wsman-messages, as of 0.4.0 — it was
+  *not* Tier 1 before that, and it was wrong; see the correction at the end of Tier 1.
 - **`bios_version` was the weakest-evidenced field**, and is much less so now.
   `CIM_BIOSElement` is listed as working in `parmstro`'s notes but no value was ever
   dumped, and the implementation they claim it from swallows failure to `None` — so
@@ -219,8 +256,8 @@ them, populated — nothing `null`, no class faulted**: machine 2 on its stage-1
 | `network.dhcp_enabled` | `false` | `false` |
 | `network.link_is_up` | `true` | `true` |
 | `network.link_policy` | `[1, 14]` | `[1, 14]` |
-| `network.link_policy_names` | `["s0_ac", "s0_dc"]` | `["s0_ac", "s0_dc"]` |
-| `network.wake_on_lan_capable` | `false` | `false` |
+| `network.link_policy_names` | `["s0_ac", "sx_ac"]` | `["s0_ac", "sx_ac"]` |
+| `network.wake_on_lan_capable` | `true` | `true` |
 | `network.ip_sync_enabled` | `false` | `false` |
 | `system_state.element_name` | `"Managed System"` | `"Managed System"` |
 | `system_state.enabled_state` / `enabled_state_text` | `2` / `"enabled"` | `2` / `"enabled"` |
@@ -235,6 +272,13 @@ Real values are deliberately not transcribed here: the evidence artifacts carry 
 lab addressing, and this repository holds no lab identifiers. "populated" means the
 field came back non-`null` and its class did not fault, which is the whole of what is
 being claimed for it.
+
+The `link_policy_names` and `wake_on_lan_capable` cells above are stated **as 0.4.0
+decodes them**. The runs themselves, on 0.3.0, emitted `["s0_ac", "s0_dc"]` and `false`
+for these machines, because the value table was wrong — see the correction at the end of
+Tier 1. What the firmware reported and what those runs measured is the raw
+`link_policy` `[1, 14]`; the row is re-decoded, not re-measured, and nothing else in this
+table is affected.
 
 `link_policy_names` and `requested_state` are the two fields the machine-1 read added
 to the itemised record — both confirmed populated, `requested_state` deliberately left
@@ -263,32 +307,41 @@ generations rather than one:
   unconfigured default the likelier reading than a deliberate setting — but that is a
   guess, and it is not being recorded as a finding.
 
-### Both machines report `wake_on_lan_capable = false`
+### Both machines report `wake_on_lan_capable = true`
 
-The single most operationally useful thing the two reads agree on. Both machines
-returned `link_policy` `[1, 14]`, which decodes to `s0_ac` and `s0_dc` — S0, meaning
-*while the machine is powered on*, on AC power and on battery. The value that would
-mean otherwise, **`16` ("network link always on"), is absent on both**, so
-`wake_on_lan_capable` is `false` on both.
+Both machines returned `link_policy` `[1, 14]`. Against the vendor enum that is `s0_ac`
+plus `sx_ac`: the link is maintained while the host is powered on **and** while it is
+asleep, hibernating or off, in both cases on mains. `14` is an **Sx** value, so
+`wake_on_lan_capable` is `true` on both.
 
-Read literally, that policy says AMT keeps its network link up only while the host is
-already powered on. If that is what it means in practice, then `amt_power state=on`
-against a genuinely powered-off endpoint would never reach the management plane at
-all, and the failure would surface as `error_class: connection` — indistinguishable
-from a wrong address, a dead switch port or a firewall rule. That is exactly the
-diagnostic value [`amt_info`'s documentation](amt_info.md) claims for this field, and
-it is now measured on real firmware rather than hypothetical.
+This reverses what 0.2.0 and 0.3.0 reported for these same readings. The raw `[1, 14]`
+is unchanged and measured; the decoding of it was wrong, keyed off a transcribed table
+in which `14` was labelled `s0_dc` and `16` was labelled an "always on" bit that Intel's
+enum does not contain. See the correction at the end of Tier 1 for the full accounting.
 
-**What this does not establish.** Nothing in the evidence shows whether these machines
-can or cannot be woken from off by AMT. No deliberate power-off-then-power-on test has
-been run against either of them. Machine 1's stage 4 did pass on 2026-07-28 including
-an `off` transition and a restore, which is hard to square with an endpoint that is
-unreachable while off; the most plausible reconciliation is that the machine was
-already off when the stage began, making both transitions no-ops, but that is a
-reading of the result and not something the result states. So: the policy value that
-would *guarantee* link-up-while-off is absent on both machines, that absence is the
-first thing to suspect if a remote power-on ever fails, and whether wake-from-off
-actually works here is untested — see Tier 4.
+**Firmware configuration corroborates the corrected table.** The MEBx screen on one of
+these machines was photographed after the fact: `ME ON in Host Sleep States` reads
+*"Desktop: ON in S0, ME Wake in S3, S4-5"* — the wake-capable option — and `Idle Timeout`
+reads `65535`, matching the `idle_wake_timeout` `amt_info` already reports for it. So the
+firmware's own configuration screen and the vendor value table agree with each other, and
+the collection's old derivation disagreed with both. That is two independent sources
+against one transcription. (These are related fields, not the same field: `LinkPolicy`
+governs whether the network **link** is maintained, the MEBx setting governs whether the
+**ME itself** is powered, and this collection reads only the former.)
+
+**It also resolves a result previously recorded here as not adding up.** Machine 1's
+stage 4 passed on 2026-07-28 including an `off` transition and then a successful restore,
+which this document called "hard to square with an endpoint that is unreachable while
+off" and explained away as the machine most likely having been off already. With `14` =
+Sx AC there is nothing to explain away: the endpoint is configured to stay reachable
+while off, on AC, which is exactly what that stage's behaviour implies. The awkward
+reading was an artefact of the wrong table.
+
+**What this still does not establish.** No deliberate power-off, independent
+confirmation, then WS-Man read has been run against either machine, so reachability while
+off is not *measured* — the evidence now points towards it instead of against it, which
+is a weaker claim than having tested it, and the difference is deliberately preserved
+here. See Tier 4.
 
 ## Tier 4: Still unproven
 
@@ -317,17 +370,22 @@ A short list, deliberately.
   path for it, so stage 7 asserts `AMT_BootSettingData` stability instead. The
   headline claim that a one-time boot "does not persist" is therefore
   *inferred*, not directly measured.
-- **Whether either endpoint answers WS-Man while powered off.** Both machines
-  report `wake_on_lan_capable = false` and neither carries `link_policy` value `16`
-  (see the subsection at the end of Tier 3), so on a literal reading of the policy
-  neither keeps its link up once the host powers down — which would make
-  `amt_power state=on` unreachable against a genuinely off machine. **That has not
-  been tested.** No stage powers a machine off, confirms it is off, and then tries
-  to reach it; stage 4's `off` and restore on machine 1 are consistent with a
-  machine that was already off, so they do not settle it either. The specific
-  missing test is a deliberate power-off, an independent confirmation that the
-  machine is off, and then a WS-Man read — until that runs, this document claims
-  neither that wake-from-off works nor that it is broken.
+- **Whether either endpoint answers WS-Man while powered off.** Still untested, and
+  this entry stays — but the evidence now points the *other* way than it did in 0.3.0.
+  Both machines carry `link_policy` value `14` (Sx AC) and so report
+  `wake_on_lan_capable = true`, and one of them has a MEBx sleep-state setting of
+  *"ON in S0, ME Wake in S3, S4-5"* to match (see the subsection at the end of
+  Tier 3). Configuration therefore says these endpoints should be reachable while off,
+  on AC. **Configuration is not a measurement.** No stage powers a machine off,
+  independently confirms it is off, and then tries to reach it. Machine 1's stage 4
+  `off`-and-restore is *consistent* with a reachable-while-off endpoint but does not
+  demonstrate one, because nothing in that stage confirmed the machine was actually off
+  between the two transitions. The specific missing test is unchanged: a deliberate
+  power-off, an independent confirmation that the machine is off, and then a WS-Man
+  read. Until that runs, this document claims neither that wake-from-off works here nor
+  that it is broken — only that what would have been the leading explanation for a
+  failure (an S0-only link policy) has been ruled out on these two machines, and that
+  the explanation was itself wrong for two releases.
 - **Any firmware generation other than 16.1.30 and 19.0.5.** Both lab generations
   have now been mutated through stages 4 to 7 and read with the full v0.2.0 fact
   set, so neither "mutating anything at all" nor "reading the network and
