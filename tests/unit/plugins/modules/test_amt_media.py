@@ -520,7 +520,9 @@ class TestAttachFailureIsDecidedByDaemonLiveness:
         # The exact shape that used to slip through: an intermediate state, no
         # error recorded, and a daemon that is already gone.
         result = self._run_attach(
-            monkeypatch, runtime_dir, floppy_image,
+            monkeypatch,
+            runtime_dir,
+            floppy_image,
             waited_state={"session_id": "sess-x", "state": media_session.STATE_CONNECTING, "pid": 4242},
             pid_alive=False,
         )
@@ -529,7 +531,9 @@ class TestAttachFailureIsDecidedByDaemonLiveness:
 
     def test_dead_daemon_with_a_late_error_reports_that_error(self, monkeypatch, runtime_dir, floppy_image):
         result = self._run_attach(
-            monkeypatch, runtime_dir, floppy_image,
+            monkeypatch,
+            runtime_dir,
+            floppy_image,
             waited_state={
                 "session_id": "sess-x",
                 "state": media_session.STATE_ERROR,
@@ -551,8 +555,7 @@ class TestAttachFailureIsDecidedByDaemonLiveness:
         # running simply has not finished yet, and failing it would make this fix a
         # different bug.
         monkeypatch.setattr(media_session, "spawn_session", lambda *a, **k: 4242)
-        state = {"session_id": "sess-y", "state": media_session.STATE_ATTACHED, "pid": 4242,
-                 "devices": {}, "error": None, "tls_peer_fingerprint": None}
+        state = {"session_id": "sess-y", "state": media_session.STATE_ATTACHED, "pid": 4242, "devices": {}, "error": None, "tls_peer_fingerprint": None}
         monkeypatch.setattr(media_session, "wait_for_state", lambda *a, **k: state)
         monkeypatch.setattr(media_session, "is_pid_alive", lambda pid: True)
         _set_module_args(_attach_args(runtime_dir=runtime_dir, floppy_image=floppy_image))
