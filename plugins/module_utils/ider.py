@@ -818,16 +818,51 @@ class IderEngine:
         start the next queued read. Local file reads are synchronous, so
         there is no callback boundary to model here the way the JS reference
         does with ``fs.read``.
+
+        The short-read guard below is what makes "each iteration makes
+        progress" true rather than merely intended, and therefore what makes
+        this loop guaranteed to terminate. See the comment at the guard.
         """
         readbfr = self.session_info.readbfr or None
         while self._read_state is not None:
             state = self._read_state
             chunk_size = min(state.remaining, readbfr) if readbfr else state.remaining
             data = state.image.read(state.byte_offset, chunk_size)
-            state.byte_offset += len(data)
-            state.remaining -= len(data)
-            completed = state.remaining <= 0
-            self._send_data_to_host(state.device, completed, data, state.dma)
+
+            if not data:
+                # Short read at EOF. ``_scsi_read`` bounds-checked the request
+                # against ``image.blocks``, but that is computed once, at open,
+                # and this daemon holds the image for as long as the redirected
+                # boot takes -- up to an hour. If the backing file is truncated
+                # underneath a live session, ``read()`` returns b"" here while
+                # ``remaining`` is still positive.
+                #
+                # Without this guard that is an unbounded spin, not a mere wrong
+                # answer: ``remaining`` never decreases, so the loop emits
+                # zero-length DATA_TO_HOST frames forever and the buffered
+                # outbound bytes grow without limit until the process is OOM
+                # killed. Terminating the transfer is mandatory; which sense code
+                # we pick is secondary.
+                #
+                # MEDIUM ERROR / UNRECOVERED READ ERROR (sense 0x03, asc 0x11) is
+                # the honest classification: the medium really did fail to yield
+                # the sectors it advertised. Sent in the sense-bearing form
+                # (error=False) so the host actually learns why -- the error form
+                # discards sense/asc/asq on the wire, see
+                # _send_command_end_response. Never complete the transfer
+                # successfully: a BIOS that believes a short read succeeded goes
+                # on to execute whatever was already in its buffer.
+                self._send_command_end_response(False, 0x03, state.device, 0x11, 0x00)
+                # Fall through to the per-request teardown below by declaring
+                # this request finished. Any queued reads still get drained (and
+                # will hit this same guard if they are also past the new EOF), so
+                # firmware is not left waiting on an unanswered CDB.
+                state.remaining = 0
+            else:
+                state.byte_offset += len(data)
+                state.remaining -= len(data)
+                completed = state.remaining <= 0
+                self._send_data_to_host(state.device, completed, data, state.dma)
 
             if state.remaining > 0 and not self._reset_pending:
                 continue  # more chunks remain for this read; keep draining it
