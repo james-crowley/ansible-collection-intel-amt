@@ -74,7 +74,12 @@ amt:
       returned: when available
       sample: "11.8.50"
     uuid:
-      description: The endpoint's system UUID, from C(CIM_ComputerSystem).
+      description: >-
+        The endpoint's system UUID, read from C(CIM_ComputerSystemPackage.PlatformGUID) and
+        rendered in the canonical dashed form an operator sees in MEBx or BIOS. The firmware
+        returns 32 undashed hex characters holding an SMBIOS Type 1 UUID, whose first three
+        fields are little-endian, so those fields are byte-reversed on the way out. Any value
+        that is not exactly 32 bare hex characters is reported verbatim rather than reformatted.
       type: str
       returned: when available
     control_mode:
@@ -250,7 +255,7 @@ def main() -> None:
     module = AnsibleModule(argument_spec=_connection_argument_spec(), supports_check_mode=True)
 
     if not HAS_REQUESTS:
-        module.fail_json(msg=missing_required_lib("requests", reason=REQUESTS_IMPORT_ERROR))
+        module.fail_json(msg=missing_required_lib("requests"), exception=REQUESTS_IMPORT_ERROR)
 
     try:
         wsman = build_wsman_client(module.params)

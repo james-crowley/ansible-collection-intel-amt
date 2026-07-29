@@ -78,6 +78,13 @@ attributes:
 """
 
 EXAMPLES = r"""
+# Arming a boot selection is a mutation with a physical consequence, so it is
+# usually worth doing one machine at a time. Put `serial: 1` on the enclosing
+# PLAY to get that -- `serial` is a play keyword and is rejected outright if
+# written on a task ("conflicting action statements"). Do not reach for
+# `delegate_to: localhost` instead: it moves execution to the controller but
+# does nothing to inventory fan-out, so the task below still runs once per host
+# in the batch, in parallel, unless the play limits the batch size.
 - name: Arm a one-time PXE boot for an unattended install
   james_crowley.intel_amt.amt_boot:
     host: 10.0.0.5
@@ -88,7 +95,6 @@ EXAMPLES = r"""
     action_token: "{{ lookup('ansible.builtin.password', '/dev/null length=32') }}"
   delegate_to: localhost
   no_log: true
-  serial: 1
 
 - name: Arm IDE-R floppy redirection for a writable answer-file image
   james_crowley.intel_amt.amt_boot:
