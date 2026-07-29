@@ -6,46 +6,29 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 # Sanity test ignores
 
-One `ignore-<ansible-core-version>.txt` per version we sanity-test against.
-Entries must be a single line with an optional *trailing* comment; a standalone
-comment line fails the `ignores` sanity test itself.
+**There are currently no ignore files in this directory, and no sanity rule this
+collection suppresses.** This file records the conventions for adding one, and the
+practice that keeps them from being needed.
 
-Keep this list short. Every entry is a rule we have chosen not to enforce, so
-each needs a reason that survives review.
+## If you ever need an ignore
 
-## `pep8:E704` on `plugins/module_utils/redirection.py` (2.17, 2.18)
+One `ignore-<ansible-core-version>.txt` per version the ignore actually applies
+to. Entries must be a single line with an optional *trailing* comment; a standalone
+comment line fails the `ignores` sanity test itself. An ignore for a rule that does
+not fire on that version is also reported as unnecessary, so scope each file to the
+versions that genuinely flag the code.
 
-`E704` is "multiple statements on one line (def)". It fires on the `Protocol`
-method stubs in `redirection.py`, written as:
+Keep the list short. Every entry is a rule we have chosen not to enforce, so each
+needs a reason that survives review.
 
-```python
-def recv(self, bufsize: int) -> bytes: ...
-```
+## Run sanity against the oldest supported ansible-core, not just the newest
 
-This is suppressed rather than reformatted because the two tools we run disagree
-irreconcilably:
+Sanity behaviour genuinely differs between versions, and this is not theoretical:
+a pep8 rule that only 2.17 and 2.18 enforced slipped through once, because local
+verification only ever ran sanity against 2.19 while CI runs 2.17, 2.18 and 2.19.
 
-- `ruff format` **collapses** a `...` body onto one line, matching Black's stable
-  style for dummy implementations. Expanding the stubs by hand is undone by the
-  next format run — verified: the expansion was silently reverted, and the
-  following CI run failed on the same four lines.
-- `ansible-test sanity --test pep8` on **2.17 and 2.18** rejects exactly that
-  form.
-
-ansible-core **2.19 no longer reports E704 at all**, which suggests upstream also
-treats the rule as obsolete for this construct. So the ignore is scoped to the
-two versions that still flag it, and will disappear when the support floor moves
-past them.
-
-Note it is deliberately *not* in an `ignore-2.19.txt`: an ignore for a rule that
-does not fire is itself reported by the `ignores` sanity test as unnecessary.
-
-## Why this was caught late
-
-Local verification only ever ran sanity against ansible-core 2.19, while CI runs
-2.17, 2.18 and 2.19. Sanity behaviour genuinely differs between them — this
-entry exists because of one such difference. When changing anything a sanity test
-inspects, run at least the oldest supported version locally too:
+When changing anything a sanity test inspects, run at least the oldest supported
+version locally too:
 
 ```bash
 python3 -m venv /tmp/v217 && /tmp/v217/bin/pip install "ansible-core~=2.17.0"
