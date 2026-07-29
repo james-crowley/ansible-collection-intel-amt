@@ -12,21 +12,18 @@ SPDX-License-Identifier: GPL-3.0-or-later
      v2 no longer returns JSON for this path, so shields.io rendered "resource
      not found" against it. Verified against a published collection before use.
 
-     The CircleCI badge is deliberately STATIC -- it links to the pipelines page
-     rather than reporting pass/fail. CircleCI's live status badge 404s for
-     anonymous visitors unless the project carries the "Free and Open Source"
-     flag, and that flag is off on purpose: it makes build logs AND artifacts
-     world readable, and the hardware qualification jobs store evidence
-     artifacts carrying lab machine identifiers -- the same class of value a
-     history rewrite deliberately removed from this repository.
-
-     The documented alternative is a status-scoped `circle-token` in the badge
-     URL. It works and its scope really is status-only, but GitHub's secret
-     scanner classifies a CircleCI project token as a secret and push protection
-     rejects the commit -- correctly, so it is not worked around here. If public
-     build logs are ever acceptable, turn the OSS flag back on and restore the
-     live `dl.circleci.com/status-badge` URL. -->
-[![Galaxy](https://img.shields.io/badge/dynamic/json?label=galaxy&query=%24.highest_version.version&url=https%3A%2F%2Fgalaxy.ansible.com%2Fapi%2Fv3%2Fplugin%2Fansible%2Fcontent%2Fpublished%2Fcollections%2Findex%2Fjames_crowley%2Fintel_amt%2F&color=blue)](https://galaxy.ansible.com/ui/repo/published/james_crowley/intel_amt/) [![CI: CircleCI](https://img.shields.io/badge/CI-CircleCI-343434?logo=circleci&logoColor=white)](https://app.circleci.com/pipelines/github/james-crowley/ansible-collection-intel-amt) [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE) [![ansible-core](https://img.shields.io/badge/ansible--core-%3E%3D2.17-blue.svg)](https://docs.ansible.com/) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/) [![Status: pre-release](https://img.shields.io/badge/status-pre--release-orange.svg)](#project-status)
+     The CircleCI badge reports live status again. That works only while
+     CircleCI's "Free and Open Source" project flag is ON, which makes build logs
+     and artifacts publicly readable. It was briefly off because the hardware
+     qualification jobs store evidence artifacts carrying lab machine
+     identifiers; those platform GUIDs are now held as values in the
+     `amt-lab-runner` context, and CircleCI masks context values wherever they
+     appear in log output, so they are censored rather than kept private by
+     hiding the whole build. If the OSS flag is ever turned off again this badge
+     will 404 for anonymous visitors and must go back to a static one -- a
+     status-scoped `circle-token` is not an option, because GitHub push
+     protection correctly classifies it as a secret. -->
+[![Galaxy](https://img.shields.io/badge/dynamic/json?label=galaxy&query=%24.highest_version.version&url=https%3A%2F%2Fgalaxy.ansible.com%2Fapi%2Fv3%2Fplugin%2Fansible%2Fcontent%2Fpublished%2Fcollections%2Findex%2Fjames_crowley%2Fintel_amt%2F&color=blue)](https://galaxy.ansible.com/ui/repo/published/james_crowley/intel_amt/) [![CircleCI](https://dl.circleci.com/status-badge/img/gh/james-crowley/ansible-collection-intel-amt/tree/main.svg?style=shield)](https://dl.circleci.com/status-badge/redirect/gh/james-crowley/ansible-collection-intel-amt/tree/main) [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE) [![ansible-core](https://img.shields.io/badge/ansible--core-%3E%3D2.17-blue.svg)](https://docs.ansible.com/) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/) [![Status: pre-release](https://img.shields.io/badge/status-pre--release-orange.svg)](#project-status)
 
 Out-of-band management of **Intel AMT / vPro** machines from Ansible — power
 control, one-time boot selection, redirection state, and **native IDE-R virtual

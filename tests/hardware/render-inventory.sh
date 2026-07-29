@@ -94,6 +94,29 @@ emit_host() {
         echo "Run the hardware-observe job to read this machine's fingerprint." >&2
         exit 1
     fi
+
+    # amt_expected_uuid activates the stage-2 identity cross-check. It stays
+    # optional: qualify_readonly.yml prints the observed UUID and proceeds when it
+    # is unset, which is what every run did before these values were recorded.
+    #
+    # Emitted as an env lookup like the credentials, for two reasons. The obvious
+    # one is that nothing identifying is written to disk. The less obvious one is
+    # that CircleCI masks context VALUES wherever they appear in log output, so
+    # holding the platform GUID in the context censors it from the qualification
+    # logs as a side effect -- which is what makes publishing those logs safe.
+    #
+    # Be precise about what this guard proves. Recorded from a value this
+    # collection itself observed, it detects *drift*: a reused DHCP lease, an
+    # inventory suffix swapped, an endpoint answering on an address that used to
+    # belong to a different machine. It does NOT independently confirm the machine
+    # is the one you believe it is -- that needs comparing against the booted OS's
+    # own view (`sudo dmidecode -s system-uuid`, or /sys/class/dmi/id/product_uuid)
+    # which nothing in CI can reach. Drift detection is still worth having, and it
+    # is strictly more than the no-op it replaces.
+    eval "uuid=\${AMT_EXPECTED_UUID${suffix}:-}"
+    if [ -n "${uuid}" ]; then
+        printf "          amt_expected_uuid: \"{{ lookup('ansible.builtin.env', 'AMT_EXPECTED_UUID%s') }}\"\n" "${suffix}"
+    fi
 }
 
 index=0
