@@ -62,7 +62,7 @@ Tier 3.
 
 ### Correction: the `LinkPolicy` row was previously wrong, and was not Tier 1
 
-The `LinkPolicy` row above is new in 0.4.0. Recorded here rather than silently
+The `LinkPolicy` row above is new in 0.3.1. Recorded here rather than silently
 substituted, because a matrix that quietly fixes a wrong claim is worth less than one
 that says what it got wrong.
 
@@ -95,13 +95,56 @@ testing on two generations. Their *constants and derived meanings* have now been
 twice. Any future value table from them belongs in Tier 1 only after being checked
 against go-wsman-messages or a real firmware fixture, and nowhere else until then.
 
+### What is actually wrong with `parmstro`'s code
+
+This document previously said that **three of ten** of that project's modules "report
+success while doing nothing". On re-verification that count does not hold, so it is
+withdrawn. One module fits that description; two others have *different* defects. The
+accurate accounting, read from the source at `parmstro/intel_amt`:
+
+- **`amt_tls_config` reports success while doing nothing.** Both mutation paths —
+  certificate upload and TLS configuration — are wrapped in `except Exception` handlers
+  that append an advisory string to a `messages` list and then fall through to
+  `exit_json()`, so *any* failure still exits `ok`. Its `upload_certificate` is a
+  self-described placeholder: it base64-encodes the certificate *text*, computes a
+  `key_b64` from the private key and then never references it, so the key is silently
+  discarded. This is the one module the original claim described.
+- **`amt_system_settings_refactored.py` cannot report drift in check mode.** It returns
+  `changed: False` and exits on `module.check_mode` before any current state is read or
+  compared, so `--check` emits a generic "would configure" message and can never tell a
+  caller what would actually change. That is a different defect from reporting success
+  while doing nothing: it does nothing *and says so*, but it also computes nothing.
+- **`amt_power_policy` does issue writes — with inverted semantics.** It genuinely
+  Puts `AMT_EthernetPortSettings`. The defect is in the meaning, not the plumbing, and
+  it is the same defect this collection shipped.
+
+**The `LinkPolicy` inversion, stated fairly.** `amt_power_policy` treats
+`16 in LinkPolicy` as `always_on` and derives its `wake_on_lan` result from that same
+value. But `16` is **"available on S0 DC"** — the link is maintained while the host is
+*powered on*, running *on battery*. It says nothing about reachability while the host
+is off. So asking that module for `always_on` sets roughly the opposite of
+wake-while-off, and its reported `wake_on_lan` inherits the inversion.
+
+**This collection shipped the same bug, from the same table, and fixed it in 0.3.1.**
+That is the honest framing and the more useful one. The defect is not carelessness
+peculiar to one project; it is what happens when an enumeration's *meaning* is taken
+from a transcription instead of from the vendor enum, and it survived review here for
+two releases (0.2.0 and 0.3.0) for exactly that reason. The correction above is this
+collection's own; the same correction has not been applied upstream. A reader deciding
+between the two projects should weigh that this collection found the bug in itself and
+documented it, not that it found one in someone else.
+
+Their power constants also map `reset` to CIM code 11 (Diagnostic Interrupt / NMI)
+rather than 10 (Master Bus Reset) — a separate transcription error, and the first of
+the two wrong tables noted above.
+
 ---
 
 ## Tier 2: Unit/mock tested
 
 This is the bulk of the collection's verification effort:
 
-- **761 unit tests** (measured via `pytest --collect-only` against the staged
+- **902 unit tests** (measured via `pytest --collect-only` against the staged
   collection tree; the number will drift as tests are added, so treat this as a point
   measurement, not a promise) across `tests/unit/plugins/module_utils/` and
   `tests/unit/plugins/modules/`, covering error classification/redaction, TLS trust
@@ -109,14 +152,34 @@ This is the bulk of the collection's verification effort:
   handshake, the IDE-R SCSI state machine, the media-session daemon lifecycle, and
   every module's argument handling, check-mode behaviour, and idempotence logic —
   all against fakes/mocks, never a socket or a real AMT endpoint.
-- **5/5 integration targets** (`amt_boot`, `amt_info`, `amt_media`, `amt_power`,
-  `amt_redirection` under `tests/integration/targets/`) run end-to-end against local,
-  deterministic fixture servers: a mock WS-Man server (HTTP Digest, TLS with a
+- **7/7 integration targets** (`amt_boot`, `amt_event_log`, `amt_info`,
+  `amt_log_clear`, `amt_media`, `amt_power`, `amt_redirection` under
+  `tests/integration/targets/`) run end-to-end against local, deterministic
+  fixture servers: a mock WS-Man server (HTTP Digest, TLS with a
   generated self-signed certificate, canned per-resource-URI responses, fault
   injection for AMT error codes/malformed SOAP/401/timeouts) and a mock IDE-R server
   (session start, auth-type query, digest challenge, configurable `readbfr`, a write
   path that verifies bytes actually land in the backing image). See
   `docs/testing.md` for how to run these and exactly what they do and do not prove.
+
+### `amt_event_log` and `amt_log_clear` — Tier 2 and *only* Tier 2
+
+Two of the collection's seven modules stop here. `amt_event_log` and `amt_log_clear`
+are unit-tested and mock-integration-tested like every other module — argument
+handling, check mode, the `AMT_MessageLog` iteration loop, record decoding, the
+`ClearLog` invocation and its confirmation guard — but **no hardware qualification
+stage exercises either of them**, so neither appears in Tier 3 and both are listed
+again in Tier 4.
+
+Their wire protocol and record layout come from a captured real-firmware response
+fixture set plus MeshCentral, recorded in `docs/protocol-notes.md` §2.8, which is a
+Tier 1 claim about the *protocol* and not a Tier 3 claim about this collection's
+implementation of it. That gap is why `amt_event_log` returns the **raw bytes** of
+every record alongside the decoded fields: a decode this collection has never
+checked against a live endpoint should not be the only thing a caller can see. See
+[`docs/amt_event_log.md`](amt_event_log.md) and
+[`docs/amt_log_clear.md`](amt_log_clear.md), whose own opening notes say the same
+thing.
 
 ### `amt_info`'s network and system-state facts — mock coverage, with hardware now in Tier 3
 
@@ -151,10 +214,10 @@ made the hardware result legible the moment it arrived:
   `development/research/AMT_RESOURCE_DISCOVERY.md`, GPL-3.0-or-later) — property names
   and observed values, transcribed into `docs/protocol-notes.md` §2.7. That is real
   hardware evidence, but from someone else's lab, on a firmware generation this
-  collection has never touched, and the surrounding project's *code* is demonstrably
-  unreliable (three of its ten modules report success while doing nothing; its power
-  constants map `reset` to CIM code 11, Diagnostic Interrupt/NMI, rather than 10,
-  Master Bus Reset). Property names from those notes were used; no code was. What
+  collection has never touched, and the surrounding project's *code* is separately
+  assessed as unreliable — see "What is actually wrong with `parmstro`'s code" at the
+  end of Tier 1 above for the specific, verified defects. Property names from those
+  notes were used; no code was. What
   confirmed those names resolve on firmware this collection can actually reach is
   the pair of 2026-07-29 reads, on 19.0.5 and on 16.1.30. So these field names now
   rest on **three firmware generations' worth of evidence**: named from a third
@@ -164,7 +227,7 @@ made the hardware result legible the moment it arrived:
   `EnabledState` and `OperationalStatus` are the DMTF CIM schema; the source project's
   implementation decodes only `OperationalStatus` values 0 and 2 and omits
   `EnabledState` 4 (shutting down) entirely, so the full standard tables are
-  implemented here instead. `LinkPolicy` is go-wsman-messages, as of 0.4.0 — it was
+  implemented here instead. `LinkPolicy` is go-wsman-messages, as of 0.3.1 — it was
   *not* Tier 1 before that, and it was wrong; see the correction at the end of Tier 1.
 - **`bios_version` was the weakest-evidenced field**, and is much less so now.
   `CIM_BIOSElement` is listed as working in `parmstro`'s notes but no value was ever
@@ -273,7 +336,7 @@ lab addressing, and this repository holds no lab identifiers. "populated" means 
 field came back non-`null` and its class did not fault, which is the whole of what is
 being claimed for it.
 
-The `link_policy_names` and `wake_on_lan_capable` cells above are stated **as 0.4.0
+The `link_policy_names` and `wake_on_lan_capable` cells above are stated **as 0.3.1
 decodes them**. The runs themselves, on 0.3.0, emitted `["s0_ac", "s0_dc"]` and `false`
 for these machines, because the value table was wrong — see the correction at the end of
 Tier 1. What the firmware reported and what those runs measured is the raw
@@ -347,6 +410,18 @@ here. See Tier 4.
 
 A short list, deliberately.
 
+- **`amt_event_log` and `amt_log_clear`, in their entirety.** No hardware
+  qualification stage reads or clears a real firmware event log. Neither module has
+  ever touched real Intel AMT firmware: the eight stages predate both of them and
+  none was extended to cover them, so there is no stage 1-8 evidence for either.
+  What exists is Tier 2 (see the subsection in Tier 2 above) plus a Tier 1 protocol
+  claim from a captured firmware fixture and MeshCentral. Specifically unproven: that
+  real firmware accepts this collection's `GetRecords` iteration as issued, that the
+  21-byte record layout and little-endian timestamp decode correctly against records
+  a real ME actually wrote, and that `ClearLog` does what its name says on a live
+  endpoint. Adding a read-only stage for `amt_event_log` is the cheap half of
+  closing this; `amt_log_clear` destroys evidence, so a stage for it needs the same
+  approval treatment as stages 4-7.
 - **The sleep and hibernate power actions.** `amt_power` accepts `sleep-light`
   (CIM code 3), `sleep-deep` (code 4) and `hibernate` (code 7), and the codes and
   expected-state mappings are unit-tested, but no hardware stage has issued any of
@@ -453,7 +528,9 @@ hang chain validation off in the first place.
 ## Return-shape inconsistency across modules (RESOLVED)
 
 Closed by issue #22, the last item before 1.0. **Before** this was fixed, the five
-modules disagreed on where the operation receipt lived: `amt_power` nested its
+modules that existed at the time disagreed on where the operation receipt lived
+(`amt_event_log` and `amt_log_clear` were added afterwards and were built to the
+settled shape from the start): `amt_power` nested its
 `intel-amt-operation/v1` receipt under an `operation` key, `amt_boot`/`amt_redirection`/
 `amt_media` all spread the receipt's fields directly at the top level of the module
 result, and `amt_info` used neither shape (it returned a bare `amt` dict with no
@@ -471,7 +548,9 @@ its own `amt` return key to report — nothing was invented to fill those fields
 Module-specific return values (`amt_power`'s `previous_state`/`desired_state`,
 `amt_boot`'s `device`/`boot_config_selector`/`boot_source_selector`,
 `amt_redirection`'s `supported`/`enabled`/`transport_reachable`, `amt_media`'s
-`session_id`/`session_state`/`devices`/`bytes_read`/`bytes_written`, `amt_info`'s `amt`)
+`session_id`/`session_state`/`devices`/`bytes_read`/`bytes_written`, `amt_info`'s `amt`,
+`amt_event_log`'s `records`/`total_records`/`records_read`/`log`, `amt_log_clear`'s
+`records_before`/`records_after`/`cleared`/`return_value`/`log`)
 stay exactly where they were — this was a fix to the receipt's location, not a
 relocation of everything else.
 
@@ -484,7 +563,8 @@ top level of `fail_json`, per `errors.py`'s `to_result()`, because that is what 
 itself surfaces and what the hardware playbooks' rescue blocks read
 (`ansible_failed_result.error_class`). Consult each module's own return-values table
 ([`amt_info`](amt_info.md), [`amt_power`](amt_power.md), [`amt_boot`](amt_boot.md),
-[`amt_redirection`](amt_redirection.md), [`amt_media`](amt_media.md)) for the exact,
+[`amt_redirection`](amt_redirection.md), [`amt_media`](amt_media.md),
+[`amt_event_log`](amt_event_log.md), [`amt_log_clear`](amt_log_clear.md)) for the exact,
 now-consistent shape.
 
 ---

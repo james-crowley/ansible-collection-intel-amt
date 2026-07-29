@@ -28,15 +28,39 @@ from typing import Any
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import redact
 
 #: docs/protocol-notes.md s2.4 -- CIM_AssociatedPowerManagementService.PowerState.
+#:
+#: Names are the DMTF CIM ValueMap for this property, which MeshCmd's own
+#: ``DMTFPowerStates`` table (``agents/meshcmd.js``) reproduces identically --
+#: 5 = Power Cycle (Off-Soft), 6 = Off-Hard, 8 = Off-Soft, 9 = Power Cycle
+#: (Off-Hard). Do not "correct" these against go-wsman-messages'
+#: ``pkg/wsman/cim/power/decoder.go``: that file names 5 ``PowerCycleOffHard``,
+#: 6 ``PowerCycleOffSoft``, 8 ``PowerOffHard`` and 9 ``PowerOffSoft``, i.e. it
+#: transposes the soft/hard qualifier within each pair relative to DMTF. It is
+#: also a list of *action* codes to send to ``RequestPowerStateChange`` rather
+#: than the observed-state ValueMap, and it carries its own
+#: ``TODO: This list of contants needs to be scrubbed`` with most entries marked
+#: ``?``. DMTF plus MeshCmd agreeing is the stronger evidence, so the names here
+#: follow them.
+#:
+#: The normalizations, not the names, are what behaviour depends on, and 5 and 9
+#: are the weak spot: both are *power cycles* under the DMTF reading, so both end
+#: powered on, yet this table normalizes 5 to ``on`` and 9 to ``off``. That
+#: asymmetry is inherited, not reasoned, and it is left alone deliberately --
+#: changing it is a behaviour change and nothing has measured it. In practice
+#: neither value should ever be observed here: 5, 9, 10 and 11 are transitional
+#: or action-only codes, and firmware reports a settled state. If a real endpoint
+#: is ever seen returning 5 or 9 from
+#: ``CIM_AssociatedPowerManagementService.PowerState``, that observation -- not a
+#: table -- is what should decide how it normalizes.
 _POWER_STATE_TABLE: dict[int, str] = {
     2: "on",  # On
     3: "sleep",  # Sleep - Light
     4: "sleep",  # Sleep - Deep
-    5: "on",  # Power Cycle (soft) -- ends powered on
+    5: "on",  # Power Cycle (Off-Soft) -- a cycle, so it ends powered on
     6: "off",  # Off - Hard
     7: "hibernate",  # Hibernate
     8: "off",  # Off - Soft
-    9: "off",  # Power Cycle (off-hard) -- ends powered off
+    9: "off",  # Power Cycle (Off-Hard) -- see the note above on 5 vs 9
     13: "off",  # Off - Hard Graceful
 }
 

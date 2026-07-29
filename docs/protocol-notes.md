@@ -129,12 +129,34 @@ Method invocation body pattern:
 | 2 | On | `on` |
 | 3 | Sleep - Light | `sleep` |
 | 4 | Sleep - Deep | `sleep` |
-| 5 | Power Cycle (soft) | `on` |
+| 5 | Power Cycle (Off-Soft) | `on` |
 | 6 | Off - Hard | `off` |
 | 7 | Hibernate | `hibernate` |
 | 8 | Off - Soft | `off` |
-| 9 | Power Cycle (off-hard) | `off` |
+| 9 | Power Cycle (Off-Hard) | `off` |
 | 13 | Off - Hard Graceful | `off` |
+
+Two notes on that table, because it has a soft spot and a decoy.
+
+**The decoy.** go-wsman-messages' `pkg/wsman/cim/power/decoder.go` names these values
+differently — `5` is `PowerCycleOffHard`, `6` `PowerCycleOffSoft`, `8` `PowerOffHard`,
+`9` `PowerOffSoft` — transposing the soft/hard qualifier within each pair relative to
+the names above. That file is **not** the authority for this property: it lists *action*
+codes to send to `RequestPowerStateChange`, not the observed-state ValueMap, and it
+carries a `TODO: This list of contants needs to be scrubbed` with most entries marked
+`?`. The names above are the DMTF CIM ValueMap for
+`CIM_AssociatedPowerManagementService.PowerState`, which MeshCmd's own
+`DMTFPowerStates` array (`agents/meshcmd.js`) reproduces identically. Two independent
+sources agreeing beats one self-flagged draft, so the table stands as written — but the
+divergence is recorded here so nobody "fixes" it in the wrong direction.
+
+**The soft spot.** Values `5` and `9` are both *power cycles*, so both end powered
+**on**, yet this table normalizes `5` to `on` and `9` to `off`. That asymmetry is
+inherited rather than reasoned, and it is deliberately left alone: changing it is a
+behaviour change and nothing has measured it. It should also never matter in practice —
+`5`, `9`, `10` and `11` are transitional or action-only codes and firmware reports a
+settled state. If a real endpoint is ever observed returning `5` or `9` here, that
+observation, not a table, is what should decide how it normalizes.
 
 **Change state** — `CIM_PowerManagementService.RequestPowerStateChange`.
 Input params: `PowerState`, plus a `ManagedElement` EPR pointing at
@@ -312,11 +334,17 @@ subsection are derived from `parmstro`'s hardware research notes
 `development/research/AMT_10_CAPABILITIES.md`, GPL-3.0-or-later), which record property
 values dumped from a real Intel NUC5i5MYBE running AMT 10.0.56 build 3002. **Protocol
 facts were taken from those notes; no code was taken from that collection**, and their
-module code and user-facing prose are explicitly *not* treated as reliable here — three
-of their ten modules report success while doing nothing, their power constants map
-`reset` to CIM code 11 (Diagnostic Interrupt / NMI) rather than 10 (Master Bus Reset),
+module code and user-facing prose are explicitly *not* treated as reliable here — their
+`amt_tls_config` wraps both mutation paths in `except Exception` and falls through to
+`exit_json()`, so any failure exits `ok` (and its certificate upload is a self-described
+placeholder that discards the private key); their
+`amt_system_settings_refactored.py` returns `changed: False` in check mode before
+computing anything, so `--check` can never report drift; their power constants map
+`reset` to CIM code 11 (Diagnostic Interrupt / NMI) rather than 10 (Master Bus Reset);
 and their `LinkPolicy` value table was wrong in three of its five entries (see the
-correction under `AMT_EthernetPortSettings` below). See `NOTICE`.
+correction under `AMT_EthernetPortSettings` below) — **a table this collection also
+shipped, in 0.2.0 and 0.3.0, before fixing it in 0.3.1.** See `NOTICE` and
+`docs/capability-matrix.md`.
 
 The **`LinkPolicy` value table is the exception**: it is now taken from
 `device-management-toolkit/go-wsman-messages`, a vendor reference implementation, not
@@ -447,7 +475,7 @@ itself does (its decoder returns the string `"Value not found in map"`).
 > `224` (Sx DC) was missing entirely. This collection shipped that table in 0.2.0 and
 > 0.3.0, and because `wake_on_lan_capable` was derived from `16`, the boolean tested "is
 > this endpoint reachable while on battery?" and returned `false` on every mains-powered
-> desktop — the inverse of the truth. See `CHANGELOG` for 0.4.0.
+> desktop — the inverse of the truth. See `CHANGELOG` for 0.3.1.
 >
 > **This is the second wrong table from the same source.** The first is noted above:
 > their power constants map `reset` to CIM code 11 (Diagnostic Interrupt / NMI) rather

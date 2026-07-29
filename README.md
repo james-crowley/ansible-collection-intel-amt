@@ -53,19 +53,35 @@ Intel AMT is genuinely two protocols wearing one trench coat:
 | Redirection (SOL, IDE-R) | Raw TCP(+TLS), binary framing | 16994 / 16995 | Stateful, long-lived, bidirectional |
 
 Existing Ansible options cover only the first. Serving boot media requires a real
-IDE-R client that acts as a SCSI target for the remote BIOS — which is why most
-automation shells out to MeshCmd (Node.js) for that step. This collection
-implements the redirection plane natively in Python, so the whole workflow is one
-toolchain with typed arguments, check mode, and classified errors.
+IDE-R client that acts as a SCSI target for the remote BIOS, and Ansible has no
+such thing — so automation that needs it shells out to an external binary, usually
+MeshCmd (Node.js). This collection implements the redirection plane natively in
+Python, so the whole workflow is one toolchain with typed arguments, check mode,
+and classified errors.
+
+**Precisely what is new here, and what is not.** Standalone IDE-R clients do
+exist: `amtider`, part of [`kraxel/amtterm`](https://github.com/kraxel/amtterm)
+(C, GPL-2.0-or-later), is one, and has shipped in that source tree since amtterm
+1.7. This collection is **not** the first or only non-Node.js IDE-R
+implementation and does not claim to be. What it is, as far as we know: the first
+**pure-Python** IDE-R implementation, and the first callable directly from an
+Ansible module with **no Node runtime and no C toolchain on the controller** —
+`pip install requests` and nothing else. Availability of the alternatives is
+genuinely uneven, which is part of the motivation: Debian and Ubuntu still package
+amtterm **1.4**, which predates `amtider` and does not contain it, so on a stock
+apt-based controller there is no packaged IDE-R client to shell out to at all.
+`amtider` was not consulted while writing this implementation; see
+[NOTICE](NOTICE) for the full prior-art accounting.
 
 See [`docs/protocol-notes.md`](docs/protocol-notes.md) for the full wire-format
 reference this implementation is built against.
 
 ## Project status
 
-**Pre-release, and now hardware-qualified on two machines.** All five modules and
-the bare-metal install role have been exercised end to end against real Intel AMT
-firmware, on a self-hosted CircleCI runner inside the lab network, through all
+**Pre-release, and hardware-qualified on two machines — for five of the seven
+modules.** `amt_info`, `amt_power`, `amt_boot`, `amt_redirection` and `amt_media`,
+plus the bare-metal install role, have been exercised end to end against real Intel
+AMT firmware, on a self-hosted CircleCI runner inside the lab network, through all
 **eight** qualification stages: read-only facts, an identity cross-check,
 check-mode plans, attended power on/off, IDE-R media attach and boot, a writable
 image, native one-time PXE, and an idempotent re-probe. (Stage 2 is the
@@ -82,6 +98,15 @@ v0.2.0 facts no longer rest on one generation. They now rest on three generation
 worth of evidence — named from a third party's AMT 10.0.56 dump, read back
 populated here on 16.1.30 and 19.0.5.
 
+**`amt_event_log` and `amt_log_clear` are the two exceptions, and they are not
+hardware-qualified at all.** Neither has ever touched real AMT firmware — no
+qualification stage covers either one. They are unit- and mock-tested only, with
+their wire format taken from a captured firmware fixture and MeshCentral rather
+than from an endpoint this collection has read. See
+[`docs/amt_event_log.md`](docs/amt_event_log.md),
+[`docs/amt_log_clear.md`](docs/amt_log_clear.md), and Tier 4 of
+[`docs/capability-matrix.md`](docs/capability-matrix.md).
+
 That qualification found six real defects that the unit and mock-integration
 tiers could not have found, including one that made IDE-R and BIOS boot
 impossible against real firmware. See [`docs/capability-matrix.md`](docs/capability-matrix.md)
@@ -97,7 +122,7 @@ stage powers a machine off, confirms it, and then tries to reach it. See
 [`docs/capability-matrix.md`](docs/capability-matrix.md) Tier 4. **If you used
 `wake_on_lan_capable` in 0.2.0 or 0.3.0, re-read it** — the value table behind it was
 wrong and the boolean was inverted on mains-powered hardware; see the `CHANGELOG` for
-0.4.0.
+0.3.1.
 
 ## Requirements
 
@@ -380,7 +405,8 @@ one-time account/secret steps a maintainer needs.
 
 - [`docs/amt_info.md`](docs/amt_info.md), [`docs/amt_power.md`](docs/amt_power.md),
   [`docs/amt_boot.md`](docs/amt_boot.md), [`docs/amt_redirection.md`](docs/amt_redirection.md),
-  [`docs/amt_media.md`](docs/amt_media.md) — per-module reference: options, return
+  [`docs/amt_media.md`](docs/amt_media.md), [`docs/amt_event_log.md`](docs/amt_event_log.md),
+  [`docs/amt_log_clear.md`](docs/amt_log_clear.md) — per-module reference: options, return
   values, examples, errors, and limitations.
 - [`docs/capability-matrix.md`](docs/capability-matrix.md) — exactly what is verified
   against real firmware evidence, what is only mock-tested, and what open risks are
