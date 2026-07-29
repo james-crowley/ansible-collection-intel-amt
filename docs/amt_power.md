@@ -86,17 +86,25 @@ was the template the other four modules were changed to match (see
   register: power
 ```
 
+A reset is the fan-out hazard in this collection, and `serial` is a **play**
+keyword — a task carrying it fails with "conflicting action statements". Constrain
+it at the play level:
+
 ```yaml
 - name: Master-bus-reset into a freshly attached installer image
-  james_crowley.intel_amt.amt_power:
-    host: "{{ amt_host }}"
-    username: "{{ amt_username }}"
-    password: "{{ amt_password }}"
-    tls_fingerprint: "{{ amt_tls_fingerprint }}"
-    state: reset
-  delegate_to: localhost
-  no_log: true
-  serial: 1
+  hosts: "{{ target }}"
+  serial: 1                     # play-level; never fan out a reset
+  gather_facts: false
+  tasks:
+    - name: Issue the reset
+      james_crowley.intel_amt.amt_power:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+        state: reset
+      delegate_to: localhost
+      no_log: true
 ```
 
 ## Idempotence and check mode
@@ -140,7 +148,8 @@ turn a successful request into a reported failure — see
   `state` choices — only `on`, `off`, `reboot`, `reset`, `cycle`, `query` are reachable
   from the module.
 - `delegate_to: localhost` does not protect against inventory fan-out: a play over
-  ten hosts still issues ten resets. Pair mutating tasks with `serial: 1`.
+  ten hosts still issues ten resets. Constrain the **play** with `serial: 1` and an
+  explicit single-target selection — `serial` cannot be set on a task.
 - Hardware-unverified — see the [Capability matrix](capability-matrix.md). The action
   codes are "as used by MeshCmd, verified against firmware" per
   `docs/protocol-notes.md` §2.4, but this collection's own implementation of them has

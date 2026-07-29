@@ -102,18 +102,26 @@ is always `null` on the successful-exit path documented above.
 
 ## Examples
 
+`serial` is a **play** keyword, not a task keyword: putting it on a task makes
+Ansible fail with "conflicting action statements". Arming a boot is a fan-out
+hazard, so the example below shows the play wrapper that actually constrains it.
+
 ```yaml
 - name: Arm a one-time PXE boot for an unattended install
-  james_crowley.intel_amt.amt_boot:
-    host: 10.0.0.5
-    username: admin
-    password: "{{ vaulted_amt_password }}"
-    tls_fingerprint: "{{ vaulted_amt_tls_fingerprint }}"
-    device: pxe
-    action_token: "{{ lookup('ansible.builtin.password', '/dev/null length=32') }}"
-  delegate_to: localhost
-  no_log: true
-  serial: 1
+  hosts: "{{ target }}"
+  serial: 1                     # play-level; never fan out an arm-then-reset
+  gather_facts: false
+  tasks:
+    - name: Arm the one-time PXE boot
+      james_crowley.intel_amt.amt_boot:
+        host: 10.0.0.5
+        username: admin
+        password: "{{ vaulted_amt_password }}"
+        tls_fingerprint: "{{ vaulted_amt_tls_fingerprint }}"
+        device: pxe
+        action_token: "{{ lookup('ansible.builtin.password', '/dev/null length=32') }}"
+      delegate_to: localhost
+      no_log: true
 ```
 
 ```yaml
