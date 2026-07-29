@@ -20,9 +20,11 @@ implying a higher tier than it earns:
 3. **Verified against real firmware** — on two lab endpoints via a self-hosted
    CircleCI runner: all eight qualification stages on machine 1 (Intel AMT
    **16.1.30**, 2026-07-28) and all eight on machine 2 (Intel AMT **19.0.5**,
-   2026-07-29). The two runs did **not** cover identical ground — `amt_info`'s
-   network and system-state facts came back on 19.0.5 only — so coverage is still
-   recorded per firmware generation below rather than merged into one claim.
+   2026-07-29). The read-only stages were then re-run against machine 1 on
+   2026-07-29, which closed the last difference in coverage between the two runs:
+   `amt_info`'s network and system-state facts have now come back populated on
+   **both** generations, so this tier no longer has to state that particular
+   claim per generation.
 4. **Still unproven** — a short, specific list, kept honest.
 
 The collection is no longer "hardware-unverified". Hardware qualification found
@@ -63,7 +65,7 @@ Tier 3.
 
 This is the bulk of the collection's verification effort:
 
-- **531 unit tests** (measured via `pytest --collect-only` against the staged
+- **761 unit tests** (measured via `pytest --collect-only` against the staged
   collection tree; the number will drift as tests are added, so treat this as a point
   measurement, not a promise) across `tests/unit/plugins/module_utils/` and
   `tests/unit/plugins/modules/`, covering error classification/redaction, TLS trust
@@ -89,8 +91,8 @@ This is the bulk of the collection's verification effort:
 `ddns_update_enabled`) used to be this document's headline Tier 2 entry, on the
 argument that no lab machine had ever returned any of them. **That argument expired
 on 2026-07-29**, when every one of them came back populated from real AMT 19.0.5
-firmware — the evidence, and the part that did *not* move (16.1.30 is still
-unverified for these fields), are recorded in Tier 3 below.
+firmware and then, on a re-run of the read-only stages the same day, from real AMT
+16.1.30 firmware as well. Both reads are recorded in Tier 3 below.
 
 What stays Tier 2 is the part hardware did not and cannot establish, and it is what
 made the hardware result legible the moment it arrived:
@@ -101,8 +103,11 @@ made the hardware result legible the moment it arrived:
   and `OperationalStatus` value, and graceful `null` degradation when any class
   faults — plus an end-to-end pass of `amt_info` against the mock WS-Man server,
   which serves the MAC dash-separated and requires the exact `Get` selector for
-  `AMT_EthernetPortSettings` because that is what real AMT 10 does. One live
-  endpoint exercises exactly one of those paths; the suite exercises all of them.
+  `AMT_EthernetPortSettings` because that is what real AMT 10 does. Two live
+  endpoints exercise whichever paths those two happen to take; the suite exercises
+  all of them. Both lab machines returned `link_policy` as a populated integer
+  array, for instance, so neither of them exercises the absent or empty cases the
+  suite covers.
 - **Where the property names came from**, which is not Tier 1. Tier 1 means verified
   against an authoritative source: a vendor reference implementation or a real
   firmware response fixture. These rest on a third party's hardware dump of *one*
@@ -113,21 +118,24 @@ made the hardware result legible the moment it arrived:
   collection has never touched, and the surrounding project's *code* is demonstrably
   unreliable (three of its ten modules report success while doing nothing; its power
   constants map `reset` to CIM code 11, Diagnostic Interrupt/NMI, rather than 10,
-  Master Bus Reset). Property names from those notes were used; no code was. The
-  19.0.5 read is what confirmed those names resolve on firmware this collection can
-  actually reach.
+  Master Bus Reset). Property names from those notes were used; no code was. What
+  confirmed those names resolve on firmware this collection can actually reach is
+  the pair of 2026-07-29 reads, on 19.0.5 and on 16.1.30. So these field names now
+  rest on **three firmware generations' worth of evidence**: named from a third
+  party's 10.0.56 dump, and read back populated by this collection on 16.1.30 and
+  19.0.5.
 - **The one Tier 1 row here** is the DMTF decoding itself: `EnabledState` and
   `OperationalStatus` come from the DMTF CIM schema, not from anyone's dump. The
   source project's implementation decodes only `OperationalStatus` values 0 and 2 and
   omits `EnabledState` 4 (shutting down) entirely; the full standard tables are
   implemented here instead.
-- **`bios_version` was the weakest-evidenced field**, and only partly still is.
+- **`bios_version` was the weakest-evidenced field**, and is much less so now.
   `CIM_BIOSElement` is listed as working in `parmstro`'s notes but no value was ever
   dumped, and the implementation they claim it from swallows failure to `None` — so
   their "pass" was never evidence either way. It is read through the optional path
-  with an `Enumerate` fallback. 19.0.5 did return a value; 16.1.30 has never been
-  asked, and `null` remains a legitimate outcome on firmware that does not expose the
-  class.
+  with an `Enumerate` fallback. Both lab generations have now returned a value.
+  `null` remains a legitimate outcome on firmware that does not expose the class,
+  and the optional path stays in place for exactly that reason.
 
 What mock testing genuinely buys: confidence that this collection's own code
 correctly implements *its own understanding* of the protocol, consistently, across
@@ -143,23 +151,31 @@ about this.
 
 Two machines have now each completed **all eight** stages, on the lab's self-hosted
 CircleCI runner (`crowley/amt-runner`), with TLS pinned to each endpoint's own
-reviewed leaf certificate. They ran on different dates and in different runner
-environments, and both facts are recorded rather than averaged:
+reviewed leaf certificate. Three runs contributed, on different dates and in
+different runner environments, and each is recorded as itself rather than averaged
+into one:
 
 - **`amt-lab-01` (machine 1), AMT 16.1.30** — all eight stages, 2026-07-28, on
   Python 3.10 with ansible-core 2.17.
 - **`amt-lab-02` (machine 2), AMT 19.0.5** — all eight stages, 2026-07-29, on
   Python 3.12.13 with ansible-core 2.18.18. That run was deliberately limited to
   machine 2 (`hardware-limit=amt-lab-02`); machine 1 was not touched by it.
+- **`amt-lab-01` (machine 1) again, read-only stages only** — stages 1, 3 and 8,
+  2026-07-29, limited to machine 1 (`hardware-limit=amt-lab-01`), on the
+  ansible-core 2.18.18 lab virtualenv every hardware job now builds. Nothing was
+  mutated: this run existed to read machine 1 with the v0.2.0 fact code, which its
+  2026-07-28 evidence predated. Machine 1's mutating result stands on the
+  2026-07-28 run and was not re-established here.
 
 So power control, IDE-R media, the writable-image path and native one-time PXE are
-verified on **two machines across two firmware generations**, not one. What is still
-generation-specific is `amt_info`'s network and system-state facts, which only
-19.0.5 has returned — see the subsection at the end of this tier.
+verified on **two machines across two firmware generations**, not one — and
+`amt_info`'s network and system-state facts are now verified on both of those
+generations too, which is what the third run added. See the subsection at the end
+of this tier.
 
 | Stage | Machines | What real firmware confirmed |
 |---|---|---|
-| 1 read-only | 1 and 2 | `amt_info` over pinned TLS with HTTP Digest. Firmware version from `CIM_SoftwareIdentity`, all four capability flags, power state `2 -> on`, the platform UUID, and `AMT_RedirectionService.EnabledState` decoded on two different values (`32769` = IDER only on machine 1; `32771` = SOL+IDER on machine 2) |
+| 1 read-only | 1 and 2 | `amt_info` over pinned TLS with HTTP Digest. Firmware version from `CIM_SoftwareIdentity`, all four capability flags, power state `2 -> on`, the platform UUID, and `AMT_RedirectionService.EnabledState` decoded on two different values (`32769` = IDER only on machine 1; `32771` = SOL+IDER on machine 2). Machine 1 was read again on 2026-07-29, which is where its network and system-state facts below come from |
 | 2 identity cross-check | 1 and 2 | Each machine returned a **distinct** platform UUID, and both rendered with UUID version nibble `1` after the SMBIOS little-endian field reversal — independent corroboration of the byte-order fix on a second, unrelated GUID. This stage has **no playbook of its own**: it is the review step inside `qualify_readonly.yml`. On 2026-07-29 its comparison **executed for the first time** against a recorded `amt_expected_uuid` for machine 2 and matched; see the note below the table for exactly what a match does and does not prove |
 | 3 check mode | 1 and 2 | power and boot plans computed and **nothing mutated** |
 | 4 power | 1 and 2 | convergent `on` reported `changed: false` when already on; `off` reported `changed: true`; initial state restored afterwards. Reproduced on machine 2 with the same outcomes |
@@ -186,45 +202,93 @@ Notably the same firmware **does** enforce its SOAP schema on `ChangeBootOrder` 
 it rejected an empty `<Source/>` with HTTP 400 — which is what makes the stage-7
 EPR result meaningful rather than merely permissive.
 
-### `amt_info`'s network and system-state facts — Tier 3 on 19.0.5, still Tier 2 on 16.1.30
+### `amt_info`'s network and system-state facts — Tier 3 on both lab generations
 
 The v0.2.0 facts (`amt.network`, `amt.system_state`, `amt.bios_version` and the six
 extra `AMT_GeneralSettings` fields) were argued in Tier 2 above on the grounds that no
-lab machine had ever returned them. Machine 2's stage-1 read on 2026-07-29 returned
-**every one of them, populated — nothing `null`, no class faulted**:
+lab machine had ever returned them. Both lab machines have now returned **every one of
+them, populated — nothing `null`, no class faulted**: machine 2 on its stage-1 read of
+2026-07-29, and machine 1 on the read-only re-run the same day.
 
-| Fact | What 19.0.5 returned |
-|---|---|
-| `version` | `"19.0.5"` |
-| `network.ip_address`, `network.default_gateway` | populated |
-| `network.dhcp_enabled` | `false` |
-| `network.link_is_up` | `true` |
-| `network.link_policy` | populated array of integers, first element `1` |
-| `network.ip_sync_enabled` | `false` |
-| `system_state.element_name` | `"Managed System"` |
-| `system_state.enabled_state` / `enabled_state_text` | `2` / `"enabled"` |
-| `system_state.operational_status` / `operational_status_text` | `[0]` / `["unknown"]` |
-| `bios_version`, `domain_name` | populated |
-| `idle_wake_timeout` | `65535` |
-| `ping_response_enabled`, `rmcp_ping_response_enabled`, `network_interface_enabled` | `true` |
-| `ddns_update_enabled` | `false` |
+| Fact | 16.1.30 (machine 1) | 19.0.5 (machine 2) |
+|---|---|---|
+| `version` | `"16.1.30"` | `"19.0.5"` |
+| `network.ip_address`, `subnet_mask`, `default_gateway` | populated | populated |
+| `network.primary_dns`, `secondary_dns` | populated | populated |
+| `network.mac_address`, `mac_address_raw` | populated | populated |
+| `network.dhcp_enabled` | `false` | `false` |
+| `network.link_is_up` | `true` | `true` |
+| `network.link_policy` | `[1, 14]` | `[1, 14]` |
+| `network.link_policy_names` | `["s0_ac", "s0_dc"]` | `["s0_ac", "s0_dc"]` |
+| `network.wake_on_lan_capable` | `false` | `false` |
+| `network.ip_sync_enabled` | `false` | `false` |
+| `system_state.element_name` | `"Managed System"` | `"Managed System"` |
+| `system_state.enabled_state` / `enabled_state_text` | `2` / `"enabled"` | `2` / `"enabled"` |
+| `system_state.operational_status` / `operational_status_text` | `[0]` / `["unknown"]` | `[0]` / `["unknown"]` |
+| `system_state.requested_state` | `12` | populated |
+| `bios_version`, `domain_name` | populated | populated |
+| `idle_wake_timeout` | `65535` | `65535` |
+| `ping_response_enabled`, `rmcp_ping_response_enabled`, `network_interface_enabled` | `true` | `true` |
+| `ddns_update_enabled` | `false` | `false` |
 
 Real values are deliberately not transcribed here: the evidence artifacts carry live
-lab addressing, and this repository holds no lab identifiers.
+lab addressing, and this repository holds no lab identifiers. "populated" means the
+field came back non-`null` and its class did not fault, which is the whole of what is
+being claimed for it.
 
-**The remaining limit, stated per generation.** These fields are hardware-verified on
-**AMT 19.0.5 only**. They are **still unverified on 16.1.30**: machine 1 has not been
-re-run since v0.2.0 added them, so its recorded evidence predates the code that reads
-them. Do not read the two generations as jointly covered.
+`link_policy_names` and `requested_state` are the two fields the machine-1 read added
+to the itemised record — both confirmed populated, `requested_state` deliberately left
+undecoded by the module. Where a cell above reads "populated" for 19.0.5 rather than
+naming a value, that value was not itemised in machine 2's record; it was covered by
+that run's "nothing `null`, no class faulted" result, and is reported here at exactly
+that strength.
 
-Two protocol details are now hardware-confirmed rather than inferred:
+**These fields are now hardware-verified on both lab generations**, so the per-
+generation caveat that used to live here is gone. Combined with where the property
+names came from (Tier 2 above), they rest on evidence spanning three firmware
+generations: named from a third party's AMT **10.0.56** dump, read back populated by
+this collection on **16.1.30** and **19.0.5**. Every generation outside those three
+remains untouched.
+
+Two protocol details are hardware-confirmed rather than inferred, and on both
+generations rather than one:
 
 - **`operational_status` really is an array** (`uint16[]`), not a scalar — live
-  firmware returned `[0]`. A parser that read only element 0 would have worked here,
-  but the array shape itself is no longer an assumption.
-- **`idle_wake_timeout` came back `65535`**, the maximum value the field can hold.
-  That is reported, not interpreted: nothing available establishes what this firmware
-  means by that value, so no behaviour should be inferred from it.
+  firmware returned `[0]` on both machines. A parser that read only element 0 would
+  have worked here, but the array shape itself is no longer an assumption.
+- **`idle_wake_timeout` came back `65535`** on both machines, the maximum value the
+  field can hold. That is reported, not interpreted: nothing available establishes
+  what this firmware means by that value, so no behaviour should be inferred from it.
+  Two machines agreeing on the maximum is worth noting precisely because it makes an
+  unconfigured default the likelier reading than a deliberate setting — but that is a
+  guess, and it is not being recorded as a finding.
+
+### Both machines report `wake_on_lan_capable = false`
+
+The single most operationally useful thing the two reads agree on. Both machines
+returned `link_policy` `[1, 14]`, which decodes to `s0_ac` and `s0_dc` — S0, meaning
+*while the machine is powered on*, on AC power and on battery. The value that would
+mean otherwise, **`16` ("network link always on"), is absent on both**, so
+`wake_on_lan_capable` is `false` on both.
+
+Read literally, that policy says AMT keeps its network link up only while the host is
+already powered on. If that is what it means in practice, then `amt_power state=on`
+against a genuinely powered-off endpoint would never reach the management plane at
+all, and the failure would surface as `error_class: connection` — indistinguishable
+from a wrong address, a dead switch port or a firewall rule. That is exactly the
+diagnostic value [`amt_info`'s documentation](amt_info.md) claims for this field, and
+it is now measured on real firmware rather than hypothetical.
+
+**What this does not establish.** Nothing in the evidence shows whether these machines
+can or cannot be woken from off by AMT. No deliberate power-off-then-power-on test has
+been run against either of them. Machine 1's stage 4 did pass on 2026-07-28 including
+an `off` transition and a restore, which is hard to square with an endpoint that is
+unreachable while off; the most plausible reconciliation is that the machine was
+already off when the stage began, making both transitions no-ops, but that is a
+reading of the result and not something the result states. So: the policy value that
+would *guarantee* link-up-while-off is absent on both machines, that absence is the
+first thing to suspect if a remote power-on ever fails, and whether wake-from-off
+actually works here is untested — see Tier 4.
 
 ## Tier 4: Still unproven
 
@@ -253,16 +317,24 @@ A short list, deliberately.
   path for it, so stage 7 asserts `AMT_BootSettingData` stability instead. The
   headline claim that a one-time boot "does not persist" is therefore
   *inferred*, not directly measured.
-- **`amt_info`'s network and system-state facts on 16.1.30.** Verified on 19.0.5
-  (see Tier 3), never read from machine 1: it has not been re-run since v0.2.0
-  added those fields. This is the one place where the two lab generations now have
-  materially different coverage.
+- **Whether either endpoint answers WS-Man while powered off.** Both machines
+  report `wake_on_lan_capable = false` and neither carries `link_policy` value `16`
+  (see the subsection at the end of Tier 3), so on a literal reading of the policy
+  neither keeps its link up once the host powers down — which would make
+  `amt_power state=on` unreachable against a genuinely off machine. **That has not
+  been tested.** No stage powers a machine off, confirms it is off, and then tries
+  to reach it; stage 4's `off` and restore on machine 1 are consistent with a
+  machine that was already off, so they do not settle it either. The specific
+  missing test is a deliberate power-off, an independent confirmation that the
+  machine is off, and then a WS-Man read — until that runs, this document claims
+  neither that wake-from-off works nor that it is broken.
 - **Any firmware generation other than 16.1.30 and 19.0.5.** Both lab generations
-  have now been mutated through stages 4 to 7, so "mutating anything at all" is no
-  longer a single-generation result. Every generation outside those two is still
-  untouched, including the Small Business Mode / no-TLS path, which is inferred from
-  `parmstro`'s reporting rather than observed here. Two generations is repeatability;
-  it is not a compatibility guarantee.
+  have now been mutated through stages 4 to 7 and read with the full v0.2.0 fact
+  set, so neither "mutating anything at all" nor "reading the network and
+  system-state facts" is a single-generation result any more. Every generation
+  outside those two is still untouched, including the Small Business Mode / no-TLS
+  path, which is inferred from `parmstro`'s reporting rather than observed here. Two
+  generations is repeatability; it is not a compatibility guarantee.
 
 ## Known open risks
 
@@ -375,8 +447,8 @@ generations in Tier 3 above.
 | 10.x, Enterprise/other modes | Yes | Present | Present | Present | **Inferred** — not tested |
 | 11.x+ Enterprise | Yes | Present | Present | Present | **Inferred** — not tested |
 | 12.x+ | Yes, enhanced | Present | Present | Present | **Inferred** — not tested |
-| **16.1.30** (machine 1) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages** (2026-07-28). `amt_info`'s network/system-state facts have never been read on this generation |
-| **19.0.5** (machine 2) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages** (2026-07-29). Capability flags were read live and all four came back `true`; the network/system-state facts came back fully populated here |
+| **16.1.30** (machine 1) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages** (2026-07-28). `amt_info`'s network/system-state facts came back fully populated on a read-only re-run (2026-07-29) |
+| **19.0.5** (machine 2) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages** (2026-07-29). Capability flags were read live and all four came back `true`; the network/system-state facts came back fully populated here too |
 
 "Present" in the IDE-R/SOL/PXE columns means "AMT's published feature set for this
 generation includes it," per `docs/protocol-notes.md` §1.1 and Intel's own
@@ -399,9 +471,10 @@ idempotent re-probe (8) — one machine all the way through first, a second mach
 afterwards to prove repeatability, never both cut over to a new stage at once.
 
 All eight stages have now cleared that bar on two machines of different firmware
-generations, machine 1 first and machine 2 afterwards, never both cut over at once.
-What Tier 4 still lists is therefore no longer "a second machine" — it is the
-specific things no green run on either machine measures (a real SCSI write, a PXE
-exchange, the internal one-shot role bit, the sleep/hibernate actions), plus
-`amt_info`'s network and system-state facts on 16.1.30, which needs a re-run of
-machine 1 rather than a new machine.
+generations, machine 1 first and machine 2 afterwards, never both cut over at once,
+and the read-only stages have since been re-run against machine 1 so that both
+generations have been read with the same fact code. What Tier 4 still lists is
+therefore neither "a second machine" nor "a re-run of the first" — it is the
+specific things no green run on either machine measures: a real SCSI write, a PXE
+exchange, the internal one-shot role bit, the sleep/hibernate actions, and whether
+either endpoint answers WS-Man at all while powered off.
