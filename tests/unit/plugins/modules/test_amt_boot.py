@@ -112,9 +112,27 @@ class TestAmtBootModule:
         for moved_field in ("schema", "action", "endpoint", "previous", "desired", "observed", "tls_peer_fingerprint"):
             assert moved_field not in result, f"{moved_field!r} must not be spread at the top level; it belongs under operation"
         operation = result["operation"]
-        assert operation["previous"] is not None
-        assert operation["desired"] is not None
-        assert operation["observed"] is not None
+
+        # `previous`/`desired`/`observed` carry the actual read-modify-write, not merely
+        # something non-null: `previous` is the AMT_BootSettingData that was Get, `desired` is
+        # byte-for-byte the instance that was Put, and `observed` is the post-Put re-read. A
+        # receipt that reconstructed `desired` instead of reporting the Put body would let the
+        # receipt and the wire disagree, which is the whole thing the receipt exists to prevent.
+        read_instance = {"UseIDER": "false", "UseSOL": "false", "InstanceID": "Intel(r) AMT: Boot Configuration Data"}
+        assert operation["previous"] == read_instance
+        assert operation["observed"] == read_instance
+
+        put_resource, put_body = fake_client.put.call_args.args
+        assert put_resource == "AMT_BootSettingData"
+        assert operation["desired"] == put_body
+        # ...and that Put body is the armed shape for device=pxe, not the instance read back:
+        # a native boot source, so IDE-R off, no BIOS setup entry, nothing reflashed.
+        assert put_body["UseIDER"] is False
+        assert put_body["UseSOL"] is False
+        assert put_body["BIOSSetup"] is False
+        assert put_body["IDERBootDevice"] == 0
+        assert put_body["ReflashBIOS"] is False
+        assert put_body["ConfigurationDataReset"] is False
         assert operation["error_class"] is None
 
     def test_check_mode_performs_no_mutation(self):
@@ -187,13 +205,9 @@ class TestAmtBootModule:
         with pytest.raises((AnsibleFailJson, SystemExit)):
             amt_boot.main()
 
-    def test_credential_never_appears_in_the_result(self):
-        _set_module_args(BASE_ARGS)
-        fake_client = _make_fake_client()
-        with patch(
-            "ansible_collections.james_crowley.intel_amt.plugins.modules.amt_boot.WsmanClient.from_connection_options",
-            return_value=fake_client,
-        ):
-            with pytest.raises(AnsibleExitJson) as excinfo:
-                amt_boot.main()
-        assert BASE_ARGS["password"] not in json.dumps(excinfo.value.kwargs)
+    # The credential-leak assertion that used to live here was deleted rather than repaired: with
+    # exit_json replaced by the bare raiser above, `password not in json.dumps(kwargs)` asserted
+    # against a dict that structurally cannot contain the credential, because the real exit_json
+    # is what injects invocation.module_args and what applies no_log censoring. That invariant is
+    # now tested against the real serializer, for this and every other module, in
+    # tests/unit/plugins/modules/test_credential_contract.py.

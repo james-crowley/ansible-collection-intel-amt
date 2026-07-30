@@ -367,19 +367,13 @@ class TestDetach:
         assert media_session.read_state(runtime_dir, session_id) is not None
 
 
-class TestCredentialSafety:
-    def test_credential_never_appears_in_the_result(self, runtime_dir, floppy_image):
-        _set_module_args(_attach_args(runtime_dir=runtime_dir, floppy_image=floppy_image))
-        with (
-            patch("ansible_collections.james_crowley.intel_amt.plugins.module_utils.media_session.spawn_session", return_value=1),
-            patch(
-                "ansible_collections.james_crowley.intel_amt.plugins.module_utils.media_session.wait_for_state",
-                return_value={"state": "attached", "pid": 1, "devices": {}},
-            ),
-        ):
-            with pytest.raises(AnsibleExitJson) as excinfo:
-                amt_media.main()
-        assert BASE_ARGS["password"] not in json.dumps(excinfo.value.kwargs)
+# The TestCredentialSafety class that used to sit here was deleted rather than repaired: with
+# exit_json replaced by the bare raiser in the autouse fixture above, `password not in
+# json.dumps(kwargs)` asserted against a dict that structurally cannot contain the credential,
+# since the real exit_json is what injects invocation.module_args and what applies no_log
+# censoring. That invariant is now tested against the real serializer -- including the case of a
+# credential echoed back inside the daemon's own error text -- in
+# tests/unit/plugins/modules/test_credential_contract.py.
 
 
 def _dead_pid() -> int:
@@ -505,60 +499,126 @@ class TestAttachFailureIsDecidedByDaemonLiveness:
     timing.
     """
 
-    def _run_attach(self, monkeypatch, runtime_dir, floppy_image, *, waited_state, pid_alive):
-        media_session._write_state_atomic(runtime_dir, "sess-x", waited_state) if waited_state else None
+    SESSION_ID = "sess-liveness"
+
+    def _attach(self, monkeypatch, runtime_dir, floppy_image, *, polled_state, pid_alive, written_after_poll=None):
+        """Drive one attach, supplying each of the three inputs to the decision separately.
+
+        The decision reads three things: the snapshot ``wait_for_state`` returned when it gave
+        up, whether the daemon pid is still alive, and what the state file says when the module
+        re-reads it afterwards. Those have to be independently controllable or the test cannot
+        show which one decided the outcome.
+
+        ``read_state`` is therefore left **real**, against the real ``runtime_dir``. An earlier
+        version of these tests stubbed it to return the same literal as ``wait_for_state``, which
+        collapsed two of the three inputs into one and made the module's "re-read once, the daemon
+        may have written its error since the last poll" step untestable -- it could not have
+        failed if that re-read were deleted. ``written_after_poll`` models exactly that race: the
+        stubbed ``wait_for_state`` writes it to the real state file just before returning the
+        older ``polled_state``.
+        """
         monkeypatch.setattr(media_session, "spawn_session", lambda *a, **k: 4242)
-        monkeypatch.setattr(media_session, "wait_for_state", lambda *a, **k: waited_state)
+
+        def _wait_for_state(*_args, **_kwargs):
+            if written_after_poll is not None:
+                media_session._write_state_atomic(runtime_dir, self.SESSION_ID, written_after_poll)
+            return polled_state
+
+        monkeypatch.setattr(media_session, "wait_for_state", _wait_for_state)
         monkeypatch.setattr(media_session, "is_pid_alive", lambda pid: pid_alive)
-        monkeypatch.setattr(media_session, "read_state", lambda *a, **k: waited_state)
-        _set_module_args(_attach_args(runtime_dir=runtime_dir, floppy_image=floppy_image))
+        _set_module_args(_attach_args(runtime_dir=runtime_dir, floppy_image=floppy_image, session_id=self.SESSION_ID))
+        return amt_media.main
+
+    def _fail(self, monkeypatch, runtime_dir, floppy_image, **kwargs) -> dict:
+        main = self._attach(monkeypatch, runtime_dir, floppy_image, **kwargs)
         with pytest.raises(AnsibleFailJson) as excinfo:
-            amt_media.main()
+            main()
+        return excinfo.value.kwargs
+
+    def _succeed(self, monkeypatch, runtime_dir, floppy_image, **kwargs) -> dict:
+        main = self._attach(monkeypatch, runtime_dir, floppy_image, **kwargs)
+        with pytest.raises(AnsibleExitJson) as excinfo:
+            main()
         return excinfo.value.kwargs
 
     def test_dead_daemon_with_no_error_state_fails(self, monkeypatch, runtime_dir, floppy_image):
         # The exact shape that used to slip through: an intermediate state, no
         # error recorded, and a daemon that is already gone.
-        result = self._run_attach(
+        result = self._fail(
             monkeypatch,
             runtime_dir,
             floppy_image,
-            waited_state={"session_id": "sess-x", "state": media_session.STATE_CONNECTING, "pid": 4242},
+            polled_state={"session_id": self.SESSION_ID, "state": media_session.STATE_CONNECTING, "pid": 4242},
             pid_alive=False,
         )
         assert "exited without reporting" in result["msg"]
-        assert result["error_class"]
+        # The last state actually seen is named in the message, so an operator can tell how far
+        # the attach got; and with no classification recorded anywhere the fallback is the
+        # generic class, not something more specific that would be a guess. Asserting the value
+        # rather than its truthiness is the point: `assert result["error_class"]` passed for any
+        # of the nine classes, including ones that would be actively misleading here.
+        assert "'connecting'" in result["msg"]
+        assert result["error_class"] == "protocol"
+        assert result["session_id"] == self.SESSION_ID
 
     def test_dead_daemon_with_a_late_error_reports_that_error(self, monkeypatch, runtime_dir, floppy_image):
-        result = self._run_attach(
+        # The poll timed out on an intermediate state carrying no error at all; the daemon then
+        # wrote its real failure and exited. The module must report the *later* state, which it
+        # can only do by re-reading -- nothing in `polled_state` mentions credentials.
+        result = self._fail(
             monkeypatch,
             runtime_dir,
             floppy_image,
-            waited_state={
-                "session_id": "sess-x",
+            polled_state={"session_id": self.SESSION_ID, "state": media_session.STATE_CONNECTING, "pid": 4242},
+            written_after_poll={
+                "session_id": self.SESSION_ID,
                 "state": media_session.STATE_ERROR,
                 "pid": 4242,
                 "error": "AMT rejected the credentials",
                 "error_class": "authentication",
+                "devices": {},
             },
             pid_alive=False,
         )
         assert "AMT rejected the credentials" in result["msg"]
         assert result["error_class"] == "authentication"
+        # The re-read state is what gets reported back, not the stale poll snapshot.
+        assert result["session_state"] == media_session.STATE_ERROR
 
     def test_absent_state_with_dead_daemon_fails(self, monkeypatch, runtime_dir, floppy_image):
-        result = self._run_attach(monkeypatch, runtime_dir, floppy_image, waited_state=None, pid_alive=False)
+        result = self._fail(monkeypatch, runtime_dir, floppy_image, polled_state=None, pid_alive=False)
         assert "exited without reporting" in result["msg"]
+        assert result["session_state"] == "unknown"
+        assert result["error_class"] == "protocol"
 
     def test_live_daemon_still_starting_is_not_failed(self, monkeypatch, runtime_dir, floppy_image):
-        # The legitimate slow-attach case must keep working: a daemon that is still
-        # running simply has not finished yet, and failing it would make this fix a
-        # different bug.
-        monkeypatch.setattr(media_session, "spawn_session", lambda *a, **k: 4242)
-        state = {"session_id": "sess-y", "state": media_session.STATE_ATTACHED, "pid": 4242, "devices": {}, "error": None, "tls_peer_fingerprint": None}
-        monkeypatch.setattr(media_session, "wait_for_state", lambda *a, **k: state)
-        monkeypatch.setattr(media_session, "is_pid_alive", lambda pid: True)
-        _set_module_args(_attach_args(runtime_dir=runtime_dir, floppy_image=floppy_image))
-        with pytest.raises(AnsibleExitJson) as excinfo:
-            amt_media.main()
-        assert excinfo.value.kwargs["session_state"] == media_session.STATE_ATTACHED
+        # The liveness axis, held against the *same* intermediate state that fails above: the
+        # only difference is that the daemon is still running, so this is the legitimate
+        # slow-attach case and failing it would make the #44 fix a different bug.
+        result = self._succeed(
+            monkeypatch,
+            runtime_dir,
+            floppy_image,
+            polled_state={"session_id": self.SESSION_ID, "state": media_session.STATE_CONNECTING, "pid": 4242, "devices": {}},
+            pid_alive=True,
+        )
+        assert result["session_state"] == media_session.STATE_CONNECTING
+        assert result["changed"] is True
+
+    def test_live_daemon_that_reported_attached_succeeds(self, monkeypatch, runtime_dir, floppy_image):
+        result = self._succeed(
+            monkeypatch,
+            runtime_dir,
+            floppy_image,
+            polled_state={
+                "session_id": self.SESSION_ID,
+                "state": media_session.STATE_ATTACHED,
+                "pid": 4242,
+                "devices": {},
+                "error": None,
+                "tls_peer_fingerprint": None,
+            },
+            pid_alive=True,
+        )
+        assert result["session_state"] == media_session.STATE_ATTACHED
+        assert result["operation"]["error_class"] is None
