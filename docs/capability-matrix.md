@@ -49,8 +49,8 @@ than in principle.
 |---|---|---|
 | `AMT_BootCapabilities` field names — `ForcePXEBoot`, `ForceHardDriveBoot`, `ForceCDorDVDBoot`, `BIOSSetup`, `IDER`, `SOL` | Real firmware response fixture, `device-management-toolkit/go-wsman-messages` (`pkg/wsman/wsmantesting/responses/amt/boot/capabilities/get.xml`), per `docs/protocol-notes.md` §2.5 | `plugins/module_utils/boot.py` (`_CAPABILITY_FIELD_BY_TARGET`), `plugins/module_utils/redirection_service.py` (`RedirectionCapabilities`) |
 | The firmware version lives in `CIM_SoftwareIdentity` (`InstanceID == "AMT"`, field `VersionString`), not on `AMT_GeneralSettings` or `AMT_SetupAndConfigurationService` | Class definitions in `device-management-toolkit/go-wsman-messages`; matches how MeshCmd (`agents/meshcmd.js`) reads it | `plugins/module_utils/client.py` (`AmtClient._get_amt_version`) |
-| CIM power-state table (2=On, 3/4=Sleep, 6/8/9/13=Off, 7=Hibernate) and `RequestPowerStateChange` action codes (2/3/4/5/7/8/10) | MeshCmd, cross-checked against firmware per `docs/protocol-notes.md` §2.4 ("as used by MeshCmd, verified against firmware") | `plugins/module_utils/client.py`, `plugins/module_utils/models.py` |
-| The five-step boot-configuration sequence (clear → mutate → Put → set role → set order) and its field delete-list | MeshCentral (`amt/amt-wsman.js`, `amt/amt.js`), Apache-2.0 | `plugins/module_utils/boot.py` |
+| CIM power-state table (2=On, 3/4=Sleep, 6/8/9/13=Off, 7=Hibernate) and `RequestPowerStateChange` action codes (2/3/4/5/7/8/10) | MeshCmd's `DMTFPowerStates`, agreeing with the DMTF ValueMap. **Weaker than the rest of this tier**: the primary source is a third party's constants array, which is the same category of evidence that produced the `LinkPolicy` inversion below. The four codes this collection sends (2/5/8/10) are separately annotated `// Verified Hardware` in `go-wsman-messages`; the rest are not. §2.4 also records an unresolved asymmetry — 5 and 9 are both power cycles yet normalize to `on` and `off` | `plugins/module_utils/client.py`, `plugins/module_utils/models.py` |
+| The five-step boot-configuration sequence (clear → mutate → Put → set role → set order) and its field delete-list | MeshCentral (`amt/amt-wsman.js`, `amt/amt.js`), Apache-2.0. **The delete-list specifically is the weakest row in this tier**: "which fields firmware rejects on a Put" is a behavioural claim, and no `Get` fixture can establish it. It is corroborated instead at the integration tier — the mock's `reject_boot_readonly_fields` fault, which two separate mutations confirmed is load-bearing rather than decorative | `plugins/module_utils/boot.py` |
 | The IDE-R/redirection wire framing (session start, digest auth over the binary protocol, SCSI command set, canned MODE_SENSE/GET_CONFIGURATION byte arrays) | MeshCentral (`amt/amt-redir-mesh.js`, `amt/amt-ider-module.js`), Apache-2.0 | `plugins/module_utils/redirection.py`, `plugins/module_utils/ider.py` |
 | AMT provisioned in Small Business Mode never opens port 16993 (no TLS at all) | **Hardware-verified** by `parmstro` on an Intel NUC5i5MYBE, AMT 10.0.56 build 3002 (`parmstro/intel_amt`, GPL-3.0-or-later, `development/research/AMT_10_TLS_LIMITATION.md`) | `plugins/doc_fragments/connection.py`, `plugins/module_utils/tls.py` (`enforce_transport_policy`) — this is *why* the plaintext opt-in exists at all |
 | `AMT_EthernetPortSettings.LinkPolicy` value table: 1 = S0 AC, 14 = Sx AC, 16 = S0 DC, 224 = Sx DC, and no other defined value | `device-management-toolkit/go-wsman-messages` `pkg/wsman/amt/ethernetport` — `decoder.go` named constants (`LinkPolicyS0AC`…`LinkPolicySxDC`), `types.go` schema annotation `ValueMap={1, 14, 16, 224}` / `Values={available on S0 AC, available on Sx AC, available on S0 DC, available on Sx DC}`. Read directly at tag `v2.48.3`, per `docs/protocol-notes.md` §2.7 | `plugins/module_utils/models.py` (`_LINK_POLICY_TABLE`, `wake_on_lan_capable`) |
@@ -144,23 +144,68 @@ the two wrong tables noted above.
 
 This is the bulk of the collection's verification effort:
 
-- **902 unit tests** (measured via `pytest --collect-only` against the staged
-  collection tree; the number will drift as tests are added, so treat this as a point
-  measurement, not a promise) across `tests/unit/plugins/module_utils/` and
-  `tests/unit/plugins/modules/`, covering error classification/redaction, TLS trust
+- **1066 unit tests** (measured via `pytest` against the staged collection tree; the
+  number drifts as tests are added, so treat it as a point measurement, not a
+  promise) across `tests/unit/plugins/module_utils/`, `tests/unit/plugins/modules/`
+  and `tests/unit/mock_servers/`, covering error classification/redaction, TLS trust
   policy, the WS-Man envelope/SOAP layer, the boot five-step sequence, the redirection
-  handshake, the IDE-R SCSI state machine, the media-session daemon lifecycle, and
-  every module's argument handling, check-mode behaviour, and idempotence logic —
-  all against fakes/mocks, never a socket or a real AMT endpoint.
-- **7/7 integration targets** (`amt_boot`, `amt_event_log`, `amt_info`,
-  `amt_log_clear`, `amt_media`, `amt_power`, `amt_redirection` under
-  `tests/integration/targets/`) run end-to-end against local, deterministic
-  fixture servers: a mock WS-Man server (HTTP Digest, TLS with a
+  handshake, the IDE-R SCSI state machine, the media-session daemon, and every
+  module's argument handling, check-mode behaviour, and idempotence logic — all
+  against fakes/mocks, never a socket or a real AMT endpoint.
+
+  Branch coverage over `plugins/` is **92%**. The distribution matters more than the
+  total, and it used to be inverted against consequence: the two least-covered files
+  were the two highest-consequence ones. `media_session.py` (the detached daemon that
+  holds credentials across a fork) was **50%** and is now **81%**; `ider.py` (the SCSI
+  state machine) was **75%** and is now **92%**.
+- **8/8 integration targets** (`amt_baremetal_install_role`, `amt_boot`,
+  `amt_event_log`, `amt_info`, `amt_log_clear`, `amt_media`, `amt_power`,
+  `amt_redirection` under `tests/integration/targets/`) run end-to-end against local,
+  deterministic fixture servers: a mock WS-Man server (HTTP Digest, TLS with a
   generated self-signed certificate, canned per-resource-URI responses, fault
   injection for AMT error codes/malformed SOAP/401/timeouts) and a mock IDE-R server
   (session start, auth-type query, digest challenge, configurable `readbfr`, a write
   path that verifies bytes actually land in the backing image). See
   `docs/testing.md` for how to run these and exactly what they do and do not prove.
+
+### What a test count is worth: mutation testing, 2026-07-30
+
+A number of tests is not evidence. This suite was audited by deliberately breaking
+the implementation — 21 mutations, the full unit suite run against each — to find
+assertions that could not fail. What it found is recorded here rather than quietly
+fixed, because the same discipline that makes the tier table useful demands it.
+
+**The worst finding was in the collection's most security-critical invariant.**
+Seven tests, one per module, claimed to prove the AMT password never reaches module
+output. All seven were vacuous: each file's autouse fixture replaced `exit_json`
+with a bare raiser, and the real `exit_json` is the only thing that injects
+`invocation.module_args` — the place a password would actually appear. So they
+asserted on a dict that structurally could not contain it.
+
+Flipping `no_log: True` to `False` on a password left the unit suite fully green
+**and** `ansible-test sanity --test validate-modules` at exit 0. No tier caught it.
+Fixed by asserting against Ansible's real serializer, plus a contract test over
+every module's argument spec, driven from imported modules so a new module is
+covered without anyone remembering to add it.
+
+Three mutations survived everything and were real gaps rather than test defects, and
+each turned out to be a live bug:
+
+| Mutation that survived | The bug it revealed |
+|---|---|
+| Loosening the IDE-R write bound by 512 bytes | The guard's *boundary* was never probed — existing tests used 4096- and 9999-byte overruns against a 512-byte window, so any plausible bound passed |
+| — | `engine.feature_toggle_ok` was set and **never read**, so `amt_media` reported `attached` for media firmware had refused to serve |
+| Removing `_scsi_read`'s bounds check | `_pump_read` had no zero-length-read guard, so a backing image truncated beneath a live session spun forever |
+
+**Two limits of the tiers themselves, worth stating plainly.** The
+`wake_on_lan_capable` inversion that shipped in 0.2.0 and 0.3.0 could not have been
+caught by either the mock tier or the hardware tier: the mock is fed from this
+collection's own understanding of a value table, so mock and code agreed while both
+were wrong, and hardware returned the correct raw values which the code then decoded
+confidently and incorrectly. And an integration target whose directory name matches
+a role in `roles/` is resolved by `ansible-test` as that role — so a target named
+`amt_baremetal_install` ran the role's `validate.yml` and none of its own tasks, a
+test that could not fail because it never executed.
 
 ### `amt_event_log` and `amt_log_clear` — Tier 2 and *only* Tier 2
 
@@ -279,7 +324,7 @@ of this tier.
 | 2 identity cross-check | 1 and 2 | Each machine returned a **distinct** platform UUID, and both rendered with UUID version nibble `1` after the SMBIOS little-endian field reversal — independent corroboration of the byte-order fix on a second, unrelated GUID. This stage has **no playbook of its own**: it is the review step inside `qualify_readonly.yml`. On 2026-07-29 its comparison **executed for the first time** against a recorded `amt_expected_uuid` for machine 2 and matched; see the note below the table for exactly what a match does and does not prove |
 | 3 check mode | 1 and 2 | power and boot plans computed and **nothing mutated** |
 | 4 power | 1 and 2 | convergent `on` reported `changed: false` when already on; `off` reported `changed: true`; initial state restored afterwards. Reproduced on machine 2 with the same outcomes |
-| 5 IDE-R media | 1 and 2 | the native Python IDE-R engine served a real bootable ISO to real firmware, and the boot was armed and reset issued |
+| 5 IDE-R media | 1 and 2 | the native Python IDE-R engine served a real bootable ISO to real firmware, and the boot was armed and reset issued. **Read the caveat below this table before citing this row** — it is the one stage that records no evidence file |
 | 6 writable image | 1 and 2 | the device was presented **writable** — MODE_SENSE write-protect bit `0x00`, not `0x80`. On machine 2: `devices.floppy.writable = true`, `bytes_read = 0`, `bytes_written = 0`, `error_class = null` — same shape as machine 1, a writable device with no bytes transferred |
 | 7 native PXE | 1 and 2 | one-time PXE armed and read back as armed, reset issued and recovered, `AMT_BootSettingData` stable afterwards. On machine 2 the `before_arm` and `after_reset` snapshots agree, with `UseIDER=false`, `BIOSSetup=false`, `BootMediaIndex=0`. This also settled issue #13: the prefixed-namespace EPR form **is** accepted by real firmware, now on both generations |
 | 8 idempotent re-probe | 1 and 2 | repeated reads reported `changed: false` and agreed with each other; no session or state was left drifting behind the stages above |
@@ -406,9 +451,33 @@ off is not *measured* — the evidence now points towards it instead of against 
 is a weaker claim than having tested it, and the difference is deliberately preserved
 here. See Tier 4.
 
+### Two limits on how far Tier 3 can be audited
+
+**Stage 5 writes no evidence file.** `qualify_media_attach.yml` is the only one of the
+seven qualification playbooks with no `copy` task; it ends by asking a human to
+visually confirm the boot hand-off. So the collection's flagship hardware claim — that
+the native Python IDE-R engine served a real bootable ISO to real firmware — rests on
+an operator's word, with nothing recorded that a third party could inspect. Every
+other stage emits a JSON artifact. Stage 3's evidence gap was found and fixed
+(`check_mode: false`, since the playbook runs under `--check` by design); stage 5's is
+still open, and is tracked in Tier 4.
+
+**No Tier 3 row cites a specific run.** The dates, machines and firmware versions
+above are accurate, but there is no pipeline number, workflow URL or artifact digest
+anywhere in this document, so a reader cannot go and check. That is a gap in this
+document rather than in the evidence — the runs exist and their artifacts are
+redacted-and-publishable since `tests/hardware/redact-evidence.py` landed — but until
+run identifiers are recorded here, Tier 3 asks for more trust than the rest of the
+table does.
+
 ## Tier 4: Still unproven
 
 A short list, deliberately.
+
+- **That stage 5 served media, in any form a third party can check.** The stage passes
+  and the engine is exercised, but it emits no evidence file — see the caveat above.
+  Until it does, this is the one Tier 3 claim resting on an operator's visual
+  confirmation rather than on a recorded artifact.
 
 - **`amt_event_log` and `amt_log_clear`, in their entirety.** No hardware
   qualification stage reads or clears a real firmware event log. Neither module has
