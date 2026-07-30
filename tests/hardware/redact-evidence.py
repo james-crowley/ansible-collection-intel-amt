@@ -68,6 +68,24 @@ _IDENTIFYING_KEYS: dict[str, str] = {
     "username": "username",
     "user": "username",
     "amt_username": "username",
+    # Hardware inventory, new in 0.5.0. A serial number is the single most
+    # identifying value AMT reports: it is what a vendor keys a warranty and a
+    # support case on, and unlike an address it never changes. An asset tag is
+    # whoever owns the machine writing an internal identifier onto it, which is
+    # organisational information rather than a diagnostic.
+    #
+    # These match no general pattern -- a serial is an arbitrary alphanumeric
+    # string indistinguishable from a firmware version or a part number -- so a
+    # regex cannot find them and they have to be caught by key.
+    "serial_number": "serial",
+    "serialnumber": "serial",
+    "serial": "serial",
+    "board_serial": "serial",
+    "chassis_serial": "serial",
+    "asset_tag": "asset_tag",
+    "assettag": "asset_tag",
+    "sku": "asset_tag",
+    "sku_number": "asset_tag",
 }
 
 #: Public standards domains that appear inside WS-Man resource URIs and DMTF
@@ -161,7 +179,7 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 #: Human-readable order for the summary, so the counts always print the same way.
-_CATEGORY_ORDER: tuple[str, ...] = ("ipv4", "ipv6", "mac", "uuid", "fingerprint", "digest", "fqdn", "hostname", "username")
+_CATEGORY_ORDER: tuple[str, ...] = ("ipv4", "ipv6", "mac", "uuid", "fingerprint", "digest", "fqdn", "hostname", "username", "serial", "asset_tag")
 
 
 def _is_dns_name(candidate: str) -> bool:
