@@ -964,6 +964,15 @@
           - media_failure_state_on_disk.detached == true
           - media_failure_state_on_disk.reset_issued == false
           - media_failure_state_on_disk.last_failure is truthy
+          # The resume half of the session-id claim; scenario 17 covers the fresh half.
+          # This scenario's seeded prior state already carries a session id, and
+          # attach_media.yml must reuse it rather than generate a new one: IDE-R is
+          # single-session, and amt_media's idempotent re-attach contract is keyed on being
+          # handed the *same* id. A claim step that regenerated unconditionally would
+          # strand the prior run's session and start a second against firmware that has
+          # only one connection to give.
+          - nested_obs['amt-target-a.invalid'].run_state.session_id == 'seeded-session-not-a-real-ider-session'
+          - media_failure_state_on_disk.session_id == 'seeded-session-not-a-real-ider-session'
         fail_msg: >-
           A failure in the media phase must not arm a boot selection or reset the
           machine, and must still detach. rc={{ nested_run.rc }}.
