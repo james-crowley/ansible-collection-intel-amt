@@ -226,21 +226,41 @@ checked against a live endpoint should not be the only thing a caller can see. S
 [`docs/amt_log_clear.md`](amt_log_clear.md), whose own opening notes say the same
 thing.
 
-### `amt_info`'s hardware/asset inventory — Tier 2 only, and **not** hardware-verified
+### `amt_info`'s hardware/asset inventory — classes and shape now Tier 3, decoded labels still Tier 1-by-citation
 
 New in 0.5.0: `amt_info`'s `gather_subset` inventory subsets (`system`, `processor`,
 `memory`, `storage`) and everything under `amt.hardware`, backed by
 `plugins/module_utils/hardware.py`. Six WS-Man classes — `CIM_Chassis`, `CIM_Card`,
 `CIM_Processor`, `CIM_Chip`, `CIM_PhysicalMemory`, `CIM_MediaAccessDevice`.
 
-**Be explicit about what this is and is not.** It is **mock-tested and
-fixture-derived**. It is **not hardware-verified**: no qualification stage has run it,
-no lab machine has ever been asked for any of these classes by this collection, and not
-one of the values it decodes has been read back from a live endpoint here. It does not
-appear in Tier 3 and it is listed again in Tier 4. Every generation, including the two
-lab machines, is untested for it.
+**This section used to say the inventory was "not hardware-verified", that "no lab
+machine has ever been asked for any of these classes by this collection", and that "not
+one of the values it decodes has been read back from a live endpoint here". All three
+were true when written; all three are now false.** Stage 1b of
+`tests/hardware/qualify_readonly.yml` asked both lab machines for all six classes and
+all six answered. That claim is therefore **Tier 3** and is recorded in that tier below
+with the run cited. The former cross-references — "does not appear in Tier 3", "listed
+again in Tier 4", "every generation, including the two lab machines, is untested for it"
+— are all withdrawn.
 
-What Tier 2 does buy, specifically:
+**Be precise about what that upgrades.** It establishes that these classes exist on this
+firmware, that the verbs and the selector-less `Get` are right, and that this
+collection's readers recognise the responses that come back. It establishes **nothing**
+about what any decoded label *means*. A dump proves a value was returned; it never
+proves what it signifies, and conflating the two is exactly what left
+`wake_on_lan_capable` inverted for two releases. The value tables stay sourced by
+citation, and the paragraph headed "The value tables are the Tier 1 part of this row"
+below is unchanged and is still the reason the labels are trustworthy. This is the same
+split already drawn for the network facts in the next subsection; that subsection states
+the general principle and is not repeated here.
+
+**Do not overstate it in the other direction either.** Two machines is repeatability,
+not a compatibility guarantee, and these two are the same vendor and the same model
+family — two SKUs from one vendor, not a survey. The untested-generation entry in Tier 4
+applies here exactly as it does elsewhere.
+
+What Tier 2 still buys — and it is what makes the *labels*, rather than the plumbing,
+trustworthy:
 
 - **609 unit tests**, of which the bulk are per-value assertions over the nine value
   tables — every defined value plus an out-of-table value for each — written against the
@@ -289,12 +309,29 @@ comes from a hardware dump.** Three notes worth recording:
   *class name*), no processor core or thread count, and no disk model, vendor or serial.
   See `docs/amt_info.md` and `docs/protocol-notes.md` §2.9.
 
-**What would move this to Tier 3** is one read-only hardware stage: an `amt_info` call
-with `gather_subset: all` against a lab machine, with the resulting fact groups recorded.
-That is the cheap half of closing this, and it is genuinely cheap — the capability is
-read-only, so it needs none of the approval treatment stages 4-7 do. Until it runs, the
-strongest honest claim is that this collection's implementation matches Intel's own
-captured firmware responses.
+**What moved this to Tier 3** was exactly what this section used to ask for: one
+read-only hardware stage, an `amt_info` call with `gather_subset: [config, hardware]`
+against each lab machine, with the resulting fact groups recorded. It ran as stage 1b of
+`qualify_readonly.yml`. See "**`amt_info`'s hardware/asset inventory** — Tier 3 on both
+lab generations" at the end of Tier 3 for what firmware actually returned.
+
+**One caution carried over from how that stage first reported itself.** The stage's
+summary task originally read `amt.hardware.system` and `amt.hardware.processor` — key
+names `amt_info` has never emitted, because `system` and `processor` are *`gather_subset`
+names* and the *fact groups* they populate are `chassis`+`baseboard` and
+`processors`+`chips`. Jinja's `| default(none)` rendered each undefined lookup as a
+printed `null`, so the first run reported four of the six groups as unavailable on both
+machines while firmware had in fact returned all six. Nothing in the module's output
+could contradict it, because a genuinely absent class produces the identical `null`.
+
+That is now guarded three ways, and the middle one is the durable fix: the stage asserts
+the six-key set before reporting on it; `amt_info`'s receipt carries
+`operation.hardware_reads` giving each class's own read outcome (`read` / `empty` /
+`absent`, with the `error_class` when absent); and both the unit and integration tiers
+assert that every outcome names a fact group that really exists. **The lesson is a tier
+lesson, not a bug report**: a `null` that cannot say *why* it is null is not evidence of
+anything, and this document's tiers depend on being able to tell "not asked" from "asked
+and refused".
 
 ### `amt_info`'s network and system-state facts — mock coverage, with hardware now in Tier 3
 
@@ -381,16 +418,23 @@ into one:
   mutated: this run existed to read machine 1 with the v0.2.0 fact code, which its
   2026-07-28 evidence predated. Machine 1's mutating result stands on the
   2026-07-28 run and was not re-established here.
+- **Both machines, read-only stages only** — stages 1, 1b, 3 and 8, 2026-07-30,
+  CircleCI pipeline 167, job UUID `65ddc061-b273-4777-8c51-174a48e74402`, on the
+  ansible-core 2.18.18 lab virtualenv. Nothing was mutated. This run existed to read
+  both machines with the 0.5.0 hardware-inventory code, which every earlier run
+  predated, and it is the sole evidence for the inventory subsection at the end of
+  this tier.
 
 So power control, IDE-R media, the writable-image path and native one-time PXE are
 verified on **two machines across two firmware generations**, not one — and
 `amt_info`'s network and system-state facts are now verified on both of those
-generations too, which is what the third run added. See the subsection at the end
-of this tier.
+generations too, which is what the third run added. The fourth run added the
+hardware/asset inventory on both. See the subsections at the end of this tier.
 
 | Stage | Machines | What real firmware confirmed |
 |---|---|---|
 | 1 read-only | 1 and 2 | `amt_info` over pinned TLS with HTTP Digest. Firmware version from `CIM_SoftwareIdentity`, all four capability flags, power state `2 -> on`, the platform UUID, and `AMT_RedirectionService.EnabledState` decoded on two different values (`32769` = IDER only on machine 1; `32771` = SOL+IDER on machine 2). Machine 1 was read again on 2026-07-29, which is where its network and system-state facts below come from |
+| 1b inventory (read-only) | 1 and 2 | All six hardware/asset inventory classes answered on both machines, 2026-07-30: `CIM_Chassis` and `CIM_Card` on a bare selector-less `Get`, `CIM_Processor`, `CIM_Chip`, `CIM_PhysicalMemory` and `CIM_MediaAccessDevice` on `Enumerate`/`Pull`. One property-level gap — `CIM_Card.SerialNumber` is empty on both. See the subsection at the end of this tier |
 | 2 identity cross-check | 1 and 2 | Each machine returned a **distinct** platform UUID, and both rendered with UUID version nibble `1` after the SMBIOS little-endian field reversal — independent corroboration of the byte-order fix on a second, unrelated GUID. This stage has **no playbook of its own**: it is the review step inside `qualify_readonly.yml`. On 2026-07-29 its comparison **executed for the first time** against a recorded `amt_expected_uuid` for machine 2 and matched; see the note below the table for exactly what a match does and does not prove |
 | 3 check mode | 1 and 2 | power and boot plans computed and **nothing mutated** |
 | 4 power | 1 and 2 | convergent `on` reported `changed: false` when already on; `off` reported `changed: true`; initial state restored afterwards. Reproduced on machine 2 with the same outcomes |
@@ -484,6 +528,96 @@ generations rather than one:
   Two machines agreeing on the maximum is worth noting precisely because it makes an
   unconfigured default the likelier reading than a deliberate setting — but that is a
   guess, and it is not being recorded as a finding.
+
+### `amt_info`'s hardware/asset inventory — Tier 3 on both lab generations
+
+The 0.5.0 inventory subsets were argued in Tier 2 above on the grounds that no lab
+machine had ever been asked for these classes. Both have now been asked, and **all six
+fact groups came back populated on both machines**.
+
+**Evidence.** Stage 1b of `tests/hardware/qualify_readonly.yml` — a second, read-only
+`amt_info` call with `gather_subset: [config, hardware]`. CircleCI **pipeline 167,
+`hardware` workflow, job `hardware-tests`** (job UUID
+`65ddc061-b273-4777-8c51-174a48e74402`), artifacts
+`hardware-evidence/amt-lab-01-qualify_hardware_inventory.json` and
+`hardware-evidence/amt-lab-02-qualify_hardware_inventory.json`. Both post-redaction, per
+`tests/hardware/redact-evidence.py`. This row cites its run because Tier 3 rows that
+cite no run ID are a tracked shortcoming of this document, and adding another would make
+it worse.
+
+| Fact group | Class | Verb | 16.1.30 (machine 1) | 19.0.5 (machine 2) |
+|---|---|---|---|---|
+| `chassis` | `CIM_Chassis` | bare `Get` | populated: serial, model, manufacturer, `version` | same |
+| `baseboard` | `CIM_Card` | bare `Get` | populated **except `serial_number`, which is `null`** | same |
+| `processors` | `CIM_Processor` | `Enumerate` | 1 instance | 1 instance |
+| `chips` | `CIM_Chip` | `Enumerate` | 2 instances | 3 instances |
+| `memory` | `CIM_PhysicalMemory` | `Enumerate` | 1 DIMM | 2 DIMMs |
+| `storage` | `CIM_MediaAccessDevice` | `Enumerate` | 1 device | 1 device |
+
+Identifying values are deliberately not transcribed: this repository holds no lab
+serials, model numbers or part numbers. "Populated" means the field came back non-`null`
+and its class did not fault, which is the whole of what is claimed.
+
+What this settles, and only this:
+
+- **The classes exist and the verbs are right.** All six answered on both generations.
+  The two single-instance classes answered the **bare, selector-less `Get`** — the
+  `Enumerate` fallback never had to run, so the `system` subset cost the documented two
+  requests, not six. Both reference implementations send exactly that form
+  (`go-wsman-messages` v2.48.3's shared `base.WSManService.Get()` calls
+  `getBySelector(nil)` and emits no `<w:SelectorSet>` at all; MeshCentral's `obj.Get`
+  has no selectors parameter to pass one with), and firmware agrees with both.
+- **`CIM_Chip` really does return memory chips alongside the processor chip**, which
+  Tier 2 predicted from the class hierarchy and left unfiltered on that basis. Confirmed:
+  one `"Managed System Processor Chip"` plus one `"Managed System Memory Chip"` per DIMM
+  on each machine — hence 2 chips against 1 DIMM, and 3 against 2. Filtering to "just the
+  CPUs" would have been wrong, and `element_name` is what tells them apart.
+- **`Tag` is not an asset tag**, as Tier 2 said. Real firmware returns the literal class
+  names `"CIM_Chassis"` and `"CIM_Card"` in it on both machines. There is still no asset
+  tag anywhere in AMT's implementation of these classes.
+- **`operational_status` is `[0]` — `"unknown"` — everywhere it appears**, matching what
+  `CIM_ComputerSystem` already reports on these machines. It is **absent entirely**
+  (`null`) on `CIM_PhysicalMemory` and on the memory-chip `CIM_Chip` instances. Neither is
+  a defect; both are reported as received.
+
+What it does **not** settle is any decoded label's meaning — see the Tier 2 subsection.
+One reading is worth calling out precisely because it shows that boundary working:
+
+- **`CIM_Processor.UpgradeMethod` came back `85` on 19.0.5**, and
+  `UPGRADE_METHOD_TABLE` is a faithful transcription of `go-wsman-messages` v2.48.3,
+  which defines 85 values, `0`-`84`. So real firmware reported a socket **one past the
+  end of the vendor's own table**, and the collection renders it `unknown(85)` while
+  keeping the raw `85`. That is the `unknown(<raw>)` convention earning its keep: a bare
+  `unknown` would have been indistinguishable from this table's *defined* value `1`.
+  Machine 1 reported `64`, which is in the table. **No entry for `85` should be invented**
+  — no source names it, and inferring a socket name from one machine's dump is the exact
+  move that inverted `wake_on_lan_capable`.
+- **`Family` came back `198` on machine 1 and `774` on machine 2**, both shipped raw and
+  undecoded as documented. Two different values across two generations is a reason to keep
+  it undecoded, not a reason to start guessing.
+
+#### The one observed gap: `baseboard.serial_number` is `null` on both machines
+
+`CIM_Card` is plainly readable — `manufacturer`, `model`, `version`, `can_be_frued` and
+`package_type` all come back on both machines — but `SerialNumber` yields nothing, on
+both, while `CIM_Chassis.SerialNumber` populates on both. Consistent across the two
+generations, so it is a property-level gap and not a class-level one.
+
+**This document cannot currently say which of two things is happening**, and the
+distinction matters:
+
+1. firmware omits the `SerialNumber` element from the response entirely; or
+2. firmware returns the element present but empty.
+
+`models.optional_str()` maps both to `None` by design (`text.strip() or None`), and the
+evidence artifacts are the module's already-parsed output, so neither artifact nor
+receipt can separate the two. Settling it needs a raw SOAP body from stage 1b, which no
+artifact currently carries. Tracked as **#84**.
+
+The practical consequence is worth stating rather than leaving implicit: `system` was
+documented as letting an operator tell a board swap from a re-rack, and that inference
+needs *both* serials. On this firmware only the chassis serial is available, so it cannot.
+`docs/amt_info.md` says so.
 
 ### Both machines report `wake_on_lan_capable = true`
 

@@ -107,6 +107,15 @@ than from an endpoint this collection has read. See
 [`docs/amt_log_clear.md`](docs/amt_log_clear.md), and Tier 4 of
 [`docs/capability-matrix.md`](docs/capability-matrix.md).
 
+The 0.5.0 hardware/asset inventory has now been read from both machines too: all
+six `CIM_` classes answered on 16.1.30 and 19.0.5, so serial number, model,
+manufacturer, processors, DIMMs and disks are hardware-verified for existence and
+shape. Two caveats travel with that, both documented rather than glossed: the
+**baseboard** serial comes back empty on both machines even though the chassis
+serial populates, and a decoded label being *returned* still never establishes
+what it *means* — the value tables stay sourced from Intel's own toolkit and the
+DMTF schema, with the raw integer reported alongside every name.
+
 That qualification found six real defects that the unit and mock-integration
 tiers could not have found, including one that made IDE-R and BIOS boot
 impossible against real firmware. See [`docs/capability-matrix.md`](docs/capability-matrix.md)

@@ -166,6 +166,57 @@
           - full_read.operation.action == 'get_facts'
           - full_read.operation.error_class is none
 
+    # The per-class read outcomes, exercised over a real socket rather than a
+    # mocked transport. This is the diagnostic that was missing when the 0.5.0
+    # inventory first met real firmware: the qualification playbook reported four
+    # fact groups as null, firmware had in fact returned all six, and nothing in
+    # the module's own output could tell those two situations apart.
+    - name: Assert every class read is accounted for individually on the receipt
+      ansible.builtin.assert:
+        that:
+          # Keyed by WS-Man class, ordered by class, one entry per class read.
+          - full_read.operation.hardware_reads.keys() | list ==
+            ['CIM_Chassis', 'CIM_Card', 'CIM_Processor', 'CIM_Chip', 'CIM_PhysicalMemory', 'CIM_MediaAccessDevice']
+          # Every class answered on the fully-populated mock, and none reports an
+          # error class while doing so.
+          - full_read.operation.hardware_reads.values() | map(attribute='outcome') | unique | list == ['read']
+          - full_read.operation.hardware_reads.values() | selectattr('error_class') | list | length == 0
+          # The two singletons take the cheap bare Get; the four multi-instance
+          # classes take Enumerate. A change here would silently invalidate the
+          # documented per-subset round-trip costs.
+          - full_read.operation.hardware_reads['CIM_Chassis'].verb == 'Get'
+          - full_read.operation.hardware_reads['CIM_Card'].verb == 'Get'
+          - full_read.operation.hardware_reads['CIM_Processor'].verb == 'Enumerate'
+          - full_read.operation.hardware_reads['CIM_PhysicalMemory'].verb == 'Enumerate'
+          # Instance counts must agree with the facts they describe. A receipt
+          # disagreeing with its own fact document would be worse than none.
+          - full_read.operation.hardware_reads['CIM_PhysicalMemory'].instances == full_read.amt.hardware.memory | length
+          - full_read.operation.hardware_reads['CIM_MediaAccessDevice'].instances == full_read.amt.hardware.storage | length
+          - full_read.operation.hardware_reads['CIM_Processor'].instances == full_read.amt.hardware.processors | length
+        fail_msg: >-
+          operation.hardware_reads did not account for every inventory class. Without it a
+          null fact group is indistinguishable between "this firmware has no such class",
+          "we asked for it wrongly", and "we could not parse the answer".
+
+    - name: Assert each read names a fact group that actually exists in the output
+      ansible.builtin.assert:
+        that:
+          # The regression guard for the defect that made this feature look broken
+          # on its first hardware run. `system` and `processor` are gather_subset
+          # names; the fact groups they populate are chassis+baseboard and
+          # processors+chips. A consumer reading amt.hardware.system gets an
+          # undefined lookup, and `| default(none)` turns that into a convincing
+          # "null" which no amount of correct firmware can contradict.
+          - full_read.operation.hardware_reads.values() | map(attribute='fact_group') | sort ==
+            full_read.amt.hardware.keys() | list | sort
+          - "'system' not in full_read.amt.hardware"
+          - "'processor' not in full_read.amt.hardware"
+        fail_msg: >-
+          A read outcome names a fact group that is not a key of amt.hardware, or amt.hardware
+          has grown a key named after a gather_subset. Reading amt.hardware.system or
+          amt.hardware.processor is always a mistake -- those are subset names, and the six
+          fact keys are chassis, baseboard, processors, chips, memory and storage.
+
     - name: Assert the chassis carries the system serial, model and both package-type enumerations
       ansible.builtin.assert:
         that:
@@ -489,6 +540,22 @@
           a module failure. This is the same degradation contract amt_info already applies
           to AMT_EthernetPortSettings and CIM_BIOSElement.
 
+    - name: Assert firmware without the classes says so, rather than only returning nulls
+      ansible.builtin.assert:
+        that:
+          # The whole point of the diagnostics, on the one mock that genuinely has
+          # none of these classes. Every group is null above; here every null is
+          # accounted for as `absent` with the error class that refused it, and no
+          # instance count is invented for a class that returned nothing.
+          - no_hw_read.operation.hardware_reads.values() | map(attribute='outcome') | unique | list == ['absent']
+          - no_hw_read.operation.hardware_reads.values() | map(attribute='error_class') | unique | list == ['protocol']
+          - no_hw_read.operation.hardware_reads.values() | selectattr('instances') | list | length == 0
+        fail_msg: >-
+          Firmware that implements none of these classes must be distinguishable from firmware
+          that implements them and has nothing to report. Both produce null fact groups; only
+          the read outcome separates them, and that separation is what the first hardware run
+          lacked when it misread its own output.
+
     - name: Read from firmware whose singleton Gets fault and which has no storage class
       james_crowley.intel_amt.amt_info:
         host: 127.0.0.1
@@ -527,6 +594,29 @@
           Fact groups must degrade independently. A machine AMT cannot enumerate disks on
           must still report its DIMMs, its processors and its serial number -- that is what
           makes a mixed-generation fleet inventoriable at all.
+
+    - name: Assert the receipt records that the fallback ran and which class was refused
+      ansible.builtin.assert:
+        that:
+          # This endpoint faults the bare Get for both singletons, so `verb` must
+          # say Enumerate. That is how an operator learns the `system` subset cost
+          # six requests rather than the two wsman_requests_estimated predicted --
+          # the estimate is documented as best-case and this is the evidence of
+          # which case actually occurred.
+          - fallback_read.operation.hardware_reads['CIM_Chassis'].verb == 'Enumerate'
+          - fallback_read.operation.hardware_reads['CIM_Card'].verb == 'Enumerate'
+          - fallback_read.operation.hardware_reads['CIM_Chassis'].outcome == 'read'
+          - fallback_read.operation.hardware_reads['CIM_Card'].outcome == 'read'
+          # And on the same endpoint, the one genuinely absent class is reported
+          # as absent rather than as another fallback.
+          - fallback_read.operation.hardware_reads['CIM_MediaAccessDevice'].outcome == 'absent'
+          - fallback_read.operation.hardware_reads['CIM_MediaAccessDevice'].error_class == 'protocol'
+          - fallback_read.operation.hardware_reads['CIM_PhysicalMemory'].outcome == 'read'
+          - fallback_read.operation.hardware_reads['CIM_PhysicalMemory'].verb == 'Enumerate'
+        fail_msg: >-
+          The receipt must distinguish "the cheap verb was refused and the fallback recovered
+          it" from "the class is not there at all". Both were true on this one endpoint for
+          different classes, which is exactly the mixed case a single null cannot express.
 
     # -- Fault injection ---------------------------------------------------
     - name: Fault injection -- a wrong password is refused before any inventory is returned

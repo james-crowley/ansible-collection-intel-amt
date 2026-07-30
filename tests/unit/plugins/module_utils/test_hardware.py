@@ -422,6 +422,32 @@ class TestProcessorTables:
         # responses/cim/physical/processor/get.xml reports UpgradeMethod 52.
         assert ProcessorInfo.from_instance({"UpgradeMethod": "52"}).upgrade_method_text == "socket_bga1515"
 
+    def test_real_amt_19_firmware_reports_a_socket_this_table_has_never_heard_of(self):
+        # Hardware-observed, and the vindication of the unknown(<raw>) convention.
+        # UPGRADE_METHOD_TABLE is a faithful transcription of go-wsman-messages
+        # v2.48.3, which defines 85 values, 0-84. Real AMT 19.0.5 reports
+        # UpgradeMethod **85** -- one past the end of the vendor's own table.
+        #
+        # This is precisely the case the raw-integer-alongside rule was written
+        # for. The collection reports `unknown(85)` and keeps the 85, rather than
+        # guessing a socket name or rendering a bare `unknown` that would be
+        # indistinguishable from this table's *defined* value 1.
+        #
+        # Do NOT "fix" this by inventing an entry for 85. No source has been found
+        # that names it, and inferring a meaning from one machine's dump is the
+        # exact error that inverted wake_on_lan_capable for two releases.
+        info = ProcessorInfo.from_instance({"UpgradeMethod": "85"})
+        assert info.upgrade_method == 85
+        assert info.upgrade_method_text == "unknown(85)"
+        assert 85 not in UPGRADE_METHOD_TABLE
+
+    def test_a_family_no_table_can_name_still_ships_the_raw_integer(self):
+        # Hardware-observed: AMT 16.1.30 reported Family 198 and AMT 19.0.5
+        # reported 774. Neither is decoded -- go-wsman-messages defines no
+        # familyMap at all -- and both must survive as integers.
+        for value in (198, 774):
+            assert ProcessorInfo.from_instance({"Family": str(value)}).family == value
+
 
 class TestSharedDmtfTables:
     """``EnabledState`` and ``OperationalStatus``, imported from ``models`` not redeclared."""
@@ -601,6 +627,26 @@ class TestBaseboardParsing:
         # "This firmware did not say" and "this is not field-replaceable" are
         # different findings, per models.optional_bool's whole reason for existing.
         assert BaseboardInfo.from_instance({}).can_be_frued is None
+
+    def test_a_baseboard_that_reports_no_serial_still_reports_the_rest_of_the_board(self):
+        # Hardware-observed, and a documented limitation rather than a defect.
+        # `responses/cim/card/get.xml` carries a CIM_Card.SerialNumber, and both
+        # lab machines (AMT 16.1.30 and 19.0.5) return the class populated with
+        # manufacturer, model and version but **no serial at all**. So the vendor
+        # fixture establishes that the property exists; it does not establish that
+        # any given firmware fills it in.
+        #
+        # The consequence is real: `system` cannot always tell a board swap from a
+        # re-rack, because that inference needs both serials and this firmware
+        # only supplies the chassis one. docs/amt_info.md says so plainly. What
+        # must not happen is a null serial taking the rest of the group with it.
+        board = BaseboardInfo.from_instance({key: value for key, value in self.INSTANCE.items() if key != "SerialNumber"})
+
+        assert board.serial_number is None
+        assert board.model == "MOCK-BOARD-0000"
+        assert board.manufacturer == "Mock Systems (example.invalid)"
+        assert board.version == "MOCK-000-001"
+        assert board.package_type_text == "module_card"
 
 
 class TestProcessorParsing:

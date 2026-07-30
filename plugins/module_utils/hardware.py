@@ -105,12 +105,51 @@ SUBSET_ALIASES: dict[str, frozenset[str]] = {
 }
 
 #: Which :class:`HardwareFacts` fields each subset populates.
+#:
+#: **The subset names and the fact-group names are deliberately different, and
+#: conflating them is a real and demonstrated bug.** ``system`` populates
+#: ``chassis`` and ``baseboard``; ``processor`` populates ``processors`` and
+#: ``chips``. Only ``memory`` and ``storage`` happen to share a name with the
+#: group they fill. ``tests/hardware/qualify_readonly.yml`` reported
+#: ``amt.hardware.system`` and ``amt.hardware.processor`` -- keys
+#: :meth:`HardwareFacts.to_dict` has never emitted -- and Jinja's
+#: ``| default(none)`` turned each undefined lookup into a printed ``null``. The
+#: first hardware run therefore reported the chassis, baseboard, processor and
+#: chip groups as absent on both lab machines when firmware had in fact returned
+#: all four fully populated. Nothing was wrong with the reader; the summary asked
+#: the wrong questions and was structurally unable to say so.
 FACT_GROUPS_BY_SUBSET: dict[str, tuple[str, ...]] = {
     SUBSET_SYSTEM: ("chassis", "baseboard"),
     SUBSET_PROCESSOR: ("processors", "chips"),
     SUBSET_MEMORY: ("memory",),
     SUBSET_STORAGE: ("storage",),
 }
+
+#: The WS-Man class behind each fact group, and the ordering
+#: :meth:`HardwareFacts.reads_to_dict` reports them in.
+#:
+#: Keyed by class rather than by group because the read outcome is a fact about a
+#: *class*: "``CIM_Chassis`` answered" is what happened on the wire, and
+#: ``chassis`` is only where the result was filed. Carrying the group alongside
+#: means the receipt states the class-to-key mapping explicitly, which is the
+#: information whose absence made the first hardware run misreport itself.
+FACT_GROUP_BY_CLASS: dict[str, str] = {
+    "CIM_Chassis": "chassis",
+    "CIM_Card": "baseboard",
+    "CIM_Processor": "processors",
+    "CIM_Chip": "chips",
+    "CIM_PhysicalMemory": "memory",
+    "CIM_MediaAccessDevice": "storage",
+}
+
+#: :attr:`ClassRead.outcome` -- firmware returned at least one instance.
+READ_OUTCOME_READ = "read"
+#: :attr:`ClassRead.outcome` -- firmware answered with **zero** instances. A real
+#: reading (a diskless machine really has no ``CIM_MediaAccessDevice``), not a gap.
+READ_OUTCOME_EMPTY = "empty"
+#: :attr:`ClassRead.outcome` -- every verb tried was refused, so this firmware does
+#: not expose the class. :attr:`ClassRead.error_class` names how it was refused.
+READ_OUTCOME_ABSENT = "absent"
 
 #: WS-Man **HTTP requests** each subset costs, for the module's documented
 #: round-trip table. An ``Enumerate`` costs two (Enumerate + one ``Pull``), and
@@ -1101,6 +1140,71 @@ class StorageInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class ClassRead:
+    """What happened when one inventory class was read. Diagnostics, not a fact.
+
+    This type exists because ``null`` is not a diagnosis. Every fact group in
+    :class:`HardwareFacts` degrades to ``None`` when its class cannot be read, and
+    that is the right behaviour -- but on its own it cannot distinguish
+
+    * this firmware does not expose the class,
+    * we asked for it with a verb or selector it refuses,
+    * it answered and the reader did not recognise the shape,
+
+    and the first hardware run needed exactly that distinction and did not have
+    it. So each read records its own outcome alongside the fact, and the fact
+    value is left untouched: this is reported *in addition to* ``null``, never
+    instead of it.
+
+    Carried on the **operation receipt** rather than under ``amt``, matching where
+    ``gather_subset`` and ``wsman_requests_estimated`` already sit. ``amt`` is
+    documented as firmware-observed evidence; which verb this collection chose to
+    send is a fact about this collection, not about the endpoint.
+    """
+
+    #: The ``amt.hardware`` key this class's result was filed under. Stated
+    #: explicitly because the subset name, the class name and the fact key are
+    #: three different vocabularies -- see :data:`FACT_GROUPS_BY_SUBSET`.
+    fact_group: str
+    #: One of :data:`READ_OUTCOME_READ`, :data:`READ_OUTCOME_EMPTY`,
+    #: :data:`READ_OUTCOME_ABSENT`.
+    outcome: str
+    #: The WS-Man verb whose result is being reported: ``"Get"`` or
+    #: ``"Enumerate"``. For the two single-instance classes this is also how a
+    #: reader sees whether the ``Enumerate`` fallback had to run -- a value of
+    #: ``"Enumerate"`` there means the bare ``Get`` was refused, and that the
+    #: subset cost more round trips than
+    #: :func:`round_trip_estimate` predicted.
+    verb: str | None = None
+    #: How many instances firmware returned. ``0`` on
+    #: :data:`READ_OUTCOME_EMPTY`; ``None`` on :data:`READ_OUTCOME_ABSENT`,
+    #: because nothing was returned to count.
+    instances: int | None = None
+    #: The ``errors.py`` ``error_class`` the refusal carried, on
+    #: :data:`READ_OUTCOME_ABSENT` only. AMT answers an unimplemented resource URI
+    #: with HTTP 400, which this collection raises as ``ProtocolError`` and so
+    #: reports here as ``protocol`` -- the same signal MeshCentral treats as
+    #: "this class is not present" (``amtmanager.js``' CIRA batch deletes
+    #: 400-answering classes and carries on).
+    error_class: str | None = None
+
+
+def render_class_reads(reads: dict[str, ClassRead]) -> dict[str, Any]:
+    """Render per-class read outcomes for the operation receipt, in class order.
+
+    Ordered by :data:`FACT_GROUP_BY_CLASS` rather than by insertion, so the
+    receipt reads the same way every run regardless of which subsets were asked
+    for. A class that was not read at all is simply absent -- exactly as
+    :meth:`HardwareFacts.to_dict` omits a group that was not requested, so "I did
+    not ask" and "I asked and got nothing back" stay distinguishable here too.
+
+    A free function rather than only a method because two callers need it and a
+    rendering rule that exists twice can drift against itself.
+    """
+    return {class_name: dataclasses.asdict(reads[class_name]) for class_name in FACT_GROUP_BY_CLASS if class_name in reads}
+
+
+@dataclass(frozen=True, slots=True)
 class HardwareFacts:
     """The inventory fact groups, one field per :mod:`amt_info` subset component.
 
@@ -1130,9 +1234,20 @@ class HardwareFacts:
     #: Names of the fields above that were actually requested. Only these appear
     #: in :meth:`to_dict`'s output.
     requested: frozenset[str] = frozenset()
+    #: Per-class read outcomes, keyed by WS-Man class name. Deliberately **not**
+    #: rendered by :meth:`to_dict`: ``amt.hardware``'s shape is a published
+    #: interface and must not move, and these belong on the operation receipt
+    #: anyway (see :class:`ClassRead`). Rendered by :meth:`reads_to_dict`.
+    reads: dict[str, ClassRead] = dataclasses.field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        """Render only the requested groups, so an absent key means "not asked for"."""
+        """Render only the requested groups, so an absent key means "not asked for".
+
+        Note the field list here is explicit rather than derived from
+        ``dataclasses.fields()``. That is what keeps :attr:`reads` and
+        :attr:`requested` out of the published fact shape, and it is why adding a
+        field to this class cannot silently change ``amt.hardware``.
+        """
         document: dict[str, Any] = {}
         for name in ("chassis", "baseboard", "processors", "chips", "memory", "storage"):
             if name not in self.requested:
@@ -1145,3 +1260,7 @@ class HardwareFacts:
             else:
                 document[name] = dataclasses.asdict(value)
         return document
+
+    def reads_to_dict(self) -> dict[str, Any]:
+        """Render :attr:`reads` for the operation receipt. See :func:`render_class_reads`."""
+        return render_class_reads(self.reads)

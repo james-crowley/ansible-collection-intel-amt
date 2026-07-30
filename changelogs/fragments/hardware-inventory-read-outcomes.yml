@@ -1,0 +1,41 @@
+---
+# The classification is worth justifying, because the obvious reading of the
+# hardware run was "the classes are unavailable" and that turned out to be false.
+#
+# There is NO `known_issues` entry for the inventory subsets being unavailable,
+# because they are not. Stage 1b read all six classes successfully on both lab
+# machines. The `bugfixes` entry is for the qualification stage that misreported
+# them, and the `minor_changes` entry is for the diagnostics that make that class
+# of misreport impossible to repeat. The one genuine limitation observed --
+# `CIM_Card.SerialNumber` empty on both machines -- is a `known_issues` entry,
+# since it is a real gap in what an operator can get and it is unresolved.
+minor_changes:
+  - "amt_info - the operation receipt gains C(hardware_reads), recording per WS-Man class what actually happened when
+    each inventory class was read: which C(amt.hardware) key the result was filed under, whether the class was C(read),
+    answered C(empty) with zero instances, or is C(absent), which verb answered, how many instances came back, and the
+    C(error_class) of any refusal. B(Diagnostics alongside the facts, never instead of them) -- a class that cannot be
+    read still yields C(null) for its group, so graceful degradation is unchanged. The reason this is worth a receipt
+    field is that C(null) alone cannot distinguish B(this firmware has no such class) from B(we asked for it wrongly)
+    from B(it answered and the reader did not recognise the shape), and the first hardware run needed exactly that
+    distinction. C(verb) also reveals when the C(CIM_Chassis)/C(CIM_Card) C(Enumerate) fallback ran, which is the only
+    way to see that a C(system) read cost six requests rather than the estimated two."
+
+bugfixes:
+  - "tests/hardware/qualify_readonly.yml - stop reporting populated inventory groups as C(null). The stage-1b summary
+    read C(amt.hardware.system) and C(amt.hardware.processor) -- key names C(amt_info) has never emitted, because
+    V(system) and V(processor) are B(gather_subset) names while the B(fact groups) they populate are C(chassis) plus
+    C(baseboard) and C(processors) plus C(chips). Jinja's C(| default(none)) turned each undefined lookup into a printed
+    C(null), so the first hardware run reported four of the six groups as unavailable on both lab machines when firmware
+    had in fact returned all six fully populated. Only V(memory) and V(storage) happen to share a name with the group
+    they fill, which is why those two looked correct and hid the pattern. The stage now B(asserts) the six-key set before
+    reporting on it, so a renamed or mistyped key fails the stage loudly instead of being indistinguishable from an
+    absent class."
+
+known_issues:
+  - "amt_info - C(amt.hardware.baseboard.serial_number) is C(null) on both lab machines (AMT 16.1.30 and 19.0.5) even
+    though the rest of C(CIM_Card) returns normally and C(amt.hardware.chassis.serial_number) populates. Nothing
+    available distinguishes B(firmware omitted the element) from B(firmware returned it empty) -- C(optional_str) maps
+    both to C(null) by design, and the evidence artifacts are already-parsed module output -- so settling it needs a raw
+    SOAP body. The practical effect is that the V(system) subset cannot tell a board swap from a re-rack on this
+    firmware, since that inference needs both serials. Tracked as
+    https://github.com/james-crowley/ansible-collection-intel-amt/issues/84."

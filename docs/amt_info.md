@@ -100,7 +100,7 @@ Everything is nested under a single `amt` key (`type: dict`, `returned: success`
 | `amt.bios_version` | `str` | when available | `CIM_BIOSElement.Version` — the **host BIOS**, not the AMT firmware version (`amt.version`). Weakest-evidenced field this module returns. |
 | `amt.hardware` | `dict` or `null` | when a hardware `gather_subset` was requested | Hardware/asset inventory. `null` unless opted into — which is not the default. See [Hardware/asset inventory](#hardwareasset-inventory-gather_subset) for the full field list, the value-table provenance, and the three-state contract for each group. |
 | `amt.hardware.chassis` | `dict` or `null` | subset `system` | `CIM_Chassis` — the **system serial number**, model, manufacturer, version, `tag`, and both package-type enumerations. |
-| `amt.hardware.baseboard` | `dict` or `null` | subset `system` | `CIM_Card` — the baseboard's own serial number, model, manufacturer, version, `can_be_frued`, package type. |
+| `amt.hardware.baseboard` | `dict` or `null` | subset `system` | `CIM_Card` — the baseboard's model, manufacturer, version, `can_be_frued`, package type, and its own `serial_number`. **`serial_number` is `null` on both lab machines** even though the rest of the class populates, so do not build on it; see [Limits](#limits-what-amt-does-not-expose-on-these-classes) and issue #84. |
 | `amt.hardware.processors` | `list[dict]` or `null` | subset `processor` | `CIM_Processor`, one entry per **physical package**. Clocks, socket (`upgrade_method`), stepping, status. No core or thread count — AMT does not expose one. `family` is raw and undecoded. |
 | `amt.hardware.chips` | `list[dict]` or `null` | subset `processor` | `CIM_Chip`. `version` here is the **human-readable processor name**, which `CIM_Processor` cannot supply. Reported unfiltered: `CIM_PhysicalMemory` is a subclass, so memory chips may appear — use `element_name` to tell them apart. |
 | `amt.hardware.memory` | `list[dict]` or `null` | subset `memory` | `CIM_PhysicalMemory`, one entry per DIMM. `capacity_bytes`, `memory_type`/`_text`, bank label, part/serial number. `form_factor` is raw and undecoded; read the speed-field trap below before using `speed_ns`. |
@@ -116,6 +116,7 @@ Everything is nested under a single `amt` key (`type: dict`, `returned: success`
 | `operation.error_class` | `str` or `null` | always | `null` on success; a stable machine-readable failure class on failure. |
 | `operation.gather_subset` | `list[str]` | always | **New in 0.5.0.** What `gather_subset` actually resolved to, sorted. Worth checking when `!`-negation is in play: `['!memory']` resolves to everything but memory, which is *more* than the default. |
 | `operation.wsman_requests_estimated` | `int` | always | **New in 0.5.0.** Best-case WS-Man HTTP request count for the resolved subsets. "Best case" is load-bearing — a faulting `Get` costs a further `Enumerate`/`Pull` pair on top. |
+| `operation.hardware_reads` | `dict` | when a hardware subset was requested | **New in 0.6.0.** What happened when each inventory class was read, keyed by WS-Man class name. Each entry carries `fact_group` (which `amt.hardware` key the result was filed under), `outcome` (`read`/`empty`/`absent`), `verb` (`Get`/`Enumerate`), `instances`, and `error_class` when refused. Diagnostics **alongside** the facts, never instead of them — an unreadable class still yields `null`. See [Three distinguishable outcomes per fact group](#three-distinguishable-outcomes-per-fact-group). |
 
 `amt_info` previously had neither the nested-`operation` shape nor the spread shape —
 see [Capability matrix](capability-matrix.md). It now gets the same `operation` receipt
@@ -272,7 +273,12 @@ Two subsets deliberately cover **two classes each**, because asking for one with
 other is always a mistake:
 
 - `system` — a chassis serial without a baseboard serial cannot tell a board swap from
-  a re-rack. The two are genuinely different values on real firmware.
+  a re-rack, and the two are genuinely different values on the vendor's recorded
+  firmware response. **On both lab machines the baseboard serial is empty**, so that
+  particular inference is not available there — but the rest of `CIM_Card` is, and
+  keeping the two classes in one subset is still right: reading a board's manufacturer,
+  model and version alongside the chassis is what makes the gap visible instead of
+  invisible. See the limits section below.
 - `processor` — `CIM_Processor` carries clocks, socket and stepping but identifies the
   part only by a `Family` integer this collection **does not decode** (see below).
   `CIM_Chip.Version` is what carries the human-readable processor name. Neither is
@@ -321,16 +327,34 @@ plainly here, in the module's own documentation, and in the option description.
 key is present **only** if its subset was requested, which gives three separate answers
 that operators genuinely need to tell apart:
 
-| Reading | Means |
-|---|---|
-| `'memory' not in amt.hardware` | not requested — nothing was asked of the endpoint |
-| `amt.hardware.memory is none` | requested, but the class faulted or this firmware does not implement it |
-| `amt.hardware.memory == []` | the class answered with **zero** instances — a real reading of a diskless or unpopulated machine, not a gap |
+| Reading | Means | Confirm it with |
+|---|---|---|
+| `amt.hardware is none` | **no hardware subset was requested at all** — no inventory request was issued | `operation.hardware_reads` is absent |
+| `'memory' not in amt.hardware` | that subset was not requested — nothing was asked of the endpoint for it | `CIM_PhysicalMemory` is absent from `operation.hardware_reads` |
+| `amt.hardware.memory is none` | requested, but the class faulted or this firmware does not implement it | `operation.hardware_reads['CIM_PhysicalMemory'].outcome == 'absent'`, with `error_class` naming the refusal |
+| `amt.hardware.memory == []` | the class answered with **zero** instances — a real reading of a diskless or unpopulated machine, not a gap | `operation.hardware_reads['CIM_PhysicalMemory'].outcome == 'empty'` |
 
 Each of the six groups degrades **independently**: a firmware that cannot enumerate
 disks still reports its DIMMs, its processors and its serial number. A missing class is
 never a module failure — same contract `amt_info` already applies to
 `AMT_EthernetPortSettings` and `CIM_BIOSElement`.
+
+**Read the third column.** The first two rows both render as a bare `null`/absent key and
+are easy to mistake for one another, and the difference between "I never asked" and "I
+asked and this firmware cannot answer" is the whole point of the distinction.
+`operation.hardware_reads` is what makes each row checkable rather than inferred, and it
+exists because that exact confusion happened: the first hardware run's summary read
+`amt.hardware.system` and `amt.hardware.processor` — key names this module has never
+emitted, since `system` and `processor` are *subset* names and the *fact groups* they
+populate are `chassis`+`baseboard` and `processors`+`chips` — and `| default(none)` turned
+those undefined lookups into four convincing `null`s while firmware had returned every
+group populated.
+
+**So: never index `amt.hardware` by a `gather_subset` name.** There is no
+`amt.hardware.system` and no `amt.hardware.processor`. The six keys are `chassis`,
+`baseboard`, `processors`, `chips`, `memory` and `storage`, and
+`operation.hardware_reads[<class>].fact_group` states the mapping for every class in
+every response.
 
 ### Value tables: where every mapping came from
 
@@ -394,10 +418,11 @@ provide. Stated explicitly so nobody concludes it was overlooked:
 - **No asset tag.** `CIM_Chassis` has no `AssetTag` property — the string does not occur
   anywhere in `go-wsman-messages`. What exists is `Tag`, reported as
   `amt.hardware.chassis.tag`, whose DMTF description says it "can contain information
-  such as asset tag or serial number data". On the only recorded real-firmware response
-  it holds the literal string `CIM_Chassis` — the class name, carrying no asset
-  information at all. It is reported because it is what firmware sends, and deliberately
-  **not** named `asset_tag`.
+  such as asset tag or serial number data". Real firmware puts the literal class name in
+  it — `CIM_Chassis` on the chassis and `CIM_Card` on the baseboard, on **both** lab
+  machines as well as on the vendor's recorded response — carrying no asset information
+  at all. It is reported because it is what firmware sends, and deliberately **not**
+  named `asset_tag`.
 - **No processor core or thread count.** `CIM_Processor` as AMT implements it exposes
   `DeviceID`, `Role`, `Family`, `OtherFamilyDescription`, `UpgradeMethod`,
   `MaxClockSpeed`, `CurrentClockSpeed`, `ExternalBusClockSpeed`, `Stepping`,
@@ -415,6 +440,24 @@ provide. Stated explicitly so nobody concludes it was overlooked:
   subclasses of it, and the recorded `Enumerate` of `CIM_PhysicalPackage` returns a
   `CIM_Card` instance — so reading it would return the same instances under a third
   resource URI, costing a round trip for no information.
+- **No baseboard serial number on the lab firmware.** This one is a *property* that
+  exists and is simply not filled in, rather than a property AMT lacks, so it is the
+  odd entry in this list — but the practical effect is the same. `CIM_Card.SerialNumber`
+  is declared, the vendor's own recorded response carries a value for it, and **both lab
+  machines return nothing for it** while returning `manufacturer`, `model`, `version`,
+  `can_be_frued` and `package_type` normally, and while `CIM_Chassis.SerialNumber`
+  populates.
+
+  Nothing available distinguishes "firmware omitted the element" from "firmware returned
+  it empty": `optional_str()` maps both to `null` by design, and the evidence artifacts
+  are already-parsed module output. Settling it needs a raw SOAP body. Tracked as issue
+  **#84**.
+
+  **The consequence is worth stating plainly, because the `system` subset's own
+  documentation claims otherwise above:** a chassis serial plus a board serial is what
+  tells a board swap from a re-rack. On this firmware only the chassis serial is
+  available, so that inference cannot be made here. Treat
+  `amt.hardware.baseboard.serial_number` as optional in anything you build.
 
 ### Two unit traps worth reading before using these values
 
@@ -439,10 +482,29 @@ corroborated by the recorded value being exactly 16 GiB.
 
 ### Verification status
 
-**Mock-tested and fixture-derived. Not hardware-verified.** See
-[Capability matrix](capability-matrix.md) Tier 2 — no qualification stage has run this
-against real Intel AMT firmware, and none of the values above has been read back from a
-live endpoint by this collection.
+**Hardware-verified for existence and shape; the decoded labels remain
+source-cited.** All six classes were read from real Intel AMT firmware on both lab
+machines — **AMT 16.1.30 and 19.0.5** — and all six fact groups came back populated.
+Stage 1b of `tests/hardware/qualify_readonly.yml`, CircleCI pipeline 167, job UUID
+`65ddc061-b273-4777-8c51-174a48e74402`. See
+[Capability matrix](capability-matrix.md) Tier 3, "`amt_info`'s hardware/asset inventory",
+for the per-class table and the run citation.
+
+What that does **not** establish is what any decoded *label* means. A dump proves a value
+was returned and never what it signifies — the mistake that left `wake_on_lan_capable`
+inverted for two releases — so every mapping above stays sourced from
+`go-wsman-messages` and the DMTF schema, with the raw integer reported alongside. That
+convention immediately earned its keep: AMT 19.0.5 returned
+`CIM_Processor.UpgradeMethod` = `85`, one past the end of the vendor's own 0-84 table,
+and it renders `unknown(85)` with the raw value intact rather than as a guessed socket
+name.
+
+Two observed limits on real firmware, both documented above rather than buried here:
+
+- **`baseboard.serial_number` is `null` on both machines** while `chassis.serial_number`
+  populates. `CIM_Card` is otherwise fully readable. Tracked as issue #84.
+- **`operational_status` is `[0]` (`"unknown"`) wherever it appears**, and absent
+  entirely on `CIM_PhysicalMemory`. Reported as received; infer no health from it.
 
 ## Round-trip cost
 
