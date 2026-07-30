@@ -1,0 +1,29 @@
+---
+minor_changes:
+  - tests/integration/mock_servers/ider_server.py / tests/integration/mock_servers/run_ider_mock.py - let a test ask the mock IDE-R
+    endpoint to B(refuse) the IDE-R feature toggle, or to never answer it at all. C(IderMockServer)'s C(feature_toggle_status) now
+    accepts C(0) (report failure for C(STATUS_DATA) type C(3) / C(REGS_TOGGLE)) and C(None) (consume the client's C(0x48)
+    C(DISABLE_ENABLE_FEATURES) and send no verdict back), alongside the existing C(1). Two new C(run_ider_mock.py) start-up flags,
+    C(--refuse-feature-toggle) and C(--withhold-feature-toggle), reach them from a playbook. Start-up flags rather than a control
+    channel, per C(run_wsman_mock.py)'s existing convention - these describe what an endpoint B(is), so they hold for its whole lifetime
+    and a failure stays attributable to one endpoint's configuration. The two faults are deliberately distinct rather than one knob - a
+    refusal is definite, so no media is being served, while a withheld verdict leaves that genuinely unknown and can only be ended by a
+    bounded wait, and the two carry different RV(ignore:error_class) values for that reason.
+  - tests/integration/targets/amt_media/tasks/main.yml - add two scenarios covering the IDE-R feature-toggle fault paths, closing a gap
+    in which the fix for the V(attached)-without-media defect was B(unguarded at the integration tier). C(feature_toggle_status) had
+    existed on the mock all along and B(nothing anywhere had ever passed it anything but the happy-path default), so the refusal path had
+    never been exercised end to end - not by a mock, and not by firmware either, since no hardware qualification stage covers it. The
+    fix was therefore guarded only by unit tests, while the one tier that drives the real C(ider.IderEngine) against a real socket had
+    never seen a refusal. Scenario D attaches against an endpoint that refuses the toggle and asserts C(amt_media) B(fails) with
+    RV(ignore:error_class) V(unsupported_capability) and never reports RV(session_state) V(attached); scenario E attaches against one
+    that never reports the toggle outcome and asserts it fails with RV(ignore:error_class) V(timeout) and a message saying whether media
+    is served is B(unknown). Both were confirmed to fail against a staged revert of the attach gate, where they report the pre-fix
+    behaviour - a success receipt for media nobody is serving.
+  - tests/unit/mock_servers/test_ider_server.py - drive the B(real) client (C(redirection.RedirectionSession) plus
+    C(ider.IderEngine)) against the mock IDE-R server over a real socket, which nothing below the C(amt_media) integration target did
+    before. The repository holds two independent implementations of one wire protocol - the mock plays firmware, C(ider.py) plays the
+    client - and each was tested only against its own hand-built expectations - the long-standing C(_FakeIderClient) does not exercise
+    C(ider.py) at all, and C(tests/unit/plugins/module_utils/test_ider.py) feeds C(IderEngine) frames it builds itself. The new tests
+    cover the handshake, the accepted/refused/withheld toggle verdicts, and a C(READ_10) large enough to force C(DATA_TO_HOST) chunking,
+    for the cost of a socket and no forked daemon. Also removes a stale claim in that file's docstring that C(plugins/module_utils/ider.py)
+    "is being written in parallel and does not exist yet" - four releases out of date.
