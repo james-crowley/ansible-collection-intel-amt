@@ -1,0 +1,18 @@
+---
+breaking_changes:
+  - "amt_media - C(attach_timeout) is now an attach B(deadline) rather than an early-confirmation bound. An attach that
+    reaches the timeout with the daemon still alive but no V(attached) verdict now B(fails) with
+    C(error_class=timeout) and C(indeterminate=true); it previously returned B(success) with C(session_state=starting).
+    The old behaviour was documented as intended -- C(docs/amt_media.md) said such an attach 'is not reported as a
+    failure' -- so this reverses stated intent deliberately, and is called out here rather than buried in bugfixes."
+  - "amt_media - the practical impact is on a genuinely slow endpoint whose attach used to exceed the default 10-second
+    C(attach_timeout) and still work. That case now fails. B(Raise C(attach_timeout)) rather than treating an unconfirmed
+    attach as a success: a caller that acts on the old receipt arms a one-time boot and resets the machine into media
+    that was never confirmed to be redirected, which is the worst outcome available to a module that serves boot media."
+
+minor_changes:
+  - "docs/amt_media.md - replace the Limitations entry describing C(attach_timeout) as 'an early-confirmation bound, not
+    an attach deadline', which the change above supersedes. It now states the new failure mode, why the reversal is
+    deliberate, that the re-probe is a repeated C(state=attached) call for the same C(session_id) rather than a blind
+    retry (IDE-R is single-session), and why the module does not tear the session down for you -- the session log is
+    removed alongside the state file, so an automatic teardown would delete the record of how far the attach got."
