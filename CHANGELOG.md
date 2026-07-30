@@ -2,41 +2,103 @@
 
 **Topics**
 
-- <a href="#v0-5-0">v0\.5\.0</a>
+- <a href="#v0-6-0">v0\.6\.0</a>
     - <a href="#release-summary">Release Summary</a>
     - <a href="#minor-changes">Minor Changes</a>
+    - <a href="#bugfixes">Bugfixes</a>
     - <a href="#known-issues">Known Issues</a>
-- <a href="#v0-4-0">v0\.4\.0</a>
+- <a href="#v0-5-0">v0\.5\.0</a>
     - <a href="#release-summary-1">Release Summary</a>
     - <a href="#minor-changes-1">Minor Changes</a>
-    - <a href="#breaking-changes--porting-guide">Breaking Changes / Porting Guide</a>
-    - <a href="#bugfixes">Bugfixes</a>
-- <a href="#v0-3-1">v0\.3\.1</a>
-    - <a href="#release-summary-2">Release Summary</a>
-    - <a href="#bugfixes-1">Bugfixes</a>
-- <a href="#v0-3-0">v0\.3\.0</a>
-    - <a href="#release-summary-3">Release Summary</a>
-    - <a href="#minor-changes-2">Minor Changes</a>
-    - <a href="#security-fixes">Security Fixes</a>
-    - <a href="#bugfixes-2">Bugfixes</a>
     - <a href="#known-issues-1">Known Issues</a>
-    - <a href="#new-modules">New Modules</a>
-- <a href="#v0-2-0">v0\.2\.0</a>
+- <a href="#v0-4-0">v0\.4\.0</a>
+    - <a href="#release-summary-2">Release Summary</a>
+    - <a href="#minor-changes-2">Minor Changes</a>
+    - <a href="#breaking-changes--porting-guide">Breaking Changes / Porting Guide</a>
+    - <a href="#bugfixes-1">Bugfixes</a>
+- <a href="#v0-3-1">v0\.3\.1</a>
+    - <a href="#release-summary-3">Release Summary</a>
+    - <a href="#bugfixes-2">Bugfixes</a>
+- <a href="#v0-3-0">v0\.3\.0</a>
     - <a href="#release-summary-4">Release Summary</a>
     - <a href="#minor-changes-3">Minor Changes</a>
+    - <a href="#security-fixes">Security Fixes</a>
     - <a href="#bugfixes-3">Bugfixes</a>
-- <a href="#v0-1-0">v0\.1\.0</a>
+    - <a href="#known-issues-2">Known Issues</a>
+    - <a href="#new-modules">New Modules</a>
+- <a href="#v0-2-0">v0\.2\.0</a>
     - <a href="#release-summary-5">Release Summary</a>
     - <a href="#minor-changes-4">Minor Changes</a>
+    - <a href="#bugfixes-4">Bugfixes</a>
+- <a href="#v0-1-0">v0\.1\.0</a>
+    - <a href="#release-summary-6">Release Summary</a>
+    - <a href="#minor-changes-5">Minor Changes</a>
     - <a href="#breaking-changes--porting-guide-1">Breaking Changes / Porting Guide</a>
     - <a href="#security-fixes-1">Security Fixes</a>
-    - <a href="#bugfixes-4">Bugfixes</a>
+    - <a href="#bugfixes-5">Bugfixes</a>
     - <a href="#new-modules-1">New Modules</a>
+
+<a id="v0-6-0"></a>
+## v0\.6\.0
+
+<a id="release-summary"></a>
+### Release Summary
+
+Makes a <code>null</code> inventory fact diagnosable\, and withdraws a 0\.5\.0 <code>known\_issues</code>
+entry that described a defect which never existed\.
+
+The 0\.5\.0 hardware inventory was reported as unavailable on both lab machines\. It was
+not\. Firmware had returned all six fact groups\, fully populated\, on AMT 16\.1\.30 and
+19\.0\.5\. What was broken was the qualification stage reporting on them\: it read
+<code>amt\.hardware\.system</code> and <code>amt\.hardware\.processor</code>\, key names <code>amt\_info</code> has
+never emitted\, because <code>system</code> and <code>processor</code> are <em>gather\_subset</em> names while the
+<em>fact groups</em> they fill are <code>chassis</code> plus <code>baseboard</code> and <code>processors</code> plus
+<code>chips</code>\. <code>\| default\(none\)</code> turned each undefined lookup into a printed <code>null</code>\.
+Only <code>memory</code> and <code>storage</code> happen to share a name with the group they fill\, which
+is why exactly those two looked correct and hid the pattern\.
+
+So the inventory facts are Tier 3 rather than Tier 2 — better than 0\.5\.0 claimed\, and
+the opposite of what its <code>known\_issues</code> entry said\. Their <em>existence and shape</em> are
+now observed on real firmware\; the <em>meaning of every decoded label</em> is unchanged and
+still rests on citation to <code>go\-wsman\-messages</code> and the DMTF schema\, never on a
+firmware dump\.
+
+The substantive addition is <code>operation\.hardware\_reads</code>\, which records per WS\-Man class
+whether it was <code>read</code>\, answered <code>empty</code>\, or is <code>absent</code>\, along with the verb used\,
+the instance count and the <code>error\_class</code> of any refusal\. <code>null</code> alone could not
+distinguish \"this firmware has no such class\" from \"we asked wrongly\" from \"it answered
+and the reader did not recognise the shape\" — and that ambiguity is precisely what made
+the misreport above survive review\. Diagnostics travel alongside the facts\, never
+instead of them\: a class that cannot be read still degrades its group to <code>null</code>\.
+
+One genuine limitation did come out of reading real evidence\:
+<code>amt\.hardware\.baseboard\.serial\_number</code> is <code>null</code> on both machines while
+<code>chassis\.serial\_number</code> populates\. Whether firmware omits the element or returns it
+empty is unresolved and needs a raw SOAP body to settle\.
+
+<a id="minor-changes"></a>
+### Minor Changes
+
+* amt\_info \- B\(withdraw the 0\.5\.0 C\(known\_issues\) entry\) that called the hardware inventory subsets Tier 2 and B\(not\) hardware\-verified\. That entry is no longer true and cannot be edited where it was published\, so it is withdrawn here instead\. Real firmware has now returned B\(all six\) fact groups \-\- C\(chassis\)\, C\(baseboard\)\, C\(processors\)\, C\(chips\)\, C\(memory\) and C\(storage\) \-\- on both lab machines\, AMT 16\.1\.30 and 19\.0\.5\, recorded by stage 1b of C\(tests/hardware/qualify\_readonly\.yml\) in CircleCI pipeline 167\, job UUID C\(65ddc061\-b273\-4777\-8c51\-174a48e74402\)\. The subsets were in fact working when 0\.5\.0 shipped\; what was broken was the qualification stage that reported on them\, so the entry described a defect that never existed\.
+* amt\_info \- be precise about what that promotion does and does not cover\, because conflating the two is how V\(wake\_on\_lan\_capable\) shipped inverted for two releases\. The B\(existence and shape\) of these facts is now Tier 3 \-\- observed on real firmware\. The B\(meaning of every decoded label\) is unchanged and remains Tier 1 by citation to C\(go\-wsman\-messages\) and the DMTF CIM schema\: a firmware dump proves a value was returned\, never what it means\. Two machines from one vendor\'s model family is also not a compatibility guarantee\, and C\(docs/capability\-matrix\.md\) keeps its untested\-generation caveat\.
+* amt\_info \- the operation receipt gains C\(hardware\_reads\)\, recording per WS\-Man class what actually happened when each inventory class was read\: which C\(amt\.hardware\) key the result was filed under\, whether the class was C\(read\)\, answered C\(empty\) with zero instances\, or is C\(absent\)\, which verb answered\, how many instances came back\, and the C\(error\_class\) of any refusal\. B\(Diagnostics alongside the facts\, never instead of them\) \-\- a class that cannot be read still yields C\(null\) for its group\, so graceful degradation is unchanged\. The reason this is worth a receipt field is that C\(null\) alone cannot distinguish B\(this firmware has no such class\) from B\(we asked for it wrongly\) from B\(it answered and the reader did not recognise the shape\)\, and the first hardware run needed exactly that distinction\. C\(verb\) also reveals when the C\(CIM\_Chassis\)/C\(CIM\_Card\) C\(Enumerate\) fallback ran\, which is the only way to see that a C\(system\) read cost six requests rather than the estimated two\.
+* tests/hardware/qualify\_readonly\.yml \- add a read\-only stage 1b that gathers the 0\.5\.0 hardware inventory subsets against real firmware and records its own evidence file\. Until this runs\, everything under C\(amt\.hardware\) is Tier 2\: the value tables establish what a value MEANS\, never that firmware returns it at all\. The stage reports which groups came back populated versus C\(null\)\, which is the finding no mock can produce\.
+
+<a id="bugfixes"></a>
+### Bugfixes
+
+* tests/hardware/qualify\_readonly\.yml \- stop reporting populated inventory groups as C\(null\)\. The stage\-1b summary read C\(amt\.hardware\.system\) and C\(amt\.hardware\.processor\) \-\- key names C\(amt\_info\) has never emitted\, because V\(system\) and V\(processor\) are B\(gather\_subset\) names while the B\(fact groups\) they populate are C\(chassis\) plus C\(baseboard\) and C\(processors\) plus C\(chips\)\. Jinja\'s C\(\| default\(none\)\) turned each undefined lookup into a printed C\(null\)\, so the first hardware run reported four of the six groups as unavailable on both lab machines when firmware had in fact returned all six fully populated\. Only V\(memory\) and V\(storage\) happen to share a name with the group they fill\, which is why those two looked correct and hid the pattern\. The stage now B\(asserts\) the six\-key set before reporting on it\, so a renamed or mistyped key fails the stage loudly instead of being indistinguishable from an absent class\.
+* tests/hardware/redact\-evidence\.py \- redact serial numbers and asset tags\. The 0\.5\.0 inventory facts put C\(serial\_number\)\, board and DIMM serials\, and C\(asset\_tag\) into evidence artifacts\, and the redactor had no concept of them \-\- so a hardware run would have published them\. A serial is arguably the most identifying value AMT reports\: it is what a vendor keys a warranty and a support case on\, and unlike an address it never changes\. These match no general pattern \-\- a serial is indistinguishable from a firmware version or part number \-\- so they are caught by key rather than by regex\. Model\, manufacturer and every decoded enum are deliberately preserved as diagnostic\.
+
+<a id="known-issues"></a>
+### Known Issues
+
+* amt\_info \- C\(amt\.hardware\.baseboard\.serial\_number\) is C\(null\) on both lab machines \(AMT 16\.1\.30 and 19\.0\.5\) even though the rest of C\(CIM\_Card\) returns normally and C\(amt\.hardware\.chassis\.serial\_number\) populates\. Nothing available distinguishes B\(firmware omitted the element\) from B\(firmware returned it empty\) \-\- C\(optional\_str\) maps both to C\(null\) by design\, and the evidence artifacts are already\-parsed module output \-\- so settling it needs a raw SOAP body\. The practical effect is that the V\(system\) subset cannot tell a board swap from a re\-rack on this firmware\, since that inference needs both serials\. Tracked as [https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/issues/84](https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/issues/84)\.
 
 <a id="v0-5-0"></a>
 ## v0\.5\.0
 
-<a id="release-summary"></a>
+<a id="release-summary-1"></a>
 ### Release Summary
 
 Adds hardware and asset inventory to <code>amt\_info</code>\: serial number\, model\,
@@ -68,7 +130,7 @@ wrong label stays diagnosable\.
 
 Unit tests 1078 to 1687\.
 
-<a id="minor-changes"></a>
+<a id="minor-changes-1"></a>
 ### Minor Changes
 
 * amt\_info \- C\(gather\_subset\) uses the same vocabulary as M\(ansible\.builtin\.setup\)\, including V\(all\)\, V\(min\) and C\(\!\)\-negation\, so C\(\[\'all\'\, \'\!storage\'\]\) works as a reader of C\(setup\) would expect\. It deliberately differs from C\(setup\) on one point\: the B\(default is the pre\-0\.5\.0 fact set\)\, not V\(all\)\. Inventory costs extra WS\-Man round trips\, and no existing caller should get slower for facts it never asked for\. Both shape and cost stay unchanged for anyone who does not opt in\.
@@ -76,7 +138,7 @@ Unit tests 1078 to 1687\.
 * amt\_info \- every decoded DMTF enum reports its raw integer alongside the name\, and an unrecognised value renders as C\(unknown\(\<raw\>\)\) rather than a bare C\(unknown\)\. Value tables come from C\(go\-wsman\-messages\) and the DMTF schema only\, never from a hardware dump \-\- a dump proves a value was returned\, never what it means\, which is the mistake that inverted C\(wake\_on\_lan\_capable\) for two releases\.
 * amt\_info \- the operation receipt gains C\(wsman\_requests\_estimated\)\, the best\-case HTTP request count for the resolved subsets\. Best\-case is load\-bearing\: a faulting C\(Get\) costs a further C\(Enumerate\)/C\(Pull\) pair\.
 
-<a id="known-issues"></a>
+<a id="known-issues-1"></a>
 ### Known Issues
 
 * amt\_info \- the hardware inventory subsets are Tier 2 in C\(docs/capability\-matrix\.md\)\: mock\-tested and fixture\-derived\, and B\(not\) hardware\-verified\. No qualification stage reads them\, so no real firmware has returned any of these fields to this collection\.
@@ -84,7 +146,7 @@ Unit tests 1078 to 1687\.
 <a id="v0-4-0"></a>
 ## v0\.4\.0
 
-<a id="release-summary-1"></a>
+<a id="release-summary-2"></a>
 ### Release Summary
 
 A correctness release\. No new modules\; the work went into finding and fixing things
@@ -124,7 +186,7 @@ the media\-session daemon lifecycle was false when written\.
 Unit tests 902 to 1070\; branch coverage 85\% to 92\%\, with the two least\-covered files
 — which were also the two highest\-consequence ones — going 50\% to 81\% and 75\% to 92\%\.
 
-<a id="minor-changes-1"></a>
+<a id="minor-changes-2"></a>
 ### Minor Changes
 
 * <code>amt\_baremetal\_install</code> role \- add C\(amt\_baremetal\_install\_media\_port\)\, the IDE\-R/redirection\-plane port for the media phase\, falling back to a conventional C\(amt\_media\_port\) inventory variable like the role\'s other connection options\. C\(tasks/attach\_media\.yml\) forwarded every connection option to M\(james\_crowley\.intel\_amt\.amt\_media\) except C\(port\)\, and the role had no media\-port variable at all\, so an IDE\-R session could only ever reach the stock redirection ports \(V\(16995\) with TLS\, V\(16994\) without\) \-\- an operator whose endpoints redirect elsewhere could not use the role\. Note this is deliberately a separate variable from C\(amt\_baremetal\_install\_port\)\, which addresses the WS\-Man plane \(V\(16993\)/V\(16992\)\)\: reusing that one would silently aim redirection traffic at the management port\.
@@ -145,7 +207,7 @@ Unit tests 902 to 1070\; branch coverage 85\% to 92\%\, with the two least\-cove
 * amt\_media \- C\(attach\_timeout\) is now an attach B\(deadline\) rather than an early\-confirmation bound\. An attach that reaches the timeout with the daemon still alive but no V\(attached\) verdict now B\(fails\) with C\(error\_class\=timeout\) and C\(indeterminate\=true\)\; it previously returned B\(success\) with C\(session\_state\=starting\)\. The old behaviour was documented as intended \-\- C\(docs/amt\_media\.md\) said such an attach \'is not reported as a failure\' \-\- so this reverses stated intent deliberately\, and is called out here rather than buried in bugfixes\.
 * amt\_media \- the practical impact is on a genuinely slow endpoint whose attach used to exceed the default 10\-second C\(attach\_timeout\) and still work\. That case now fails\. B\(Raise C\(attach\_timeout\)\) rather than treating an unconfirmed attach as a success\: a caller that acts on the old receipt arms a one\-time boot and resets the machine into media that was never confirmed to be redirected\, which is the worst outcome available to a module that serves boot media\.
 
-<a id="bugfixes"></a>
+<a id="bugfixes-1"></a>
 ### Bugfixes
 
 * \.circleci/config\.yml \- rewrite a stale comment that contradicted the configuration below it\. It said the destructive hardware stages \"are separate playbooks\.\.\. run deliberately by a human\, not wired into CI\"\, but stages 4\-7 are wired in as C\(hardware\-power\)\, C\(hardware\-media\)\, C\(hardware\-writable\) and C\(hardware\-pxe\)\. The comment now describes the gating that exists \- a strict escalation chain in which each stage sits behind its own dedicated approval job\, so reaching native PXE takes five separate approvals and cannot skip a rung\.
@@ -198,7 +260,7 @@ Unit tests 902 to 1070\; branch coverage 85\% to 92\%\, with the two least\-cove
 <a id="v0-3-1"></a>
 ## v0\.3\.1
 
-<a id="release-summary-2"></a>
+<a id="release-summary-3"></a>
 ### Release Summary
 
 Patch release\, and worth taking if you read <code>amt\_info</code>\'s
@@ -220,7 +282,7 @@ endpoint\.
 
 No other module is affected\, and no return key was added or removed\.
 
-<a id="bugfixes-1"></a>
+<a id="bugfixes-2"></a>
 ### Bugfixes
 
 * NOTICE / docs/protocol\-notes\.md / docs/capability\-matrix\.md \- re\-attribute the C\(LinkPolicy\) table to C\(go\-wsman\-messages\) and move it to Tier 1 \(vendor\-sourced\)\, keeping the C\(parmstro\) attribution for what that source genuinely supplied\: class names\, ResourceURIs\, selector strings and property names\. Record explicitly that their C\(LinkPolicy\) table was wrong\. This is the B\(second\) wrong table from that source \- their power constants already map C\(reset\) to CIM code 11 \(Diagnostic Interrupt/NMI\) rather than 10 \(Master Bus Reset\) \- so a third one should not be trusted without checking it against a vendor reference or a firmware fixture\.
@@ -233,7 +295,7 @@ No other module is affected\, and no return key was added or removed\.
 <a id="v0-3-0"></a>
 ## v0\.3\.0
 
-<a id="release-summary-3"></a>
+<a id="release-summary-4"></a>
 ### Release Summary
 
 Additive release\. No return shape from 0\.2\.0 changed\, so this is a drop\-in upgrade\.
@@ -276,7 +338,7 @@ does not catch\, and because that workflow is only reachable via a pipeline
 parameter the break survived two releases\. A guard script now fails the lint job on
 any stray double angle bracket\.
 
-<a id="minor-changes-2"></a>
+<a id="minor-changes-3"></a>
 ### Minor Changes
 
 * CI \- add a C\(hardware\-limit\) pipeline parameter that restricts the destructive hardware stages to a subset of the rendered inventory as an Ansible C\(\-\-limit\) pattern\. The stage playbooks target C\(hosts\: amt\_targets\)\, so without it a run authorised for one machine power\-cycles every machine in the lab\. Empty keeps the previous behaviour\. The flag is derived once by a shared C\(export\-hardware\-limit\) command rather than per job\, so a stage cannot silently omit it and widen the blast radius\.
@@ -306,7 +368,7 @@ any stray double angle bracket\.
 * CI \- add C\(tests/hardware/redact\-evidence\.py\)\, run by a shared C\(redact\-hardware\-evidence\) command immediately before every C\(store\_artifacts\) of C\(tests/hardware/output\) with C\(when\: always\)\. It rewrites each JSON file in place\, replacing addresses\, MACs\, UUIDs\, fingerprints\, digests\, FQDNs and the AMT hostname with stable per\-run pseudonyms while preserving firmware and BIOS versions\, capability flags\, states\, byte counters and the JSON structure\. Applied once at the CI layer rather than in each of the six playbooks that write evidence\, so a playbook added later cannot leak by default\.
 * CI \- redact identifying lab data from hardware qualification evidence before CircleCI publishes it\. The five hardware jobs stored C\(tests/hardware/output\) as the C\(hardware\-evidence\) artifact unmodified\, so the JSON the stage playbooks write exposed the target\'s IPv4 address\, default gateway\, subnet mask\, DNS servers\, MAC address\, platform GUID and management domain name\. Holding those values as CircleCI context secrets did not prevent this\: B\(context masking applies to log output only and does not extend to C\(store\_artifacts\) content\)\, and artifact visibility follows the project\'s Free and Open Source flag\, which made the evidence world\-readable\.
 
-<a id="bugfixes-2"></a>
+<a id="bugfixes-3"></a>
 ### Bugfixes
 
 * CI \- add C\(scripts/check\-circleci\-tags\.sh\)\, run first in the lint job\, failing on any double\-angle\-bracket sequence in C\(\.circleci/config\.yml\) that is not a parameter tag \-\- including inside comments\, where it is equally fatal\. This is the regression guard for the above\, since the tool that ought to catch it does not\.
@@ -319,7 +381,7 @@ any stray double angle bracket\.
 * docs/maintainer\-setup\.md \- record that machine 1 was re\-run and the v0\.2\.0 facts are confirmed on both firmware generations\. It still listed that re\-run as a remaining action and stated the facts had only ever been read on one generation\, both of which contradicted the capability matrix\.
 * tests/hardware/qualify\_checkmode\.yml \- write the stage\-3 evidence file\. The playbook runs under C\(\-\-check\) by design \(it asserts C\(ansible\_check\_mode\)\)\, which also made its own C\(copy\) task a no\-op\, so stage 3 was the one stage that left no reviewable record of the plans it computed\. C\(check\_mode\: false\) on that task fixes it\; the endpoint is still never touched\, because every AMT task in the playbook carries check mode of its own\.
 
-<a id="known-issues-1"></a>
+<a id="known-issues-2"></a>
 ### Known Issues
 
 * hardware \- C\(tests/hardware/qualify\_checkmode\.yml\) writes no evidence file\. Its C\(ansible\.builtin\.copy\) evidence task carries no C\(check\_mode\: false\) and stage 3 runs under C\(\-\-check\)\, so the C\(\-qualify\_checkmode\.json\) file is never created and never appears in the C\(hardware\-evidence\) artifact\. Observed on the 2026\-07\-29 re\-run\, where a three\-stage run produced two evidence files\. Nothing leaks as a result \-\- a file that does not exist cannot be published \-\- but stage 3 leaves no reviewable record of the plans it computed\.
@@ -333,7 +395,7 @@ any stray double angle bracket\.
 <a id="v0-2-0"></a>
 ## v0\.2\.0
 
-<a id="release-summary-4"></a>
+<a id="release-summary-5"></a>
 ### Release Summary
 
 Additive release\. Nothing in 0\.1\.0\'s return shapes changed\, so this is a drop\-in
@@ -364,7 +426,7 @@ user modules\. <code>docs/capability\-matrix\.md</code> records why\, and the sh
 that each is either a non\-functional stub or capable of stranding the management
 path in a way only a physical MEBx visit recovers\.
 
-<a id="minor-changes-3"></a>
+<a id="minor-changes-4"></a>
 ### Minor Changes
 
 * amt\_info \- derive C\(amt\.network\.wake\_on\_lan\_capable\) from whether C\(LinkPolicy\) contains V\(16\) \(network link always on\)\, and report C\(link\_policy\_names\) decoded alongside the raw list\. An endpoint without V\(16\) does not answer WS\-Man while powered off\, so C\(amt\_power\) with C\(state\=on\) fails there looking exactly like a network fault\; surfacing it read\-only turns that into a diagnosis\. V\(null\)\, not V\(false\)\, when C\(LinkPolicy\) is absent\.
@@ -378,7 +440,7 @@ path in a way only a physical MEBx visit recovers\.
 * docs/protocol\-notes\.md \- new section 2\.7 recording the network and system\-state classes\, their selectors and their property tables\, plus the hardware\-verified finding that C\(Enumerate\) returns HTTP 400 on AMT 10 for C\(AMT\_EthernetPortSettings\)\, C\(AMT\_GeneralSettings\)\, C\(AMT\_BootCapabilities\)\, C\(AMT\_BootSettingData\) and C\(AMT\_TLSSettingData\) while C\(Get\) with an exact selector works\. This cuts against the enumerate\-first habit elsewhere in the client\, so the existing hardware\-verified C\(Enumerate\) call sites are left alone rather than swapped for an unverified verb\. Derived from parmstro/intel\_amt\'s hardware research notes\, with attribution recorded per file in C\(NOTICE\)\; protocol facts were taken\, no code was\.
 * tests \- the mock WS\-Man server answers the three new reads the way real firmware does\: it requires the exact C\(Get\) selector for C\(AMT\_EthernetPortSettings\) and faults without it\, serves the MAC dash\-separated\, renders C\(LinkPolicy\) and C\(OperationalStatus\) as repeated elements\, and can be started with C\(\-\-no\-ethernet\-port\) or C\(\-\-bios\-get\-faults\) so the integration target exercises graceful degradation and the C\(Enumerate\) fallback over a real socket rather than only where a unit test mocks the transport away\.
 
-<a id="bugfixes-3"></a>
+<a id="bugfixes-4"></a>
 ### Bugfixes
 
 * amt\_power \- a new test asserts that every C\(state\) choice except V\(query\) has an entry in both the action map and the expected\-state map\, and that the module\'s copy of the expected\-state map agrees with the client\'s\. The first guards the defect being fixed here \-\- three actions implemented but not reachable \-\- and the second guards check mode previewing a different outcome than a real run would produce\.
@@ -386,7 +448,7 @@ path in a way only a physical MEBx visit recovers\.
 <a id="v0-1-0"></a>
 ## v0\.1\.0
 
-<a id="release-summary-5"></a>
+<a id="release-summary-6"></a>
 ### Release Summary
 
 First release\. Manages Intel AMT / vPro endpoints from Ansible\: capability
@@ -407,7 +469,7 @@ what is only covered by mock fixtures\, and what remains unproven\. That
 distinction is maintained deliberately\, and the \"still unproven\" list is short
 and specific rather than absent\.
 
-<a id="minor-changes-4"></a>
+<a id="minor-changes-5"></a>
 ### Minor Changes
 
 * Add C\(CONTRIBUTING\.md\) documenting the local verification sequence\, the C\(scripts/setup\-collection\-tree\.sh\) staging requirement \(it copies rather than symlinks\, and C\(COLLECTION\_BUILD\_ROOT\) must be set when several checkouts stage concurrently\)\, conventional commits\, the changelog\-fragment requirement\, and the two gates in front of hardware\-in\-the\-loop tests \([https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/issues/10](https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/issues/10)\)\.
@@ -478,7 +540,7 @@ and specific rather than absent\.
 * amt\_media \- require O\(tls\_fingerprint\) when O\(use\_tls\=true\)\, and reject O\(ca\_path\) outright\. The redirection plane is a raw TLS socket whose only trust mode is leaf pinning\; TLS without a pin is encrypted but unauthenticated\, and silently ignoring a supplied ca\_path would leave an operator believing the session was chain\-validated \([https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/pull/20](https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/pull/20)\)\.
 * amt\_media \- session state files are created mode 0600 rather than at the umask default\, so they are not readable by other local users even when the runtime directory already exists with laxer permissions \([https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/pull/20](https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/pull/20)\)\.
 
-<a id="bugfixes-4"></a>
+<a id="bugfixes-5"></a>
 ### Bugfixes
 
 * CI \- pin ansible\-core to 2\.17 in the hardware qualification job\. The lab runner image ships Python 3\.10 and ansible\-core 2\.19 requires 3\.11\+ on the controller\, so the job would have failed at dependency installation\. 2\.17 is also the collection\'s declared floor\, so hardware qualification now exercises the oldest version the collection claims to support\.
