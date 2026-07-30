@@ -23,9 +23,12 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import redact
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, see AmtFacts.hardware
+    from ansible_collections.james_crowley.intel_amt.plugins.module_utils.hardware import HardwareFacts
 
 #: docs/protocol-notes.md s2.4 -- CIM_AssociatedPowerManagementService.PowerState.
 #:
@@ -67,7 +70,20 @@ _POWER_STATE_TABLE: dict[int, str] = {
 #: DMTF ``CIM_EnabledLogicalElement.EnabledState``, per docs/protocol-notes.md s2.7.
 #: The full standard table, including ``4`` (shutting down) -- a partial table
 #: would report a real transitional state as "unknown".
-_ENABLED_STATE_TABLE: dict[int, str] = {
+#:
+#: **Public, and deliberately so** (it was ``_ENABLED_STATE_TABLE`` until 0.5.0).
+#: ``EnabledState`` and ``OperationalStatus`` are defined on DMTF *parent* classes
+#: -- ``CIM_EnabledLogicalElement`` and ``CIM_ManagedSystemElement`` -- so they
+#: appear on many of the classes this collection reads, not only
+#: ``CIM_ComputerSystem``. ``hardware.py`` decodes them on ``CIM_Processor``,
+#: ``CIM_MediaAccessDevice`` and every physical-asset class it touches, and it
+#: imports these two rather than declaring its own copies: a value table that
+#: exists in two places can drift against itself, which is exactly the failure
+#: ``docs/capability-matrix.md`` records for ``LinkPolicy``. One table, one place,
+#: whatever class it is applied to. The public naming follows
+#: ``message_log.py``'s existing convention for shared tables
+#: (``EVENT_SEVERITY_TABLE``, ``SYSTEM_ENTITY_TABLE``).
+ENABLED_STATE_TABLE: dict[int, str] = {
     0: "unknown",
     1: "other",
     2: "enabled",
@@ -83,7 +99,7 @@ _ENABLED_STATE_TABLE: dict[int, str] = {
 
 #: DMTF ``CIM_ManagedSystemElement.OperationalStatus``, per docs/protocol-notes.md
 #: s2.7. Typed by CIM as an *array*, so it is decoded element-wise.
-_OPERATIONAL_STATUS_TABLE: dict[int, str] = {
+OPERATIONAL_STATUS_TABLE: dict[int, str] = {
     0: "unknown",
     1: "other",
     2: "ok",
@@ -433,10 +449,10 @@ class SystemState:
             # than a bare "unknown", which the table already uses for the
             # defined value 0. The two are different findings and must not
             # render identically.
-            enabled_state_text=_decode(_ENABLED_STATE_TABLE, enabled_state) if enabled_state is not None else None,
+            enabled_state_text=_decode(ENABLED_STATE_TABLE, enabled_state) if enabled_state is not None else None,
             requested_state=optional_int(instance.get("RequestedState")),
             operational_status=statuses,
-            operational_status_text=[_decode(_OPERATIONAL_STATUS_TABLE, value) for value in statuses] if statuses is not None else None,
+            operational_status_text=[_decode(OPERATIONAL_STATUS_TABLE, value) for value in statuses] if statuses is not None else None,
         )
 
 
@@ -474,6 +490,17 @@ class AmtFacts:
     #: CIM_BIOSElement.Version -- host BIOS, not AMT firmware. `version` is the
     #: AMT one; these two are routinely confused, so they are named apart.
     bios_version: str | None = None
+    #: Hardware/asset inventory (``hardware.HardwareFacts``), or ``None`` when no
+    #: hardware ``gather_subset`` was requested -- which is the default, so this
+    #: is ``None`` for every caller who does not opt in and no existing caller
+    #: pays a round trip for it.
+    #:
+    #: Typed under ``TYPE_CHECKING`` only. ``hardware.py`` imports the value
+    #: tables and ``optional_*`` helpers from *this* module, so a runtime import
+    #: in the other direction would be circular. ``from __future__ import
+    #: annotations`` makes the annotation a string, so the type is available to a
+    #: checker and never evaluated at run time.
+    hardware: HardwareFacts | None = None
 
 
 @dataclass(frozen=True, slots=True)

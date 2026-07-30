@@ -48,7 +48,11 @@ ignore = [
 # from. Note this ignore is version-sensitive: ruff 0.15.5 raises S603 on these
 # call sites and 0.16.0 does not, which is part of why requirements-dev.txt pins
 # ruff exactly rather than with a floor.
-"tests/**" = ["S101", "S105", "S106", "S311", "S603"]
+# RUF012: class-level constant dicts are the normal way to hold a fixture shared
+# by every method in a test class. RUF012 exists to catch a mutable default on a
+# dataclass field, where the instance would silently share it; a test class that
+# never mutates its own constants is not that hazard.
+"tests/**" = ["S101", "S105", "S106", "S311", "S603", "RUF012"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["ansible_collections"]

@@ -1,0 +1,579 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Drives the real amt_info module's hardware/asset inventory (`gather_subset`)
+# against the local mock WS-Man server. What this target is for, specifically:
+#
+#  * The subset vocabulary resolves end to end, including `!` negation, and the
+#    default costs exactly what it cost before 0.5.0.
+#  * Every value table decodes over a real socket against values the mock takes
+#    from real firmware fixtures -- not against this collection's own idea of
+#    what firmware sends, which is how the LinkPolicy inversion survived two
+#    releases (docs/capability-matrix.md).
+#  * The three-state contract holds: a key absent means "not requested", null
+#    means "firmware lacks the class", and [] means "zero instances".
+#  * Each fact group degrades independently, and the Get-then-Enumerate fallback
+#    for the two singleton classes actually runs.
+
+- name: Create a scratch directory for this target's runtime files
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: amt_info_hardware_integration_
+  register: scratch_dir
+  delegate_to: localhost
+
+- name: Set mock-server paths for this run
+  ansible.builtin.set_fact:
+    mock_servers_dir: "{{ role_path }}/../../mock_servers"
+    full_ready_file: "{{ scratch_dir.path }}/wsman_full_ready.json"
+    no_hw_ready_file: "{{ scratch_dir.path }}/wsman_no_hw_ready.json"
+    get_faults_ready_file: "{{ scratch_dir.path }}/wsman_get_faults_ready.json"
+
+- name: Start the fully-populated mock WS-Man server
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ full_ready_file }} \
+      > {{ scratch_dir.path }}/wsman_full.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: full_start
+  changed_when: false
+  delegate_to: localhost
+
+# A separate process rather than a fault flipped on the server above: "this
+# firmware implements none of the inventory classes" is a property of an
+# endpoint, not of anything a client does to it, so it must hold for the
+# server's whole lifetime or a failure becomes unattributable.
+- name: Start a mock WS-Man server with no hardware inventory classes at all
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ no_hw_ready_file }} \
+      --no-hardware-inventory \
+      > {{ scratch_dir.path }}/wsman_no_hw.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: no_hw_start
+  changed_when: false
+  delegate_to: localhost
+
+# Also an endpoint property: whether a bare Get answers for CIM_Chassis and
+# CIM_Card. Both verbs are evidenced by the vendor fixture set (each class ships
+# get.xml AND enumerate.xml + pull.xml), so which one a given firmware accepts is
+# genuinely unsettled and the client's fallback has to be exercised for real.
+# --no-storage-class on the same server proves the fact groups degrade
+# *independently*: this endpoint must still report DIMMs and a serial number.
+- name: Start a mock WS-Man server whose singleton Gets fault and which has no storage class
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ get_faults_ready_file }} \
+      --hardware-get-faults --no-storage-class --memory-dimm-count 3 \
+      > {{ scratch_dir.path }}/wsman_get_faults.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: get_faults_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Wait for all three mock servers to report ready
+  ansible.builtin.wait_for:
+    path: "{{ item }}"
+    state: present
+    timeout: 15
+  loop:
+    - "{{ full_ready_file }}"
+    - "{{ no_hw_ready_file }}"
+    - "{{ get_faults_ready_file }}"
+  delegate_to: localhost
+
+- name: Read mock server connection info and pids
+  ansible.builtin.set_fact:
+    full_info: "{{ lookup('ansible.builtin.file', full_ready_file) | from_json }}"
+    no_hw_info: "{{ lookup('ansible.builtin.file', no_hw_ready_file) | from_json }}"
+    get_faults_info: "{{ lookup('ansible.builtin.file', get_faults_ready_file) | from_json }}"
+    full_pid: "{{ full_start.stdout | trim }}"
+    no_hw_pid: "{{ no_hw_start.stdout | trim }}"
+    get_faults_pid: "{{ get_faults_start.stdout | trim }}"
+
+- name: Exercise amt_info's hardware inventory against the mock servers
+  block:
+    # -- The default must not have changed ---------------------------------
+    - name: Read with no gather_subset at all
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ full_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: default_read
+
+    - name: Assert the default gathers no inventory and costs what it always cost
+      ansible.builtin.assert:
+        that:
+          - default_read.changed == false
+          - default_read.amt.hardware is none
+          - default_read.operation.gather_subset == ['config']
+          - default_read.operation.wsman_requests_estimated == 10
+        fail_msg: >-
+          amt_info's default must stay byte-for-byte what it was before 0.5.0, in return
+          shape and in round-trip cost. An existing caller must not start paying for
+          inventory they never asked for -- this is the one place that promise is checked
+          end to end.
+
+    - name: Assert every pre-0.5.0 fact still comes back alongside the new option
+      ansible.builtin.assert:
+        that:
+          - default_read.amt.reachable == true
+          - default_read.amt.hostname == 'mock-amt-host'
+          - default_read.amt.power_state.normalized == 'on'
+          - default_read.amt.capabilities.storage_redirection == true
+          - default_read.amt.network.mac_address == '00:00:5e:00:53:01'
+          - default_read.amt.system_state.enabled_state_text == 'enabled'
+          - default_read.amt.bios_version == 'EXAMPLE10H.86A.0000.2026.0101.0000'
+
+    # -- The full inventory ------------------------------------------------
+    - name: Read the whole inventory
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ full_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        gather_subset:
+          - all
+      delegate_to: localhost
+      no_log: true
+      register: full_read
+
+    - name: Assert the resolved subset and cost are reported on the receipt
+      ansible.builtin.assert:
+        that:
+          - full_read.changed == false
+          - full_read.operation.gather_subset == ['config', 'memory', 'processor', 'storage', 'system']
+          - full_read.operation.wsman_requests_estimated == 20
+          - full_read.operation.schema == 'intel-amt-operation/v1'
+          - full_read.operation.action == 'get_facts'
+          - full_read.operation.error_class is none
+
+    - name: Assert the chassis carries the system serial, model and both package-type enumerations
+      ansible.builtin.assert:
+        that:
+          - full_read.amt.hardware.chassis.serial_number == 'MOCKCHASSIS0001'
+          - full_read.amt.hardware.chassis.model == 'MOCK-CHASSIS-0000'
+          - full_read.amt.hardware.chassis.manufacturer == 'Mock Systems (example.invalid)'
+          # ChassisPackageType 0 is a *defined* value meaning Unknown. It must not
+          # render as unknown(0), which is how an out-of-table value renders.
+          - full_read.amt.hardware.chassis.chassis_package_type == 0
+          - full_read.amt.hardware.chassis.chassis_package_type_text == 'unknown'
+          # A different enumeration on the same instance, with a different value.
+          - full_read.amt.hardware.chassis.package_type == 3
+          - full_read.amt.hardware.chassis.package_type_text == 'chassis_frame'
+        fail_msg: >-
+          CIM_Chassis did not decode as expected. Note the two package-type properties use
+          different tables; a text of 'chassis_frame' on chassis_package_type_text, or
+          'unknown' on package_type_text, means one was decoded with the other's table.
+
+    - name: Assert CIM_Chassis Tag is surfaced as tag and is not treated as an asset tag
+      ansible.builtin.assert:
+        that:
+          # Real firmware puts the class name here. The mock serves it verbatim
+          # for exactly this assertion: it is the evidence that this class carries
+          # no asset tag, so the field must not be named asset_tag.
+          - full_read.amt.hardware.chassis.tag == 'CIM_Chassis'
+          - "'asset_tag' not in full_read.amt.hardware.chassis"
+
+    - name: Assert the baseboard serial is read and is distinct from the chassis serial
+      ansible.builtin.assert:
+        that:
+          - full_read.amt.hardware.baseboard.serial_number == 'MOCKBOARD0001'
+          - full_read.amt.hardware.baseboard.serial_number != full_read.amt.hardware.chassis.serial_number
+          - full_read.amt.hardware.baseboard.can_be_frued == true
+          - full_read.amt.hardware.baseboard.package_type == 9
+          - full_read.amt.hardware.baseboard.package_type_text == 'module_card'
+        fail_msg: >-
+          Recording only one of the two serials cannot tell a board swap from a re-rack.
+          Equal values here would mean one class's instance was reported for the other.
+
+    - name: Assert the processor decodes its sourced tables and leaves Family raw
+      ansible.builtin.assert:
+        that:
+          - full_read.amt.hardware.processors | length == 1
+          - full_read.amt.hardware.processors[0].device_id == 'CPU 0'
+          - full_read.amt.hardware.processors[0].max_clock_speed_mhz == 8300
+          - full_read.amt.hardware.processors[0].current_clock_speed_mhz == 2400
+          # Stepping is a free-form string per the class definition, not an int.
+          - full_read.amt.hardware.processors[0].stepping == '13'
+          - full_read.amt.hardware.processors[0].cpu_status == 1
+          - full_read.amt.hardware.processors[0].cpu_status_text == 'cpu_enabled'
+          - full_read.amt.hardware.processors[0].upgrade_method == 52
+          - full_read.amt.hardware.processors[0].upgrade_method_text == 'socket_bga1515'
+          # go-wsman-messages' own processor EnabledState map omits 0, 1 and 2, so
+          # its decoder cannot name this value. The full DMTF table can.
+          - full_read.amt.hardware.processors[0].enabled_state == 2
+          - full_read.amt.hardware.processors[0].enabled_state_text == 'enabled'
+
+    - name: Assert Family arrives raw with no decoded companion key
+      ansible.builtin.assert:
+        that:
+          - full_read.amt.hardware.processors[0].family == 198
+          - "'family_text' not in full_read.amt.hardware.processors[0]"
+          - "'requested_state_text' not in full_read.amt.hardware.processors[0]"
+        fail_msg: >-
+          CIM_Processor.Family has no value map in go-wsman-messages and the DMTF ValueMap
+          could not be sourced, so it ships raw. A family_text key appearing here means
+          someone invented a table -- which is precisely what cost this project 0.3.1.
+
+    - name: Assert no core or thread count is reported, because AMT does not expose one
+      ansible.builtin.assert:
+        that:
+          - "'core_count' not in full_read.amt.hardware.processors[0]"
+          - "'thread_count' not in full_read.amt.hardware.processors[0]"
+          - "'number_of_enabled_cores' not in full_read.amt.hardware.processors[0]"
+
+    - name: Assert CIM_Chip supplies the human-readable processor name
+      ansible.builtin.assert:
+        that:
+          - full_read.amt.hardware.chips | length == 1
+          - full_read.amt.hardware.chips[0].version is search('Mock')
+          - full_read.amt.hardware.chips[0].element_name == 'Managed System Processor Chip'
+          - full_read.amt.hardware.chips[0].tag == 'CPU 0'
+        fail_msg: >-
+          CIM_Chip.Version is the whole reason this class is read: it carries the processor
+          name that CIM_Processor cannot supply, since its only identifying field is the
+          undecodable Family integer.
+
+    - name: Assert per-DIMM memory facts decode, and FormFactor stays raw
+      ansible.builtin.assert:
+        that:
+          - full_read.amt.hardware.memory | length == 2
+          - full_read.amt.hardware.memory | map(attribute='bank_label') | list == ['BANK 0', 'BANK 2']
+          - full_read.amt.hardware.memory[0].capacity_bytes == 17179869184
+          - full_read.amt.hardware.memory[0].memory_type == 26
+          - full_read.amt.hardware.memory[0].memory_type_text == 'ddr4'
+          - full_read.amt.hardware.memory[0].form_factor == 13
+          # 13 is SODIMM under SMBIOS type 17 and SRIMM under the DMTF ValueMap.
+          # The two published tables disagree and no vendor map settles it, so no
+          # name is claimed for it at all.
+          - "'form_factor_text' not in full_read.amt.hardware.memory[0]"
+
+    - name: Assert all four memory speed inputs are surfaced separately and none is derived
+      ansible.builtin.assert:
+        that:
+          # Exactly what real firmware reported: Speed 0 with IsSpeedInMhz true.
+          # A client reading Speed as "the speed" reports every DIMM as zero.
+          - full_read.amt.hardware.memory[0].speed_ns == 0
+          - full_read.amt.hardware.memory[0].is_speed_in_mhz == true
+          - full_read.amt.hardware.memory[0].max_memory_speed_mhz == 2400
+          - full_read.amt.hardware.memory[0].configured_clock_speed_mhz == 2400
+          - "'speed' not in full_read.amt.hardware.memory[0]"
+          - "'speed_mhz' not in full_read.amt.hardware.memory[0]"
+        fail_msg: >-
+          IsSpeedInMhz selects which property holds the speed, and the two are in different
+          units (nanoseconds vs MHz). No single derived speed field is offered because there
+          is no honest value for it in the false branch.
+
+    - name: Assert disks decode their arrays and inverted Security enumeration
+      ansible.builtin.assert:
+        that:
+          - full_read.amt.hardware.storage | length == 2
+          - full_read.amt.hardware.storage | map(attribute='device_id') | list == ['MEDIA DEV 0', 'MEDIA DEV 1']
+          # Left in the KBytes the class definition states: nothing establishes
+          # whether firmware means 1000 or 1024, so no conversion is performed.
+          - full_read.amt.hardware.storage[0].max_media_size_kb == 960197124
+          - full_read.amt.hardware.storage[1].max_media_size_kb == 500107862
+          # A CIM indexed array, so a list even at length one.
+          - full_read.amt.hardware.storage[0].capabilities == [4]
+          - full_read.amt.hardware.storage[0].capabilities_text == ['supports_writing']
+          # 2 is Unknown here and 1 is Other -- the reverse of most CIM tables.
+          - full_read.amt.hardware.storage[0].security == 2
+          - full_read.amt.hardware.storage[0].security_text == 'unknown'
+          - full_read.amt.hardware.storage[0].enabled_default == 2
+          - full_read.amt.hardware.storage[0].enabled_default_text == 'enabled'
+
+    - name: Assert the storage class exposes no model, vendor or serial, because it has none
+      ansible.builtin.assert:
+        that:
+          - "'model' not in full_read.amt.hardware.storage[0]"
+          - "'manufacturer' not in full_read.amt.hardware.storage[0]"
+          - "'serial_number' not in full_read.amt.hardware.storage[0]"
+          # ElementName is the same constant string on every instance, so it
+          # identifies nothing -- device_id is the only discriminator.
+          - full_read.amt.hardware.storage[0].element_name == full_read.amt.hardware.storage[1].element_name
+          - full_read.amt.hardware.storage[0].device_id != full_read.amt.hardware.storage[1].device_id
+
+    - name: Assert no real machine's identifiers leak into the returned facts
+      ansible.builtin.assert:
+        that:
+          - "'JRQN0243007J' not in (full_read.amt.hardware | string)"
+          - "'NUC9V7QNX' not in (full_read.amt.hardware | string)"
+          - "'CT16G4SFD824A' not in (full_read.amt.hardware | string)"
+          - "'i7-9850H' not in (full_read.amt.hardware | string)"
+        fail_msg: >-
+          The go-wsman-messages fixtures these responses derive from carry what look like a
+          real machine's serials, model numbers and processor name. None of them may enter
+          this repository, so the mock substitutes every identity-shaped value.
+
+    # -- Subset selection --------------------------------------------------
+    - name: Read only the identity plates and the disks
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ full_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        gather_subset:
+          - system
+          - storage
+      delegate_to: localhost
+      no_log: true
+      register: partial_read
+
+    - name: Assert a group that was not requested is absent, not null
+      ansible.builtin.assert:
+        that:
+          - partial_read.operation.gather_subset == ['config', 'storage', 'system']
+          - partial_read.operation.wsman_requests_estimated == 14
+          - "'chassis' in partial_read.amt.hardware"
+          - "'baseboard' in partial_read.amt.hardware"
+          - "'storage' in partial_read.amt.hardware"
+          # Not requested, so the key is gone entirely. That is what makes
+          # "did I ask for this" answerable separately from "does firmware have it".
+          - "'memory' not in partial_read.amt.hardware"
+          - "'processors' not in partial_read.amt.hardware"
+          - "'chips' not in partial_read.amt.hardware"
+        fail_msg: >-
+          A key present-and-null would conflate "I did not request this subset" with "this
+          firmware does not implement the class". Those are different findings.
+
+    - name: Read everything except the per-DIMM detail, using negation
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ full_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        gather_subset:
+          - all
+          - '!memory'
+      delegate_to: localhost
+      no_log: true
+      register: negated_read
+
+    - name: Assert exclusion is applied last and beats the inclusion it contradicts
+      ansible.builtin.assert:
+        that:
+          - negated_read.operation.gather_subset == ['config', 'processor', 'storage', 'system']
+          - negated_read.operation.wsman_requests_estimated == 18
+          - "'memory' not in negated_read.amt.hardware"
+          - "'chassis' in negated_read.amt.hardware"
+        fail_msg: >-
+          gather_subset resolution must match ansible.builtin.setup exactly, or borrowing
+          the option's name is a lie. Exclusions are applied after inclusions.
+
+    - name: Assert the minimal subset cannot be excluded away
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ full_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        gather_subset:
+          - '!all'
+      delegate_to: localhost
+      no_log: true
+      register: not_all_read
+
+    - name: Assert !all leaves the pre-0.5.0 fact set intact
+      ansible.builtin.assert:
+        that:
+          - not_all_read.operation.gather_subset == ['config']
+          - not_all_read.amt.hardware is none
+          # The keys that existed before 0.5.0 can never be removed by any value
+          # of gather_subset, which is what makes the option unable to break a caller.
+          - not_all_read.amt.reachable == true
+          - not_all_read.amt.hostname == 'mock-amt-host'
+
+    # -- Check mode and idempotence ---------------------------------------
+    - name: Check mode performs the identical inventory read
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ full_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        gather_subset:
+          - all
+      delegate_to: localhost
+      no_log: true
+      check_mode: true
+      register: check_read
+
+    - name: Assert check mode returns the same inventory and still reports changed=false
+      ansible.builtin.assert:
+        that:
+          - check_read.changed == false
+          - check_read.amt.hardware.chassis.serial_number == 'MOCKCHASSIS0001'
+          - check_read.amt.hardware.memory | length == 2
+        fail_msg: >-
+          amt_info is read-only, so there is nothing for check mode to skip. An inventory
+          read that returned nothing under --check would be useless to exactly the audience
+          this feature exists for.
+
+    - name: Idempotence -- reading the inventory again reports changed=false and agrees
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ full_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        gather_subset:
+          - all
+      delegate_to: localhost
+      no_log: true
+      register: full_read_again
+
+    - name: Assert the repeated read is unchanged and identical
+      ansible.builtin.assert:
+        that:
+          - full_read_again.changed == false
+          - full_read_again.amt.hardware == full_read.amt.hardware
+
+    # -- Graceful degradation ---------------------------------------------
+    - name: Read the inventory from firmware that implements none of the classes
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ no_hw_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        gather_subset:
+          - all
+      delegate_to: localhost
+      no_log: true
+      register: no_hw_read
+
+    - name: Assert every absent class degrades to null and the read still succeeds
+      ansible.builtin.assert:
+        that:
+          - no_hw_read.changed == false
+          - no_hw_read.amt.reachable == true
+          - no_hw_read.amt.hardware.chassis is none
+          - no_hw_read.amt.hardware.baseboard is none
+          - no_hw_read.amt.hardware.processors is none
+          - no_hw_read.amt.hardware.chips is none
+          - no_hw_read.amt.hardware.memory is none
+          - no_hw_read.amt.hardware.storage is none
+          # Everything unrelated still comes through: absent inventory classes
+          # must not blank out the rest of the read.
+          - no_hw_read.amt.hostname == 'mock-amt-host'
+          - no_hw_read.amt.system_state.enabled_state_text == 'enabled'
+        fail_msg: >-
+          A firmware generation that lacks these classes must yield null fact groups, never
+          a module failure. This is the same degradation contract amt_info already applies
+          to AMT_EthernetPortSettings and CIM_BIOSElement.
+
+    - name: Read from firmware whose singleton Gets fault and which has no storage class
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ get_faults_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        gather_subset:
+          - hardware
+      delegate_to: localhost
+      no_log: true
+      register: fallback_read
+
+    - name: Assert the Enumerate fallback recovers both singleton classes
+      ansible.builtin.assert:
+        that:
+          - fallback_read.changed == false
+          - fallback_read.amt.hardware.chassis.serial_number == 'MOCKCHASSIS0001'
+          - fallback_read.amt.hardware.baseboard.serial_number == 'MOCKBOARD0001'
+        fail_msg: >-
+          The Get-then-Enumerate fallback did not run. This is the exact class of bug this
+          project already hit once -- a mock that only implemented one verb for a class real
+          firmware served with the other, with unit tests mocking the transport and hiding it.
+
+    - name: Assert one absent class degrades only its own group
+      ansible.builtin.assert:
+        that:
+          - fallback_read.amt.hardware.storage is none
+          # Same endpoint, still reporting its DIMMs and its serial number. A
+          # client that gave up on the first fault would show nulls here too.
+          - fallback_read.amt.hardware.memory | length == 3
+          - fallback_read.amt.hardware.processors | length == 1
+          - fallback_read.amt.hardware.chips | length == 1
+        fail_msg: >-
+          Fact groups must degrade independently. A machine AMT cannot enumerate disks on
+          must still report its DIMMs, its processors and its serial number -- that is what
+          makes a mixed-generation fleet inventoriable at all.
+
+    # -- Fault injection ---------------------------------------------------
+    - name: Fault injection -- a wrong password is refused before any inventory is returned
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ full_info.port }}"
+        username: admin
+        password: definitely-the-wrong-password
+        use_tls: false
+        allow_insecure_transport: true
+        gather_subset:
+          - all
+      delegate_to: localhost
+      no_log: true
+      register: bad_password
+      ignore_errors: true
+
+    - name: Assert an authentication failure is classified, not degraded to empty facts
+      ansible.builtin.assert:
+        that:
+          - bad_password.failed == true
+          - bad_password.error_class == 'authentication'
+          - "'hardware' not in bad_password"
+        fail_msg: >-
+          Only a protocol/unsupported fault means "this class is absent here". A credential
+          failure must fail the module, not report a machine with no hardware.
+  always:
+    - name: Stop the fully-populated mock WS-Man server
+      ansible.builtin.command: "kill {{ full_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup; the assertions above are what must pass.
+      changed_when: false
+
+    - name: Stop the no-hardware mock WS-Man server
+      ansible.builtin.command: "kill {{ no_hw_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
+      changed_when: false
+
+    - name: Stop the Get-faulting mock WS-Man server
+      ansible.builtin.command: "kill {{ get_faults_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
+      changed_when: false
+
+    - name: Remove the scratch directory
+      ansible.builtin.file:
+        path: "{{ scratch_dir.path }}"
+        state: absent
+      delegate_to: localhost

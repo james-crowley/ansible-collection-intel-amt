@@ -40,8 +40,14 @@ from wsman_server import (
     CIM_BOOT_CONFIG_SETTING,
     CIM_BOOT_SERVICE,
     CIM_BOOT_SOURCE_SETTING,
+    CIM_CARD,
+    CIM_CHASSIS,
+    CIM_CHIP,
     CIM_COMPUTER_SYSTEM,
+    CIM_MEDIA_ACCESS_DEVICE,
+    CIM_PHYSICAL_MEMORY,
     CIM_POWER_MANAGEMENT_SERVICE,
+    CIM_PROCESSOR,
     DEFAULT_MESSAGE_LOG_RECORDS,
     ETHERNET_PORT_0_INSTANCE_ID,
     MESSAGE_LOG_BATCH_SIZE,
@@ -1248,3 +1254,322 @@ class TestAmt10EnumerateFaultMode:
         assert _post(server, _enumerate_xml(AMT_BOOT_CAPABILITIES)).status_code == 400
         server.faults.enumerate_faults_for_amt_classes = False
         assert _post(server, _enumerate_xml(AMT_BOOT_CAPABILITIES)).status_code == 200
+
+
+def _drain_enumeration(server, resource_uri: str) -> list[ET.Element]:
+    """Enumerate + Pull to completion, returning one element per instance body.
+
+    Written as a helper because every hardware-inventory class below is
+    multi-instance, and asserting on a single Pull would silently pass for a mock
+    that never sets EndOfSequence.
+    """
+    resp = _post(server, _enumerate_xml(resource_uri))
+    assert resp.status_code == 200, resp.text
+    context = _find_text(ET.fromstring(resp.content), "EnumerationContext")  # noqa: S314
+    assert context
+
+    class_name = resource_uri.rsplit("/", 1)[-1]
+    instances: list[ET.Element] = []
+    for _pull in range(20):
+        resp = _post(server, _pull_xml(resource_uri, context))
+        assert resp.status_code == 200, resp.text
+        root = ET.fromstring(resp.content)  # noqa: S314
+        instances.extend(elem for elem in root.iter() if elem.tag.rsplit("}", 1)[-1] == class_name)
+        if _has_element(root, "EndOfSequence"):
+            return instances
+        context = _find_text(root, "EnumerationContext")
+        assert context, "server must keep returning a context until EndOfSequence"
+    pytest.fail("enumeration did not terminate")
+
+
+def _child_text(instance: ET.Element, local_name: str) -> str | None:
+    for child in instance:
+        if child.tag.rsplit("}", 1)[-1] == local_name:
+            return child.text
+    return None
+
+
+def _child_texts(instance: ET.Element, local_name: str) -> list[str]:
+    return [child.text for child in instance if child.tag.rsplit("}", 1)[-1] == local_name]
+
+
+class TestHardwareInventoryClassesAreServed:
+    """The six inventory classes, on the wire, over both verbs where evidenced."""
+
+    def test_chassis_answers_a_bare_get(self, server):
+        resp = _post(server, _get_xml(CIM_CHASSIS))
+        assert resp.status_code == 200
+        root = ET.fromstring(resp.content)  # noqa: S314
+        assert _find_text(root, "SerialNumber") == server.state.chassis_serial_number
+
+    def test_card_answers_a_bare_get_with_a_different_serial(self, server):
+        resp = _post(server, _get_xml(CIM_CARD))
+        assert resp.status_code == 200
+        root = ET.fromstring(resp.content)  # noqa: S314
+        # Distinct from the chassis serial on purpose: a chassis serial reported
+        # where a board serial belongs is a real bug class, and identical
+        # placeholders would let it pass.
+        assert _find_text(root, "SerialNumber") == server.state.baseboard_serial_number
+        assert server.state.baseboard_serial_number != server.state.chassis_serial_number
+
+    @pytest.mark.parametrize("resource_uri", [CIM_CHASSIS, CIM_CARD], ids=["chassis", "card"])
+    def test_the_singletons_answer_enumerate_as_well_as_get(self, server, resource_uri):
+        # Both verbs are directly evidenced: responses/cim/chassis/ and
+        # responses/cim/card/ each ship get.xml AND enumerate.xml + pull.xml. A
+        # mock serving only one of them is how a Get-only client passes here and
+        # then fails against firmware that answers only Enumerate.
+        instances = _drain_enumeration(server, resource_uri)
+        assert len(instances) == 1
+        assert _child_text(instances[0], "SerialNumber")
+
+    @pytest.mark.parametrize("resource_uri", [CIM_CHASSIS, CIM_CARD], ids=["chassis", "card"])
+    def test_get_and_enumerate_report_identical_fields(self, server, resource_uri):
+        get_root = ET.fromstring(_post(server, _get_xml(resource_uri)).content)  # noqa: S314
+        enumerated = _drain_enumeration(server, resource_uri)[0]
+        for field in ("SerialNumber", "Model", "Manufacturer", "PackageType", "Tag", "Version"):
+            assert _find_text(get_root, field) == _child_text(enumerated, field), field
+
+    def test_chassis_tag_is_the_class_name_exactly_as_real_firmware_reports_it(self, server):
+        # Kept verbatim from responses/cim/chassis/get.xml because it is the
+        # evidence that this class carries no asset tag -- a claim docs/amt_info.md
+        # makes and that would be unsupported if the mock invented a tidier value.
+        root = ET.fromstring(_post(server, _get_xml(CIM_CHASSIS)).content)  # noqa: S314
+        assert _find_text(root, "Tag") == "CIM_Chassis"
+
+    def test_chassis_serves_both_package_type_enumerations_with_different_values(self, server):
+        # The real fixture reports ChassisPackageType 0 and PackageType 3 on one
+        # instance. Serving two different values through two different tables is
+        # what catches a client that decodes one with the other's table.
+        root = ET.fromstring(_post(server, _get_xml(CIM_CHASSIS)).content)  # noqa: S314
+        assert _find_text(root, "ChassisPackageType") == "0"
+        assert _find_text(root, "PackageType") == "3"
+
+    def test_processor_enumeration_carries_the_fixtures_enum_values(self, server):
+        instances = _drain_enumeration(server, CIM_PROCESSOR)
+        assert len(instances) == 1
+        cpu = instances[0]
+        # All from responses/cim/physical/processor/get.xml. Family 198 in
+        # particular is served because the client does NOT decode it.
+        assert _child_text(cpu, "Family") == "198"
+        assert _child_text(cpu, "UpgradeMethod") == "52"
+        assert _child_text(cpu, "CPUStatus") == "1"
+        assert _child_text(cpu, "MaxClockSpeed") == "8300"
+        assert _child_text(cpu, "Stepping") == "13"
+
+    def test_processor_enabled_state_is_the_value_the_vendor_map_cannot_decode(self, server):
+        # go-wsman-messages' cim/processor/decoder.go enabledStateMap omits 0, 1
+        # and 2, so its own decoder answers "Value not found in map" for its own
+        # captured firmware response. Serving the fixture's 2 is what proves this
+        # collection decodes it with the full DMTF table instead.
+        cpu = _drain_enumeration(server, CIM_PROCESSOR)[0]
+        assert _child_text(cpu, "EnabledState") == "2"
+
+    def test_processor_serves_no_core_or_thread_count(self, server):
+        # Neither exists on the class definition or on either fixture. Serving one
+        # would invite a reader to conclude AMT reports it.
+        cpu = _drain_enumeration(server, CIM_PROCESSOR)[0]
+        names = {child.tag.rsplit("}", 1)[-1].lower() for child in cpu}
+        assert not {name for name in names if "core" in name or "thread" in name}
+
+    def test_chip_version_carries_a_human_readable_processor_name(self, server):
+        # The field this class is read for, and the one CIM_Processor cannot
+        # supply. Obviously fake here -- the fixture's is a real processor model.
+        chip = _drain_enumeration(server, CIM_CHIP)[0]
+        assert _child_text(chip, "ElementName") == "Managed System Processor Chip"
+        assert "Mock" in _child_text(chip, "Version")
+
+    def test_memory_enumeration_serves_one_instance_per_dimm(self, server):
+        instances = _drain_enumeration(server, CIM_PHYSICAL_MEMORY)
+        assert len(instances) == 2
+        assert [_child_text(dimm, "BankLabel") for dimm in instances] == ["BANK 0", "BANK 2"]
+
+    def test_memory_serves_the_fixtures_speed_trap_combination(self, server):
+        # Speed 0 with IsSpeedInMhz true and MaxMemorySpeed 2400, exactly as real
+        # firmware reported. This is the single most valuable value in the handler:
+        # a client that reads Speed as "the speed" reports every DIMM as zero, and
+        # a tidier combination would let that bug pass.
+        dimm = _drain_enumeration(server, CIM_PHYSICAL_MEMORY)[0]
+        assert _child_text(dimm, "Speed") == "0"
+        assert _child_text(dimm, "IsSpeedInMhz") == "true"
+        assert _child_text(dimm, "MaxMemorySpeed") == "2400"
+
+    def test_memory_serves_the_fixtures_capacity_memory_type_and_form_factor(self, server):
+        dimm = _drain_enumeration(server, CIM_PHYSICAL_MEMORY)[0]
+        assert _child_text(dimm, "Capacity") == "17179869184"  # 16 GiB exactly
+        assert _child_text(dimm, "MemoryType") == "26"  # DDR4
+        assert _child_text(dimm, "FormFactor") == "13"  # deliberately undecoded by the client
+
+    def test_memory_tags_are_disambiguated_the_way_firmware_does_it(self, server):
+        # The fixture's two DIMMs report Tag "9876543210" and "9876543210 (#1)".
+        # The (#N) shape is preserved because a client keying on Tag has to meet it.
+        instances = _drain_enumeration(server, CIM_PHYSICAL_MEMORY)
+        tags = [_child_text(dimm, "Tag") for dimm in instances]
+        assert tags[0] != tags[1]
+        assert tags[1].endswith("(#1)")
+
+    def test_storage_enumeration_serves_the_fixtures_two_devices(self, server):
+        instances = _drain_enumeration(server, CIM_MEDIA_ACCESS_DEVICE)
+        assert len(instances) == 2
+        assert [_child_text(disk, "DeviceID") for disk in instances] == ["MEDIA DEV 0", "MEDIA DEV 1"]
+        # The fixture's own KByte figures, which read as 960 GB and 500 GB only
+        # under KB = 1000 -- which is what makes the unit ambiguity real.
+        assert [_child_text(disk, "MaxMediaSize") for disk in instances] == ["960197124", "500107862"]
+
+    def test_storage_element_name_is_the_same_constant_on_every_device(self, server):
+        # It is on both fixture devices, so a client telling disks apart by
+        # ElementName must fail here, because it would fail on firmware.
+        instances = _drain_enumeration(server, CIM_MEDIA_ACCESS_DEVICE)
+        names = {_child_text(disk, "ElementName") for disk in instances}
+        assert names == {"Managed System Media Access Device"}
+
+    def test_storage_serves_no_model_vendor_or_serial(self, server):
+        # Not an omission: those properties do not exist on the class definition
+        # or on the fixture.
+        disk = _drain_enumeration(server, CIM_MEDIA_ACCESS_DEVICE)[0]
+        names = {child.tag.rsplit("}", 1)[-1] for child in disk}
+        assert names.isdisjoint({"Model", "Manufacturer", "SerialNumber", "PartNumber"})
+
+    def test_storage_security_is_the_fixtures_value(self, server):
+        # 2 = Unknown in this class's inverted enumeration. A client that
+        # transposed 1 and 2 would report every disk as "other" and look plausible.
+        disk = _drain_enumeration(server, CIM_MEDIA_ACCESS_DEVICE)[0]
+        assert _child_text(disk, "Security") == "2"
+
+    def test_capabilities_is_emitted_as_a_repeated_element_even_at_length_one(self, server):
+        # A CIM indexed array. A client reading it as a scalar would pass against a
+        # mock that emitted one and then drop values on a real multi-capability disk.
+        disk = _drain_enumeration(server, CIM_MEDIA_ACCESS_DEVICE)[0]
+        assert _child_texts(disk, "Capabilities") == ["4"]
+
+    def test_no_physical_package_handler_is_served(self, server):
+        # Deliberate: responses/cim/physical/package/pull.xml shows the Enumerate of
+        # CIM_PhysicalPackage returning a CIM_Card instance, because CIM_Card and
+        # CIM_Chassis are both subclasses of it. Serving it would return the same
+        # two instances under a third resource URI -- a round trip for no
+        # information. Asserted so the absence stays deliberate.
+        resp = _post(server, _enumerate_xml(f"{CIM_CHASSIS.rsplit('/', 1)[0]}/CIM_PhysicalPackage"))
+        assert resp.status_code == 500
+
+
+class TestHardwareInventoryInstanceCounts:
+    """Zero, one and several -- all reachable over a real socket."""
+
+    @pytest.mark.parametrize("count", [0, 1, 2, 4])
+    def test_memory_serves_the_configured_number_of_dimms(self, server, count):
+        server.state.memory_dimm_count = count
+        assert len(_drain_enumeration(server, CIM_PHYSICAL_MEMORY)) == count
+
+    @pytest.mark.parametrize("count", [0, 1, 2])
+    def test_storage_serves_the_configured_number_of_disks(self, server, count):
+        server.state.storage_device_count = count
+        assert len(_drain_enumeration(server, CIM_MEDIA_ACCESS_DEVICE)) == count
+
+    def test_zero_instances_is_a_successful_empty_enumeration_not_a_fault(self, server):
+        # A diskless machine is a real reading. If this faulted instead, a client
+        # could not tell "no disks" from "firmware has no such class".
+        server.state.storage_device_count = 0
+        resp = _post(server, _enumerate_xml(CIM_MEDIA_ACCESS_DEVICE))
+        assert resp.status_code == 200
+        assert _drain_enumeration(server, CIM_MEDIA_ACCESS_DEVICE) == []
+
+    def test_a_two_socket_machine_serves_two_processors_and_two_chips(self, server):
+        server.state.processor_count = 2
+        assert [_child_text(cpu, "DeviceID") for cpu in _drain_enumeration(server, CIM_PROCESSOR)] == ["CPU 0", "CPU 1"]
+        assert [_child_text(chip, "Tag") for chip in _drain_enumeration(server, CIM_CHIP)] == ["CPU 0", "CPU 1"]
+
+    def test_paging_is_exercised_across_several_dimms(self, server):
+        server.state.memory_dimm_count = 5
+        server.page_size = 2  # 3 pulls for 5 items
+        labels = [_child_text(dimm, "BankLabel") for dimm in _drain_enumeration(server, CIM_PHYSICAL_MEMORY)]
+        assert labels == ["BANK 0", "BANK 2", "BANK 4", "BANK 6", "BANK 8"]
+        assert len(set(labels)) == 5  # nothing dropped, nothing duplicated
+
+
+class TestHardwareInventoryAbsence:
+    """A class a firmware does not implement must be absent for *both* verbs."""
+
+    ABSENCE_CASES: ClassVar[tuple[tuple[str, str], ...]] = (
+        (CIM_CHASSIS, "chassis_present"),
+        (CIM_CARD, "card_present"),
+        (CIM_PROCESSOR, "processor_present"),
+        (CIM_CHIP, "chip_present"),
+        (CIM_PHYSICAL_MEMORY, "physical_memory_present"),
+        (CIM_MEDIA_ACCESS_DEVICE, "media_access_present"),
+    )
+
+    @pytest.mark.parametrize("resource_uri,attribute", ABSENCE_CASES, ids=[case[1] for case in ABSENCE_CASES])
+    def test_an_absent_class_faults_a_get(self, server, resource_uri, attribute):
+        setattr(server.state, attribute, False)
+        resp = _post(server, _get_xml(resource_uri))
+        assert resp.status_code == 500
+        assert ET.fromstring(resp.content).find(f"{{{NS_S}}}Body/{{{NS_S}}}Fault") is not None  # noqa: S314
+
+    @pytest.mark.parametrize("resource_uri,attribute", ABSENCE_CASES, ids=[case[1] for case in ABSENCE_CASES])
+    def test_an_absent_class_faults_enumerate_too(self, server, resource_uri, attribute):
+        # Faulting only the Get would leave the client's Enumerate fallback
+        # answering for firmware that has no such class -- the opposite of the
+        # scenario being modelled. This mock already made that mistake once with
+        # AMT_MessageLog.
+        setattr(server.state, attribute, False)
+        resp = _post(server, _enumerate_xml(resource_uri))
+        assert resp.status_code == 500
+        assert ET.fromstring(resp.content).find(f"{{{NS_S}}}Body/{{{NS_S}}}Fault") is not None  # noqa: S314
+
+    def test_one_absent_class_leaves_the_others_answering(self, server):
+        # The degradation contract has to be per class, or a mixed-generation
+        # fleet cannot be inventoried at all.
+        server.state.media_access_present = False
+        assert _post(server, _enumerate_xml(CIM_MEDIA_ACCESS_DEVICE)).status_code == 500
+        assert _post(server, _get_xml(CIM_CHASSIS)).status_code == 200
+        assert len(_drain_enumeration(server, CIM_PHYSICAL_MEMORY)) == 2
+
+    @pytest.mark.parametrize("resource_uri", [CIM_CHASSIS, CIM_CARD], ids=["chassis", "card"])
+    def test_hardware_get_faults_leaves_only_the_enumerate_path(self, server, resource_uri):
+        # Distinct from absence: the class exists, but this firmware refuses a bare
+        # Get for it. Both verbs are evidenced by the fixture set, so the client's
+        # fallback has to be exercised over a real socket rather than only where a
+        # unit test mocks the transport away.
+        server.faults.hardware_get_faults = True
+        assert _post(server, _get_xml(resource_uri)).status_code == 500
+        assert len(_drain_enumeration(server, resource_uri)) == 1
+
+    def test_the_hardware_classes_are_unaffected_by_the_amt10_enumerate_fault_mode(self, server):
+        # docs/protocol-notes.md 2.7's HTTP 400 finding is scoped to AMT_-prefixed
+        # classes and says outright that CIM_ ones are not affected. Sweeping these
+        # in would be extending a hardware finding past what it covers.
+        server.faults.enumerate_faults_for_amt_classes = True
+        for resource_uri in (CIM_CHASSIS, CIM_CARD, CIM_PROCESSOR, CIM_CHIP, CIM_PHYSICAL_MEMORY, CIM_MEDIA_ACCESS_DEVICE):
+            assert _post(server, _enumerate_xml(resource_uri)).status_code == 200, resource_uri
+
+
+class TestHardwareInventoryCarriesNoRealIdentifiers:
+    """No real serial, model, part number or processor name may enter this repo."""
+
+    def test_none_of_the_vendor_fixtures_identifying_values_are_reproduced(self, server):
+        # The exact strings from go-wsman-messages' fixtures, which belong to a
+        # real machine. Asserted as absent rather than merely "not used", so a
+        # future convenience copy-paste is caught.
+        forbidden = (
+            "JRQN0243007J",
+            "KNQN0221020W",
+            "NUC9V7QNX",
+            "NUC9V7QNB",
+            "K47174-402",
+            "K47180-402",
+            "CT16G4SFD824A",
+            "E0E8D670",
+            "E0E8D070",
+            "859B",
+            "i7-9850H",
+            "9876543210",
+        )
+        bodies = [_post(server, _get_xml(CIM_CHASSIS)).text, _post(server, _get_xml(CIM_CARD)).text]
+        for resource_uri in (CIM_PROCESSOR, CIM_CHIP, CIM_PHYSICAL_MEMORY, CIM_MEDIA_ACCESS_DEVICE):
+            bodies.extend(ET.tostring(instance, encoding="unicode") for instance in _drain_enumeration(server, resource_uri))
+        combined = "\n".join(bodies)
+        for value in forbidden:
+            assert value not in combined, f"{value!r} is a real machine's identifier and must not be served"
+
+    def test_manufacturer_strings_use_the_invalid_tld(self, server):
+        root = ET.fromstring(_post(server, _get_xml(CIM_CHASSIS)).content)  # noqa: S314
+        assert "example.invalid" in _find_text(root, "Manufacturer")

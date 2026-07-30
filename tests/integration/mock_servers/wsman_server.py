@@ -67,6 +67,26 @@ comment immediately above it:
 ``_get_message_log`` is the model for a FIRMWARE-DERIVED entry; ``_get_computer_system``
 is the model for an INVENTED one.
 
+One narrow, explicit carve-out on NAMES-ONLY, added for the hardware-inventory
+handlers
+------------------------------------------------------------------------------
+
+A NAMES-ONLY handler may carry across a *non-identifying enumeration or numeric*
+value from the cited fixture, **provided the individual value is cited where it is
+served**. The reason is specific: this mock's job includes exercising the client's
+DMTF value-table decoding, and a table fed from this project's own idea of what
+firmware sends is precisely how the ``LinkPolicy`` inversion survived two releases
+(``docs/capability-matrix.md``). Serving ``MemoryType`` 26 because a real firmware
+response says 26 is evidence; serving it because 26 looked like a sensible number
+is not.
+
+What may **never** be carried across is identifying data. The
+``go-wsman-messages`` fixtures for these classes contain what appear to be real
+serial numbers, model numbers, part numbers and a BIOS revision from an actual
+machine. Every one of those is substituted here with an obviously-fake value, and
+each handler says so. So for these handlers: the field set and the cited
+enumeration values may be relied on; every identity-shaped string may not.
+
 Rejections
 ----------
 
@@ -127,6 +147,15 @@ CIM_BOOT_SERVICE = f"{CIM_BASE}/CIM_BootService"
 CIM_BOOT_SOURCE_SETTING = f"{CIM_BASE}/CIM_BootSourceSetting"
 CIM_COMPUTER_SYSTEM = f"{CIM_BASE}/CIM_ComputerSystem"
 CIM_BIOS_ELEMENT = f"{CIM_BASE}/CIM_BIOSElement"
+# Hardware/asset inventory (docs/protocol-notes.md 2.9). All CIM_-prefixed, so
+# 2.7's "Enumerate is HTTP 400 on AMT_ classes" finding does not reach them --
+# that section says so explicitly.
+CIM_CHASSIS = f"{CIM_BASE}/CIM_Chassis"
+CIM_CARD = f"{CIM_BASE}/CIM_Card"
+CIM_PROCESSOR = f"{CIM_BASE}/CIM_Processor"
+CIM_CHIP = f"{CIM_BASE}/CIM_Chip"
+CIM_PHYSICAL_MEMORY = f"{CIM_BASE}/CIM_PhysicalMemory"
+CIM_MEDIA_ACCESS_DEVICE = f"{CIM_BASE}/CIM_MediaAccessDevice"
 AMT_ETHERNET_PORT_SETTINGS = f"{AMT_BASE}/AMT_EthernetPortSettings"
 AMT_BOOT_SETTING_DATA = f"{AMT_BASE}/AMT_BootSettingData"
 AMT_BOOT_CAPABILITIES = f"{AMT_BASE}/AMT_BootCapabilities"
@@ -461,6 +490,37 @@ class AmtState:
     #: for firmware that does not implement the event log at all.
     message_log_present: bool = True
 
+    # -- Hardware / asset inventory (docs/protocol-notes.md 2.9) ---------------
+    #
+    # Serials are obviously fake and deliberately *different* from each other: a
+    # chassis serial reported where a board serial belongs is a real bug class,
+    # and identical placeholders would let it pass. Neither is a real machine's --
+    # the vendor fixtures these handlers derive from do carry what look like real
+    # ones, and none of those is reproduced anywhere in this repository.
+    chassis_serial_number: str = "MOCKCHASSIS0001"
+    baseboard_serial_number: str = "MOCKBOARD0001"
+    #: CIM_Chassis.ChassisPackageType. Defaults to the real fixture's 0, which is
+    #: the *defined* value "Unknown" -- distinct from a value outside the table.
+    #: Mutable so a test can serve a defined non-zero value and an undefined one.
+    chassis_package_type: int = 0
+    #: How many instances each multi-instance class returns. Zero is a legitimate
+    #: reading, not a fault: a diskless machine really has no
+    #: CIM_MediaAccessDevice, and a client must report that as an empty list
+    #: rather than as a firmware gap.
+    processor_count: int = 1
+    memory_dimm_count: int = 2
+    storage_device_count: int = 2
+    #: Set any of these False to make both Get and Enumerate of that class fault,
+    #: standing in for firmware that does not implement it. Each degrades one fact
+    #: group independently -- a machine with no CIM_MediaAccessDevice must still
+    #: report its DIMMs. See HARDWARE_PRESENCE_ATTR.
+    chassis_present: bool = True
+    card_present: bool = True
+    processor_present: bool = True
+    chip_present: bool = True
+    physical_memory_present: bool = True
+    media_access_present: bool = True
+
 
 @dataclass
 class FaultConfig:
@@ -494,6 +554,16 @@ class FaultConfig:
     #: alongside ``get.xml`` (see ``_message_log_items``). Sweeping it in would be
     #: extending a hardware finding past what it covers.
     enumerate_faults_for_amt_classes: bool = False
+
+    #: Fault a bare ``Get`` of ``CIM_Chassis`` and ``CIM_Card``, leaving only the
+    #: ``Enumerate`` path -- the same knob as ``bios_element_get_faults`` below and
+    #: for the same reason. The vendor fixture set evidences *both* verbs for both
+    #: classes (``get.xml`` and ``enumerate.xml``+``pull.xml``), so which one a
+    #: given firmware accepts is not settled, and the client's fallback has to be
+    #: exercised over a real socket rather than only where a unit test mocks the
+    #: transport away. Distinct from ``chassis_present``/``card_present``, which
+    #: model the class being absent from *both* verbs.
+    hardware_get_faults: bool = False
 
     #: Fault a bare ``Get CIM_BIOSElement``, leaving only the ``Enumerate`` path.
     #: This exists because ``CIM_BIOSElement`` has no obvious singleton selector,
@@ -1015,6 +1085,91 @@ def _get_message_log(state: AmtState) -> dict[str, object]:
     }
 
 
+def _get_chassis(state: AmtState) -> dict[str, object]:
+    """``CIM_Chassis`` -- **NAMES-ONLY**, with cited enum values.
+
+    Field set is exactly the ten properties on the real firmware response fixture
+    ``go-wsman-messages`` ships at
+    ``pkg/wsman/wsmantesting/responses/cim/chassis/get.xml``, cross-checked
+    against ``pkg/wsman/cim/chassis/types.go``. No property is added and none is
+    omitted.
+
+    **Enumeration values carried across from that fixture, and citable as such:**
+
+    * ``ChassisPackageType`` = ``0`` -- the fixture's value. ``0`` is a *defined*
+      value (``Unknown``) in ``chassis/decoder.go``, which makes it the single
+      most useful value to serve here: a client that renders defined-0 as a bare
+      ``unknown`` instead of the value it holds, or that confuses "table says
+      unknown" with "value not in table", fails against this.
+    * ``PackageType`` = ``3`` -- also the fixture's value, and a *different*
+      enumeration (``ChassisFrame``) on the same instance. Serving both at once,
+      with different values, is what catches a client that decodes one with the
+      other's table. The fixture is the reason they differ here rather than a
+      choice of this mock's.
+    * ``OperationalStatus`` = ``0`` -- the fixture's value, and a CIM array, so
+      emitted as a repeated element.
+
+    **Substituted, and NOT citable:** ``SerialNumber``, ``Model``,
+    ``Manufacturer`` and ``Version``. The fixture's are what look like a real
+    machine's (``JRQN0243007J``, ``NUC9V7QNX``, ``K47174-402``); this repository
+    holds no such data, so obviously-fake stand-ins are served.
+
+    ``Tag`` is served as the literal ``CIM_Chassis`` because **that is what the
+    fixture reports** -- the class name, not an asset tag. It is kept verbatim
+    precisely because it is the evidence that this class carries no asset tag,
+    which is a claim ``docs/amt_info.md`` makes and an integration assertion
+    checks.
+    """
+    return {
+        "ChassisPackageType": state.chassis_package_type,
+        "CreationClassName": "CIM_Chassis",
+        "ElementName": "Managed System Chassis",
+        "Manufacturer": "Mock Systems (example.invalid)",
+        "Model": "MOCK-CHASSIS-0000",
+        "OperationalStatus": [0],
+        "PackageType": 3,
+        "SerialNumber": state.chassis_serial_number,
+        # Verbatim from the fixture: firmware really does put the class name here.
+        "Tag": "CIM_Chassis",
+        "Version": "MOCK-000-000",
+    }
+
+
+def _get_card(state: AmtState) -> dict[str, object]:
+    """``CIM_Card`` -- **NAMES-ONLY**, with cited enum values.
+
+    Field set is exactly the ten properties on the real firmware response fixture
+    ``pkg/wsman/wsmantesting/responses/cim/card/get.xml``, cross-checked against
+    ``pkg/wsman/cim/card/types.go``.
+
+    **Carried across and citable:** ``PackageType`` = ``9`` (``ModuleCard``) and
+    ``OperationalStatus`` = ``0``, both the fixture's. ``9`` is deliberately
+    *different* from the chassis handler's ``3`` above -- both come from their
+    respective fixtures, and serving two different values through one shared
+    table is how a client that hard-codes either gets caught.
+    ``CanBeFRUed`` = ``true``, also the fixture's.
+
+    **Substituted:** serial, model, manufacturer and version, for the same reason
+    as ``_get_chassis``. The board serial served here is deliberately *different*
+    from the chassis serial, as it is on the real fixtures -- a client that
+    reported one for the other would otherwise pass.
+
+    ``Tag`` is again the class name, verbatim from the fixture.
+    """
+    return {
+        "CanBeFRUed": True,
+        "CreationClassName": "CIM_Card",
+        "ElementName": "Managed System Base Board",
+        "Manufacturer": "Mock Systems (example.invalid)",
+        "Model": "MOCK-BOARD-0000",
+        "OperationalStatus": [0],
+        "PackageType": 9,
+        "SerialNumber": state.baseboard_serial_number,
+        "Tag": "CIM_Card",
+        "Version": "MOCK-000-001",
+    }
+
+
 GET_HANDLERS: dict[str, Callable[[AmtState], dict[str, object]]] = {
     CIM_ASSOCIATED_POWER_MANAGEMENT_SERVICE: _get_power,
     AMT_MESSAGE_LOG: _get_message_log,
@@ -1026,6 +1181,14 @@ GET_HANDLERS: dict[str, Callable[[AmtState], dict[str, object]]] = {
     CIM_COMPUTER_SYSTEM: _get_computer_system,
     AMT_ETHERNET_PORT_SETTINGS: _get_ethernet_port_settings,
     CIM_BIOS_ELEMENT: _get_bios_element,
+    # Both hardware singletons answer Get, which is how MeshCentral fetches them
+    # (`*CIM_Chassis`/`*CIM_Card` in amtmanager.js's BatchEnum -- the `*` prefix
+    # means "Get instead of Enumerate, to reduce round trips"). Both also answer
+    # Enumerate, via ENUMERATE_HANDLERS: the fixture set ships get.xml AND
+    # enumerate.xml+pull.xml for each, so both verbs are directly evidenced and a
+    # client is entitled to use either.
+    CIM_CHASSIS: _get_chassis,
+    CIM_CARD: _get_card,
 }
 
 
@@ -1338,11 +1501,306 @@ def _message_log_items(state: AmtState) -> list[str]:
     return [_fields_to_instance_xml(AMT_MESSAGE_LOG, _get_message_log(state))]
 
 
+def _chassis_items(state: AmtState) -> list[str]:
+    """``Enumerate`` form of ``CIM_Chassis``, sharing ``_get_chassis``'s fields.
+
+    Both verbs are served because the fixture set directly evidences both:
+    ``responses/cim/chassis/`` ships ``get.xml``, ``enumerate.xml`` and
+    ``pull.xml``. ``AmtClient`` tries ``Get`` and falls back to ``Enumerate``
+    (following ``CIM_BIOSElement``'s precedent), and the
+    ``chassis_get_faults`` knob exists so the fallback is exercised over a real
+    socket rather than only where a unit test mocks the transport away -- the
+    exact gap that let a Get-only mock hide an Enumerate-only class once before.
+    """
+    return [_fields_to_instance_xml(CIM_CHASSIS, _get_chassis(state))]
+
+
+def _card_items(state: AmtState) -> list[str]:
+    """``Enumerate`` form of ``CIM_Card``, sharing ``_get_card``'s fields.
+
+    Same reasoning as ``_chassis_items``: ``responses/cim/card/`` ships
+    ``get.xml``, ``enumerate.xml`` and ``pull.xml``, so both verbs are evidenced
+    and both must answer identically here.
+
+    Note ``responses/cim/physical/package/pull.xml`` -- the ``Enumerate`` of
+    ``CIM_PhysicalPackage`` -- returns a ``CIM_Card`` instance, because
+    ``CIM_Card`` and ``CIM_Chassis`` are both subclasses of it. That is why this
+    mock serves no ``CIM_PhysicalPackage`` handler at all: it would return these
+    same two instances under a third resource URI, adding a round trip and no
+    information. Stated here rather than left as an unexplained absence.
+    """
+    return [_fields_to_instance_xml(CIM_CARD, _get_card(state))]
+
+
+def _processor_items(state: AmtState) -> list[str]:
+    """``Enumerate`` form of ``CIM_Processor`` -- **NAMES-ONLY**, with cited enum values.
+
+    Field set is exactly the eighteen properties on the real firmware response
+    fixtures ``pkg/wsman/wsmantesting/responses/cim/physical/processor/get.xml``
+    and ``.../pull.xml`` (identical sets), cross-checked against
+    ``pkg/wsman/cim/processor/types.go``.
+
+    **There is no core count or thread count**, on the fixtures or in the class
+    definition, so none is served. Adding one would be inventing a property AMT
+    does not implement -- the same defect as the ``BootSourceIndex`` this file
+    removed from ``_boot_source_items``.
+
+    **Enumeration and numeric values carried across from the fixture, citable:**
+
+    * ``Family`` = ``198``. Served precisely *because* this collection does not
+      decode it: the integration target asserts it comes through raw, and 198 is
+      what real firmware actually reported.
+    * ``UpgradeMethod`` = ``52`` -- ``SocketBGA1515`` in
+      ``processor/decoder.go``, a soldered part, consistent with the NUC the rest
+      of that fixture set describes.
+    * ``CPUStatus`` = ``1`` (``CPUEnabled``), ``HealthState`` = ``0``
+      (``Unknown``, a defined value), ``EnabledState`` = ``2`` (``Enabled``),
+      ``RequestedState`` = ``12``, ``OperationalStatus`` = ``0``.
+      ``EnabledState`` 2 matters: ``go-wsman-messages``' own ``processor``
+      ``enabledStateMap`` omits 0, 1 and 2, so its decoder answers "Value not
+      found in map" for this very fixture. This collection decodes it with the
+      full DMTF table instead, and serving the fixture's 2 is what proves that.
+    * ``MaxClockSpeed`` ``8300``, ``CurrentClockSpeed`` ``2400``,
+      ``ExternalBusClockSpeed`` ``100``, ``Stepping`` ``13``, ``Role``
+      ``Central`` -- all the fixture's. ``Stepping`` is a *string* property per
+      the class definition even though it looks numeric, and is served as one.
+    * ``OtherFamilyDescription`` empty, as on the fixture -- which is correct,
+      since it is only populated when ``Family`` is 1.
+
+    Nothing here is identity-shaped, so nothing needed substituting; ``DeviceID``
+    is ``CPU 0``, a slot label, not a serial. ``state.processor_count`` lets a
+    test ask for a multi-socket machine, with ``DeviceID`` indexed the way the
+    fixture's single instance is.
+    """
+    items = []
+    for index in range(state.processor_count):
+        items.append(
+            _fields_to_instance_xml(
+                CIM_PROCESSOR,
+                {
+                    "CPUStatus": 1,
+                    "CreationClassName": "CIM_Processor",
+                    "CurrentClockSpeed": 2400,
+                    "DeviceID": f"CPU {index}",
+                    "ElementName": "Managed System CPU",
+                    "EnabledState": 2,
+                    "ExternalBusClockSpeed": 100,
+                    "Family": 198,
+                    "HealthState": 0,
+                    "MaxClockSpeed": 8300,
+                    "OperationalStatus": [0],
+                    "OtherFamilyDescription": "",
+                    "RequestedState": 12,
+                    "Role": "Central",
+                    "Stepping": "13",
+                    "SystemCreationClassName": "CIM_ComputerSystem",
+                    "SystemName": "ManagedSystem",
+                    "UpgradeMethod": 52,
+                },
+            )
+        )
+    return items
+
+
+def _chip_items(state: AmtState) -> list[str]:
+    """``Enumerate`` form of ``CIM_Chip`` -- **NAMES-ONLY**.
+
+    Field set is exactly the seven properties on the real firmware response
+    fixtures ``pkg/wsman/wsmantesting/responses/cim/chip/{get,pull}.xml``,
+    cross-checked against ``pkg/wsman/cim/chip/types.go``.
+
+    **Carried across and citable:** ``CanBeFRUed`` ``true``,
+    ``OperationalStatus`` ``0``, ``ElementName`` ``Managed System Processor
+    Chip`` and ``Tag`` ``CPU 0``. ``ElementName`` in particular is the field a
+    caller uses to tell a processor chip from a memory chip, since
+    ``CIM_PhysicalMemory`` is a subclass of this class -- so its exact value is
+    worth serving verbatim.
+
+    **Substituted:** ``Version``. On the fixture it is
+    ``Intel(R) Core(TM) i7-9850H CPU @ 2.60GHz`` -- a real processor model from a
+    real machine. An obviously-fake stand-in is served in the same *shape*,
+    because the shape is the point: this is the field that carries the
+    human-readable processor name, which ``CIM_Processor`` cannot supply, and it
+    is the whole reason this class is read.
+
+    Only processor chips are served, matching the fixture, which returns exactly
+    one item despite the same machine having two DIMMs. That is *not* a claim that
+    firmware never returns memory chips here -- one fixture cannot establish that
+    -- which is why the client reports these instances unfiltered.
+    """
+    items = []
+    for index in range(state.processor_count):
+        items.append(
+            _fields_to_instance_xml(
+                CIM_CHIP,
+                {
+                    "CanBeFRUed": True,
+                    "CreationClassName": "CIM_Chip",
+                    "ElementName": "Managed System Processor Chip",
+                    "Manufacturer": "Mock Systems (example.invalid)",
+                    "OperationalStatus": [0],
+                    "Tag": f"CPU {index}",
+                    "Version": "Mock(R) Example(TM) CPU E0000 @ 2.40GHz",
+                },
+            )
+        )
+    return items
+
+
+def _physical_memory_items(state: AmtState) -> list[str]:
+    """``Enumerate`` form of ``CIM_PhysicalMemory`` -- **NAMES-ONLY**, cited enums.
+
+    Field set is exactly the fifteen properties on the real firmware response
+    fixture ``pkg/wsman/wsmantesting/responses/cim/physical/memory/pull.xml``
+    (which returns two instances, ``BANK 0`` and ``BANK 2``), cross-checked
+    against ``pkg/wsman/cim/physical/types.go``.
+
+    **Enumeration and numeric values carried across, citable:**
+
+    * ``MemoryType`` = ``26``. That is ``DDR4`` in ``physical/decoder.go``, and
+      the fixture's part number is a DDR4 SODIMM -- so this single value
+      cross-checks the table against firmware rather than only against itself.
+    * ``FormFactor`` = ``13``. Served precisely *because* this collection refuses
+      to decode it: 13 is ``SODIMM`` under SMBIOS type 17 and ``SRIMM`` under the
+      DMTF ``CIM_PhysicalMemory.FormFactor`` ValueMap, the fixture's part really
+      is a SODIMM, and no vendor map exists to settle it. The integration target
+      asserts it arrives raw with no name attached.
+    * ``Capacity`` = ``17179869184`` -- 16 GiB exactly, which corroborates the
+      class definition's claim that the unit is bytes.
+    * ``Speed`` = ``0`` with ``IsSpeedInMhz`` = ``true`` and ``MaxMemorySpeed`` =
+      ``2400``. **This combination is the single most valuable thing in this
+      handler.** It is what real firmware reported, and it means a client that
+      reads ``Speed`` as "the speed" reports every DIMM on this machine as zero.
+      Serving a tidier combination would let exactly that bug pass.
+    * ``ConfiguredMemoryClockSpeed`` = ``2400``, and ``OperationalStatus`` = ``0``.
+
+    **Substituted:** ``PartNumber``, ``SerialNumber``, ``Manufacturer`` and
+    ``Tag``. The fixture's are a real Crucial part number, real module serials and
+    a real JEDEC vendor ID. Note the fixture's ``Tag`` values are
+    ``9876543210`` and ``9876543210 (#1)`` -- the ``(#N)`` suffix shape is
+    preserved here because it is how firmware disambiguates DIMMs whose ``Tag``
+    would otherwise collide, and a client keying on ``Tag`` needs to meet that.
+
+    ``state.memory_dimm_count`` drives how many instances are returned, so the
+    zero-, one- and several-DIMM cases are all reachable over a real socket.
+    ``BankLabel`` follows the fixture's even-numbered pattern (``BANK 0``,
+    ``BANK 2``, ...).
+    """
+    items = []
+    for index in range(state.memory_dimm_count):
+        fields: dict[str, object] = {
+            "BankLabel": f"BANK {index * 2}",
+            "Capacity": 17179869184,
+            "ConfiguredMemoryClockSpeed": 2400,
+            "CreationClassName": "CIM_PhysicalMemory",
+            "ElementName": "Managed System Memory Chip",
+            "FormFactor": 13,
+            "IsSpeedInMhz": True,
+            "Manufacturer": "0000",
+            "MaxMemorySpeed": 2400,
+            "MemoryType": 26,
+            "OperationalStatus": [0],
+            "PartNumber": "MOCKDIMM16G0000.M00XX",
+            "SerialNumber": f"A000000{index}",
+            # Speed 0 alongside IsSpeedInMhz true, exactly as the fixture reports
+            # it. See the docstring -- this is deliberate, not an oversight.
+            "Speed": 0,
+            "Tag": "9000000000" if index == 0 else f"9000000000 (#{index})",
+        }
+        items.append(_fields_to_instance_xml(CIM_PHYSICAL_MEMORY, fields))
+    return items
+
+
+def _media_access_device_items(state: AmtState) -> list[str]:
+    """``Enumerate`` form of ``CIM_MediaAccessDevice`` -- **NAMES-ONLY**, cited enums.
+
+    Field set is exactly the twelve properties on the real firmware response
+    fixture ``pkg/wsman/wsmantesting/responses/cim/mediaaccess/pull.xml`` (two
+    devices), cross-checked against ``pkg/wsman/cim/mediaaccess/types.go``.
+
+    **No model, vendor or serial number is served, because the class has none.**
+    That is not an omission in this mock: those properties do not exist on the
+    class definition or on the fixture. ``ElementName`` is the constant string
+    ``Managed System Media Access Device`` on **both** fixture devices, and it is
+    served identically on every instance here for that reason -- a client trying
+    to tell disks apart by ``ElementName`` must fail, because it would fail on
+    firmware.
+
+    **Enumeration and numeric values carried across, citable:**
+
+    * ``Capabilities`` = ``4`` -- ``SupportsWriting`` in
+      ``mediaaccess/decoder.go``. A CIM *indexed array*, so emitted as a repeated
+      element even at length one.
+    * ``Security`` = ``2``. In this class's enumeration ``2`` is ``Unknown`` and
+      ``1`` is ``Other`` -- the reverse of most CIM tables. Serving the fixture's
+      2 is what catches a client that transposed them, which would otherwise
+      report every disk here as "other" and look entirely plausible doing it.
+    * ``EnabledDefault`` = ``2`` (``Enabled``), ``EnabledState`` = ``0``
+      (``Unknown`` -- a *defined* value, not a gap), ``RequestedState`` = ``12``,
+      ``OperationalStatus`` = ``0``.
+    * ``MaxMediaSize`` -- the fixture's two devices report ``960197124`` and
+      ``500107862`` **KBytes**. Those exact figures are served: they read as a
+      960 GB and a 500 GB device only under KB = 1000, which is what makes the
+      unit ambiguity real rather than theoretical, and the client deliberately
+      does not convert them.
+
+    ``state.storage_device_count`` selects how many of those two are returned, so
+    the zero-, one- and two-disk cases are all reachable.
+    """
+    sizes = (960197124, 500107862)
+    items = []
+    for index in range(state.storage_device_count):
+        items.append(
+            _fields_to_instance_xml(
+                CIM_MEDIA_ACCESS_DEVICE,
+                {
+                    "Capabilities": [4],
+                    "CreationClassName": "CIM_MediaAccessDevice",
+                    "DeviceID": f"MEDIA DEV {index}",
+                    "ElementName": "Managed System Media Access Device",
+                    "EnabledDefault": 2,
+                    "EnabledState": 0,
+                    "MaxMediaSize": sizes[index % len(sizes)],
+                    "OperationalStatus": [0],
+                    "RequestedState": 12,
+                    "Security": 2,
+                    "SystemCreationClassName": "CIM_ComputerSystem",
+                    "SystemName": "ManagedSystem",
+                },
+            )
+        )
+    return items
+
+
 ENUMERATE_HANDLERS: dict[str, Callable[[AmtState], list[str]]] = {
     CIM_BOOT_SOURCE_SETTING: _boot_source_items,
     AMT_BOOT_CAPABILITIES: _boot_capabilities_items,
     CIM_BIOS_ELEMENT: _bios_element_items,
     AMT_MESSAGE_LOG: _message_log_items,
+    CIM_CHASSIS: _chassis_items,
+    CIM_CARD: _card_items,
+    CIM_PROCESSOR: _processor_items,
+    CIM_CHIP: _chip_items,
+    CIM_PHYSICAL_MEMORY: _physical_memory_items,
+    CIM_MEDIA_ACCESS_DEVICE: _media_access_device_items,
+}
+
+#: Hardware inventory classes a test can make **absent**, standing in for
+#: firmware that does not implement them, mapped to the :class:`AmtState`
+#: attribute that must be true for the class to exist.
+#:
+#: Applied to ``Get`` *and* ``Enumerate`` alike: a class that is absent must be
+#: absent for both verbs, or the ``Get``-then-``Enumerate`` fallback would still
+#: find an answer for firmware that has no such class at all -- the opposite of
+#: the scenario being modelled. That mistake was already made once here and is
+#: recorded in ``_handle_enumerate``'s comment about ``AMT_MessageLog``.
+HARDWARE_PRESENCE_ATTR: dict[str, str] = {
+    CIM_CHASSIS: "chassis_present",
+    CIM_CARD: "card_present",
+    CIM_PROCESSOR: "processor_present",
+    CIM_CHIP: "chip_present",
+    CIM_PHYSICAL_MEMORY: "physical_memory_present",
+    CIM_MEDIA_ACCESS_DEVICE: "media_access_present",
 }
 
 
@@ -1746,6 +2204,20 @@ class WsmanMockServer:
             body = _fault_body("UnsupportedCapability", f"No handler for action={action!r} resourceURI={resource_uri!r}")
             return 500, _envelope(ACTION_FAULT, relates_to, body)
 
+    def _hardware_absence_fault(self, resource_uri: str, relates_to: str) -> tuple[int, str] | None:
+        """A SOAP fault for a hardware class a test has switched off, else ``None``.
+
+        One helper rather than six ``if`` blocks per verb, so ``Get`` and
+        ``Enumerate`` cannot drift apart on which classes exist -- see
+        :data:`HARDWARE_PRESENCE_ATTR`.
+        """
+        attribute = HARDWARE_PRESENCE_ATTR.get(resource_uri)
+        if attribute is None or getattr(self.state, attribute):
+            return None
+        class_name = resource_uri.rsplit("/", 1)[-1]
+        body = _fault_body("InvalidResourceURI", f"{class_name} is not implemented on this firmware")
+        return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
+
     def _handle_get(self, resource_uri: str, relates_to: str, selectors: dict[str, str]) -> tuple[int, str]:
         handler = GET_HANDLERS.get(resource_uri)
         if handler is None:
@@ -1772,6 +2244,15 @@ class WsmanMockServer:
             return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
         if resource_uri == AMT_MESSAGE_LOG and not self.state.message_log_present:
             body = _fault_body("InvalidResourceURI", "AMT_MessageLog is not implemented on this firmware")
+            return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
+        absent = self._hardware_absence_fault(resource_uri, relates_to)
+        if absent is not None:
+            return absent
+        if resource_uri in (CIM_CHASSIS, CIM_CARD) and self.faults.hardware_get_faults:
+            body = _fault_body(
+                "UnsupportedCapability",
+                f"{resource_uri.rsplit('/', 1)[-1]} does not answer a bare Get on this firmware",
+            )
             return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
 
         fields = handler(self.state)
@@ -1813,6 +2294,12 @@ class WsmanMockServer:
         if resource_uri == AMT_MESSAGE_LOG and not self.state.message_log_present:
             body = _fault_body("InvalidResourceURI", "AMT_MessageLog is not implemented on this firmware")
             return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
+        # Same reasoning as the AMT_MessageLog line above, generalised: an absent
+        # class must be absent for both verbs, or the client's Get-then-Enumerate
+        # fallback still finds an answer on firmware that has no such class.
+        absent = self._hardware_absence_fault(resource_uri, relates_to)
+        if absent is not None:
+            return absent
         items = handler(self.state)
         ctx = uuid.uuid4().hex
         self._contexts[ctx] = list(items)

@@ -29,10 +29,12 @@ something it does not support.
 ## Options
 
 In addition to the [shared connection options](../plugins/doc_fragments/connection.py),
-`amt_info` takes no module-specific options.
+`amt_info` takes one module-specific option: `gather_subset`, added in 0.5.0. See
+[Hardware/asset inventory](#hardwareasset-inventory-gather_subset) below.
 
 | Option | Type | Default | Required | Choices |
 |---|---|---|---|---|
+| `gather_subset` | `list` of `str` | `["config"]` | no | `all`, `min`, `config`, `hardware`, `system`, `processor`, `memory`, `storage`, plus each of those prefixed with `!` |
 | `host` | `str` | — | yes | — |
 | `port` | `int` | (16993 if `use_tls` else 16992) | no | — |
 | `username` | `str` | `admin` | no | — |
@@ -96,6 +98,13 @@ Everything is nested under a single `amt` key (`type: dict`, `returned: success`
 | `amt.system_state.operational_status` | `list[int]` | when available | Raw DMTF `CIM_ComputerSystem.OperationalStatus`. Always a list — CIM types it as an array. |
 | `amt.system_state.operational_status_text` | `list[str]` | when available | `operational_status` decoded element-wise per DMTF; see the table below. |
 | `amt.bios_version` | `str` | when available | `CIM_BIOSElement.Version` — the **host BIOS**, not the AMT firmware version (`amt.version`). Weakest-evidenced field this module returns. |
+| `amt.hardware` | `dict` or `null` | when a hardware `gather_subset` was requested | Hardware/asset inventory. `null` unless opted into — which is not the default. See [Hardware/asset inventory](#hardwareasset-inventory-gather_subset) for the full field list, the value-table provenance, and the three-state contract for each group. |
+| `amt.hardware.chassis` | `dict` or `null` | subset `system` | `CIM_Chassis` — the **system serial number**, model, manufacturer, version, `tag`, and both package-type enumerations. |
+| `amt.hardware.baseboard` | `dict` or `null` | subset `system` | `CIM_Card` — the baseboard's own serial number, model, manufacturer, version, `can_be_frued`, package type. |
+| `amt.hardware.processors` | `list[dict]` or `null` | subset `processor` | `CIM_Processor`, one entry per **physical package**. Clocks, socket (`upgrade_method`), stepping, status. No core or thread count — AMT does not expose one. `family` is raw and undecoded. |
+| `amt.hardware.chips` | `list[dict]` or `null` | subset `processor` | `CIM_Chip`. `version` here is the **human-readable processor name**, which `CIM_Processor` cannot supply. Reported unfiltered: `CIM_PhysicalMemory` is a subclass, so memory chips may appear — use `element_name` to tell them apart. |
+| `amt.hardware.memory` | `list[dict]` or `null` | subset `memory` | `CIM_PhysicalMemory`, one entry per DIMM. `capacity_bytes`, `memory_type`/`_text`, bank label, part/serial number. `form_factor` is raw and undecoded; read the speed-field trap below before using `speed_ns`. |
+| `amt.hardware.storage` | `list[dict]` or `null` | subset `storage` | `CIM_MediaAccessDevice`, one entry per disk. `device_id`, `max_media_size_kb` (KBytes, unconverted), `capabilities`/`_text`, `security`/`_text`. No model, vendor or serial — the class carries none. |
 | `operation.schema` | `str` | always | Always `intel-amt-operation/v1`. |
 | `operation.action` | `str` | always | Always `get_facts`. |
 | `operation.endpoint` | `str` | always | `host:port` this read was performed against. |
@@ -105,6 +114,8 @@ Everything is nested under a single `amt` key (`type: dict`, `returned: success`
 | `operation.observed` | `null` | always | Always `null`. See `amt` above instead, which carries the actual observed facts; it is not duplicated here. |
 | `operation.tls_peer_fingerprint` | `str` or `null` | always | SHA-256 fingerprint of the TLS leaf certificate observed, or `null` over plaintext. |
 | `operation.error_class` | `str` or `null` | always | `null` on success; a stable machine-readable failure class on failure. |
+| `operation.gather_subset` | `list[str]` | always | **New in 0.5.0.** What `gather_subset` actually resolved to, sorted. Worth checking when `!`-negation is in play: `['!memory']` resolves to everything but memory, which is *more* than the default. |
+| `operation.wsman_requests_estimated` | `int` | always | **New in 0.5.0.** Best-case WS-Man HTTP request count for the resolved subsets. "Best case" is load-bearing — a faulting `Get` costs a further `Enumerate`/`Pull` pair on top. |
 
 `amt_info` previously had neither the nested-`operation` shape nor the spread shape —
 see [Capability matrix](capability-matrix.md). It now gets the same `operation` receipt
@@ -207,10 +218,238 @@ A value outside either table renders as `unknown(<raw>)` rather than a bare `unk
 which both tables already use for the *defined* value `0`. The raw integer is always
 reported alongside the decoded name.
 
-### Round-trip cost
+## Hardware/asset inventory (`gather_subset`)
 
-One `amt_info` invocation performs **ten WS-Man HTTP requests**: eight `Get` operations
-plus an `Enumerate`/`Pull` pair for `CIM_SoftwareIdentity`.
+**New in 0.5.0, and opt-in.** Because AMT runs beneath the host operating system, it
+can report a machine's serial number, model, manufacturer, baseboard, processors, DIMMs
+and disks **while that machine is powered off** — which is frequently the only way to
+get them. Where an agent is running, use `ansible.builtin.setup`. Where one is not, AMT
+is the only source of truth.
+
+That distinction is not this collection's invention. MeshCentral fetches exactly this
+batch of classes only when the device group is **AMT-only** — `amtmanager.js`'s
+`attemptFetchHardwareInventory()` is gated on `mesh.mtype == 1`, i.e. a group of
+machines with no agent to ask instead.
+
+### Why an option on `amt_info` rather than a separate `amt_hardware_info` module
+
+Two modules for "tell me about this endpoint" is a worse interface than one module with
+a subset selector, and `gather_subset` is a vocabulary every Ansible user already knows
+from `ansible.builtin.setup`. The honest counter-argument, recorded because it is real:
+`gather_subset` is overwhelmingly a **facts**-module idiom (`setup` and the network
+`*_facts` modules), and the closest domain analogue —
+`community.general.redfish_info`, which gathers this same class of hardware inventory
+out-of-band over Redfish — chose `category`/`command` instead. So this is deliberately
+the more *familiar* name over the closest *precedent*, and that trade is only defensible
+if the familiar semantics are honoured in full. They are; see below.
+
+Note this module returns everything under `amt` in the result dictionary and puts
+**nothing** into `ansible_facts`. That is the `_info` versus `_facts` convention, and it
+is unaffected by borrowing `setup`'s option name.
+
+### Subsets and what each costs
+
+| Subset | Classes read | Verb | Requests | Populates |
+|---|---|---|---|---|
+| `config` | the ten in [Round-trip cost](#round-trip-cost) below | — | **10** | everything `amt_info` returned before 0.5.0 |
+| `system` | `CIM_Chassis`, `CIM_Card` | `Get` | **2** | `amt.hardware.chassis`, `amt.hardware.baseboard` |
+| `processor` | `CIM_Processor`, `CIM_Chip` | `Enumerate`+`Pull` | **4** | `amt.hardware.processors`, `amt.hardware.chips` |
+| `memory` | `CIM_PhysicalMemory` | `Enumerate`+`Pull` | **2** | `amt.hardware.memory` |
+| `storage` | `CIM_MediaAccessDevice` | `Enumerate`+`Pull` | **2** | `amt.hardware.storage` |
+| `hardware` | alias for `system` + `processor` + `memory` + `storage` | — | **10** | all of `amt.hardware` |
+| `all` | `config` + `hardware` | — | **20** | everything |
+| `min` | `config` | — | **10** | everything `amt_info` returned before 0.5.0 |
+
+`system`'s two reads are bare `Get`s with an `Enumerate` fallback, so that subset can
+cost up to **6** on firmware that refuses `Get` for both classes — the same shape as
+`CIM_BIOSElement` in the `config` set. An `Enumerate` costs one further `Pull` per 64
+instances beyond the first; no realistic machine reaches that, but the arithmetic is
+stated rather than assumed. The receipt reports the best-case figure as
+`operation.wsman_requests_estimated`, and what the subset list actually resolved to as
+`operation.gather_subset`.
+
+Two subsets deliberately cover **two classes each**, because asking for one without the
+other is always a mistake:
+
+- `system` — a chassis serial without a baseboard serial cannot tell a board swap from
+  a re-rack. The two are genuinely different values on real firmware.
+- `processor` — `CIM_Processor` carries clocks, socket and stepping but identifies the
+  part only by a `Family` integer this collection **does not decode** (see below).
+  `CIM_Chip.Version` is what carries the human-readable processor name. Neither is
+  useful alone.
+
+### Resolution semantics
+
+Identical to `ansible.builtin.setup`, deliberately, because that is the entire
+justification for reusing the option's name. In order:
+
+1. `all` adds every subset.
+2. `min` adds the minimal subset (`config`).
+3. `!all` excludes everything **except** `config`.
+4. `!min` and `!config` are **inert** — see below.
+5. `!<name>` excludes that subset; `!hardware` removes exactly what `hardware` adds.
+6. If the list contains **no positive entry**, every subset is added *first* and the
+   exclusions applied to that. So `gather_subset: ['!memory']` means "everything except
+   memory" and costs **18** requests — *more* than the default, not less. Surprising the
+   first time, but it is what `setup` does and what a `setup` user's habits will expect.
+   Pass `config` explicitly if the default cost is what you want.
+7. Exclusions are applied **last**, so a contradiction resolves in favour of the
+   exclusion: `['all', '!memory']` gathers everything but memory.
+
+`config` is the minimal subset and therefore **cannot be excluded**. `!min` and
+`!config` are inert exactly as `!min` is inert in `setup`. This is load-bearing rather
+than incidental: it means **no value of `gather_subset` can remove a key `amt_info`
+returned before 0.5.0**, so the option cannot break an existing caller, and
+`roles/amt_baremetal_install`, the integration targets and `tests/hardware` all keep
+working unchanged.
+
+An unrecognised subset name is rejected by argument validation (`choices` on the
+argument spec) **before any connection is attempted** — the same treatment `state` gets
+on `amt_power` and `amt_boot`.
+
+### The one deliberate divergence from `setup`: the default
+
+`setup` defaults to gathering everything. **This module defaults to `config` only.**
+Gathering everything here costs ten extra WS-Man round trips against firmware, and no
+existing caller should start paying for inventory they never asked for. A reader who
+knows `setup` will otherwise assume they are getting everything, so it is stated
+plainly here, in the module's own documentation, and in the option description.
+
+### Three distinguishable outcomes per fact group
+
+`amt.hardware` is `null` when no hardware subset was requested at all. Within it, each
+key is present **only** if its subset was requested, which gives three separate answers
+that operators genuinely need to tell apart:
+
+| Reading | Means |
+|---|---|
+| `'memory' not in amt.hardware` | not requested — nothing was asked of the endpoint |
+| `amt.hardware.memory is none` | requested, but the class faulted or this firmware does not implement it |
+| `amt.hardware.memory == []` | the class answered with **zero** instances — a real reading of a diskless or unpopulated machine, not a gap |
+
+Each of the six groups degrades **independently**: a firmware that cannot enumerate
+disks still reports its DIMMs, its processors and its serial number. A missing class is
+never a module failure — same contract `amt_info` already applies to
+`AMT_EthernetPortSettings` and `CIM_BIOSElement`.
+
+### Value tables: where every mapping came from
+
+This is the part of the feature most likely to be wrong, and this project has the scar
+tissue to prove it — `LinkPolicy` shipped inverted in 0.2.0 and 0.3.0 from a
+transcribed constants table, and neither the mock tier nor the hardware tier could
+catch it (see [Capability matrix](capability-matrix.md)). So: **every table below is
+transcribed from `device-management-toolkit/go-wsman-messages` at tag `v2.48.3` or from
+the DMTF CIM schema. None is inferred from a hardware dump.** A dump proves a value was
+*returned*; it can never establish what the value *means*.
+
+| Property | Values | Source |
+|---|---|---|
+| `CIM_Chassis.ChassisPackageType` | 37 (0–36) | `pkg/wsman/cim/chassis/decoder.go` — `ChassisPackageType` const block + `chassisPackageTypeToString` |
+| `PackageType` (on chassis **and** card) | 18 (0–17) | `pkg/wsman/cim/chassis/decoder.go` and `pkg/wsman/cim/card/decoder.go` — `packageTypeMap`, byte-identical in both |
+| `CIM_PhysicalMemory.MemoryType` | 37 (0–36) | `pkg/wsman/cim/physical/decoder.go` — `memoryTypeMap` |
+| `CIM_MediaAccessDevice.Capabilities` | 13 (0–12) | `pkg/wsman/cim/mediaaccess/decoder.go` — `capabilitiesToString`, corroborated by the DMTF `ValueMap`/`Values` annotation inline in that package's `types.go` |
+| `CIM_MediaAccessDevice.Security` | 7 (1–7) | `pkg/wsman/cim/mediaaccess/decoder.go` — `securityToString`, likewise corroborated by the inline DMTF annotation |
+| `CIM_MediaAccessDevice.EnabledDefault` | 6 (sparse) | `pkg/wsman/cim/mediaaccess/decoder.go` — `enabledDefaultToString` |
+| `CIM_Processor.CPUStatus` | 6 (0–5) | `pkg/wsman/cim/processor/decoder.go` — `cpuStatusMap` |
+| `CIM_Processor.HealthState` | 7 (sparse, steps of 5) | `pkg/wsman/cim/processor/decoder.go` — `healthStateMap` |
+| `CIM_Processor.UpgradeMethod` | 85 (0–84) | `pkg/wsman/cim/processor/decoder.go` — `upgradeMethodMap` |
+| `EnabledState` (processor, storage) | 11 (0–10) | **DMTF `CIM_EnabledLogicalElement`**, the full standard table this collection already holds for `CIM_ComputerSystem` — see below |
+| `OperationalStatus` (all six classes) | 20 (0–19) | **DMTF `CIM_ManagedSystemElement`**, likewise already held |
+
+Three points worth stating rather than leaving implicit:
+
+- **`EnabledState` is decoded with the DMTF table, not the vendor library's.**
+  `go-wsman-messages`' `pkg/wsman/cim/processor/decoder.go` `enabledStateMap` **omits
+  values 0, 1 and 2**, so its own decoder answers "Value not found in map" for its own
+  captured firmware response, which reports `EnabledState` 2. Its `mediaaccess` copy of
+  the same enumeration *is* complete and agrees with DMTF exactly — which is what makes
+  the processor one identifiable as an omission rather than a disagreement. The full
+  DMTF table is used for both.
+- **`EnabledState` and `OperationalStatus` exist in exactly one place** in the codebase
+  (`plugins/module_utils/models.py`), imported by the inventory code rather than
+  redeclared. A value table that exists twice can drift against itself, which is
+  precisely the `LinkPolicy` failure mode.
+- **A value outside a table renders `unknown(<raw>)`**, never a bare `unknown` — most
+  of these enumerations define `0` as `unknown`, and "firmware said 0" and "firmware
+  said something this table has never heard of" are different findings. The raw integer
+  is always reported alongside every decoded name.
+
+### What is reported raw and undecoded, and why
+
+Where no table could be sourced, the raw integer ships with **no name attached**.
+Shipping a raw integer is honest; shipping a confident wrong label is what the 0.3.1
+release cycle was spent undoing.
+
+| Property | Why undecoded |
+|---|---|
+| `CIM_Processor.Family` | `go-wsman-messages` types it as a plain `int` and defines **no** map for it — there is no `familyMap` anywhere in the library. The DMTF `Family` ValueMap runs to several hundred entries and no offline copy of the CIM schema was available to transcribe it from. Real firmware reports `198`; what 198 *means* is exactly the sort of claim this project has twice got wrong by guessing. Use `amt.hardware.chips[].version` for the processor's actual name. |
+| `CIM_PhysicalMemory.FormFactor` | The sharper case. Also typed a plain `int` with no map, and **two published tables disagree about the value real firmware actually reports**: the recorded response says `13`, which is `SODIMM` under the SMBIOS type-17 form-factor enumeration but `SRIMM` under the DMTF `CIM_PhysicalMemory.FormFactor` ValueMap. The part in that response *is* a SODIMM, so SMBIOS looks right — but "looks right on one machine" is a hardware-dump inference, which is the one form of evidence that cannot establish a meaning. |
+| `RequestedState` (processor, storage) | Consistent with how `amt_info` already reports `amt.system_state.requested_state`: raw. Tables do exist in the vendor library for both classes, but the processor one omits value 0, and this collection has already chosen not to publish an unverified decode for the identical property on a sibling class. Reporting the same property two different ways in one module's output would be worse than reporting it plainly in both. |
+
+### Properties that do not exist, and are therefore not reported
+
+Each of these is something an operator might reasonably expect and AMT does not
+provide. Stated explicitly so nobody concludes it was overlooked:
+
+- **No asset tag.** `CIM_Chassis` has no `AssetTag` property — the string does not occur
+  anywhere in `go-wsman-messages`. What exists is `Tag`, reported as
+  `amt.hardware.chassis.tag`, whose DMTF description says it "can contain information
+  such as asset tag or serial number data". On the only recorded real-firmware response
+  it holds the literal string `CIM_Chassis` — the class name, carrying no asset
+  information at all. It is reported because it is what firmware sends, and deliberately
+  **not** named `asset_tag`.
+- **No processor core or thread count.** `CIM_Processor` as AMT implements it exposes
+  `DeviceID`, `Role`, `Family`, `OtherFamilyDescription`, `UpgradeMethod`,
+  `MaxClockSpeed`, `CurrentClockSpeed`, `ExternalBusClockSpeed`, `Stepping`,
+  `CPUStatus`, `HealthState`, `EnabledState`, `RequestedState`, `OperationalStatus` and
+  the four key properties — and nothing else. DMTF's `CIM_Processor` defines
+  `NumberOfEnabledCores` in later schema versions; AMT's implementation does not expose
+  it. There is one instance per **physical package**, so a two-socket machine returns
+  two entries, not one per core.
+- **No disk model, vendor or serial.** `CIM_MediaAccessDevice` carries none of them, and
+  its `ElementName` is the constant string `Managed System Media Access Device` on every
+  instance, so that identifies nothing either. What distinguishes one disk from another
+  is `device_id` (`MEDIA DEV 0`, `MEDIA DEV 1`) and `max_media_size_kb`. A disk model
+  number is not obtainable from AMT through this class.
+- **`CIM_PhysicalPackage` is not read at all.** `CIM_Card` and `CIM_Chassis` are both
+  subclasses of it, and the recorded `Enumerate` of `CIM_PhysicalPackage` returns a
+  `CIM_Card` instance — so reading it would return the same instances under a third
+  resource URI, costing a round trip for no information.
+
+### Two unit traps worth reading before using these values
+
+- **Memory speed is four fields and nothing is derived from them.**
+  `CIM_PhysicalMemory.IsSpeedInMhz` selects which property holds the speed, and the two
+  are in **different units**: `true` means the speed is `max_memory_speed_mhz` in MHz,
+  `false` means it is `speed_ns` in nanoseconds. Real firmware has been recorded
+  reporting `Speed` as `0` with `IsSpeedInMhz` `true`, so anything reading `Speed`
+  naively reports every DIMM on that machine as zero. No single derived `speed` field is
+  offered, because there is no honest value for it in the `false` branch — the
+  arithmetically correct conversion (1000/ns) is not the memory clock rate anyone is
+  looking for. `configured_clock_speed_mhz` is what the DIMM is *actually* clocked at,
+  which may be below its rated speed.
+- **`max_media_size_kb` is KBytes and is not converted.** The class definition says
+  KBytes. The recorded values `960197124` and `500107862` read as a 960 GB and a 500 GB
+  device under KB = 1000, which is suggestive — but nothing establishes whether firmware
+  means 1000 or 1024, and a `_bytes` field would silently bake that guess in at a 2.4%
+  error. Convert it yourself, knowing you are choosing.
+
+Likewise `capacity_bytes` on a DIMM **is** bytes, per the class definition and
+corroborated by the recorded value being exactly 16 GiB.
+
+### Verification status
+
+**Mock-tested and fixture-derived. Not hardware-verified.** See
+[Capability matrix](capability-matrix.md) Tier 2 — no qualification stage has run this
+against real Intel AMT firmware, and none of the values above has been read back from a
+live endpoint by this collection.
+
+## Round-trip cost
+
+The `config` subset — the default, and everything `amt_info` returned before 0.5.0 —
+performs **ten WS-Man HTTP requests**: eight `Get` operations plus an `Enumerate`/`Pull`
+pair for `CIM_SoftwareIdentity`. Hardware subsets add to this and are listed under
+[Subsets and what each costs](#subsets-and-what-each-costs) above.
 
 | WS-Man operation | Verb | Sources |
 |---|---|---|

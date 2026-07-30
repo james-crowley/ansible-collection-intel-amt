@@ -1,0 +1,23 @@
+# Drives the real amt_info module's `gather_subset` hardware/asset inventory path
+# against the local mock WS-Man server. No network access beyond 127.0.0.1, no
+# privilege escalation, and no destructive action against anything -- amt_info is
+# read-only, so nothing here can mutate the mock's state. See docs/testing.md.
+#
+# Three mock processes are started, because each models a firmware *generation*
+# rather than a client action and so has to hold for the server's whole lifetime:
+# a normal endpoint, one with no hardware inventory classes at all, and one that
+# refuses a bare Get for CIM_Chassis/CIM_Card so the client's Enumerate fallback
+# is exercised over a real socket. See tests/integration/mock_servers/run_wsman_mock.py.
+#
+# context/controller because this target is deliberately NOT named after a module
+# -- it exercises one option of amt_info, and the amt_info target already owns
+# that name -- so ansible-test cannot infer its context the way it does for the
+# seven module-named targets. Same situation as amt_baremetal_install_role.
+#
+# ansible-test's per-target temp workdir only copies
+# tests/integration/targets/<name>/ itself; these needs/file/* aliases pull the
+# (non-target) mock server fixtures into that same temp copy so tasks/main.yml's
+# "{{ role_path }}/../../mock_servers/..." paths resolve.
+context/controller
+needs/file/tests/integration/mock_servers/wsman_server.py
+needs/file/tests/integration/mock_servers/run_wsman_mock.py

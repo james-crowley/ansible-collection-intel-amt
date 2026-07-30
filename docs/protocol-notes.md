@@ -837,6 +837,168 @@ different findings and must not render identically.
   wraps all three. Out of scope: nothing in the motivating use case needs them, and
   `FreezeLog` in particular could leave an endpoint refusing log writes.
 
+### 2.9 Hardware / asset inventory — the `CIM_` physical-asset classes
+
+Backs `amt_info`'s `gather_subset` inventory subsets, implemented in
+`plugins/module_utils/hardware.py`.
+
+**Nothing in this subsection has been exercised against real firmware by this
+collection.** No hardware qualification stage covers it. Unusually for this document,
+though, almost everything here rests on **real firmware response fixtures** rather than
+on a third party's prose: `device-management-toolkit/go-wsman-messages` (Intel's own
+toolkit, Apache-2.0, read at tag `v2.48.3`) ships captured responses for every class
+below under `pkg/wsman/wsmantesting/responses/`. Those fixtures are the primary source
+for the property sets, and the packages' `decoder.go` files are the primary source for
+every value table. See `docs/capability-matrix.md` Tier 2.
+
+**Why AMT for this at all.** These classes are readable while the host is powered off,
+because the ME answers independently of the OS. Where an agent is running,
+`ansible.builtin.setup` is the right tool. MeshCentral encodes exactly that judgement:
+`amtmanager.js`'s `attemptFetchHardwareInventory()` is gated on `mesh.mtype == 1` — an
+**AMT-only** device group — and fetches this batch only there.
+
+#### Classes, verbs and fixtures
+
+MeshCentral's `BatchEnum` list is the best available evidence for the verb each class
+takes. Its `*` prefix means "issue a `Get` instead of an `Enumerate`, to reduce round
+trips" (`agents/modules_meshcmd/amt.js`), so its own choice per class is explicit:
+
+```
+'*CIM_ComputerSystemPackage', 'CIM_SystemPackaging', '*CIM_Chassis', 'CIM_Chip',
+'*CIM_Card', '*CIM_BIOSElement', 'CIM_Processor', 'CIM_PhysicalMemory',
+'CIM_MediaAccessDevice', 'CIM_PhysicalPackage'
+```
+
+| Class | Verb | Fixtures shipped | Notes |
+|---|---|---|---|
+| `CIM_Chassis` | `Get`, `Enumerate` both evidenced | `get.xml`, `enumerate.xml`, `pull.xml` | System serial, model, manufacturer |
+| `CIM_Card` | `Get`, `Enumerate` both evidenced | `get.xml`, `enumerate.xml`, `pull.xml` | Baseboard serial |
+| `CIM_Processor` | `Enumerate` | `get.xml`, `pull.xml`, `enumerate.xml` | One instance per physical package |
+| `CIM_Chip` | `Enumerate` | `get.xml`, `pull.xml`, `enumerate.xml` | `Version` is the readable CPU name |
+| `CIM_PhysicalMemory` | `Enumerate` | `pull.xml`, `enumerate.xml` — **no** `get.xml` | Per DIMM |
+| `CIM_MediaAccessDevice` | `Enumerate` | `pull.xml`, `enumerate.xml` — **no** `get.xml` | Per disk |
+
+**§2.7's `Enumerate`-is-HTTP-400 finding does not apply here.** That finding is scoped
+to five `AMT_`-prefixed classes and states outright that `CIM_`-prefixed classes are
+unaffected. Every class in this subsection is `CIM_`-prefixed, and the fixture set ships
+`enumerate.xml` + `pull.xml` for all six — so `Enumerate` is directly evidenced and needs
+no `Get` fallback. This was checked rather than assumed, because it was the most likely
+way for this whole subsection to be wrong.
+
+The two singletons are read `Get`-first with an `Enumerate` fallback, following
+`CIM_BIOSElement`'s precedent (§2.7): both verbs are evidenced for both classes, so
+which one a given firmware accepts is genuinely unsettled, and the cheap verb is tried
+first.
+
+`CIM_PhysicalPackage` is **deliberately not read**. `CIM_Card` and `CIM_Chassis` are both
+subclasses of it, and `responses/cim/physical/package/pull.xml` — the captured
+`Enumerate` of `CIM_PhysicalPackage` — returns a `CIM_Card` instance. Reading it would
+return the same instances under a third resource URI: one round trip, no information.
+`CIM_SystemPackaging` is likewise not read; it is an association class, not an asset.
+
+#### Value tables — all vendor- or DMTF-sourced, none from a dump
+
+This is the risk that has twice cost this project a release. **Every mapping below comes
+from `go-wsman-messages`' `decoder.go` const/map pairs or from the DMTF CIM schema.** The
+mappings were extracted mechanically from the Go source rather than retyped.
+
+| Property | Values | `go-wsman-messages` source |
+|---|---|---|
+| `CIM_Chassis.ChassisPackageType` | 37, 0–36 | `cim/chassis/decoder.go` — `chassisPackageTypeToString` |
+| `PackageType` (chassis and card) | 18, 0–17 | `cim/chassis/decoder.go` + `cim/card/decoder.go` — `packageTypeMap`, byte-identical |
+| `CIM_PhysicalMemory.MemoryType` | 37, 0–36 | `cim/physical/decoder.go` — `memoryTypeMap` |
+| `CIM_MediaAccessDevice.Capabilities` | 13, 0–12 | `cim/mediaaccess/decoder.go` — `capabilitiesToString`, plus the inline DMTF `ValueMap`/`Values` in that package's `types.go` |
+| `CIM_MediaAccessDevice.Security` | 7, **1–7** | `cim/mediaaccess/decoder.go` — `securityToString` (`iota + 1`), plus the same inline annotation |
+| `CIM_MediaAccessDevice.EnabledDefault` | 6, sparse | `cim/mediaaccess/decoder.go` — `enabledDefaultToString` |
+| `CIM_Processor.CPUStatus` | 6, 0–5 | `cim/processor/decoder.go` — `cpuStatusMap` |
+| `CIM_Processor.HealthState` | 7, sparse (steps of 5) | `cim/processor/decoder.go` — `healthStateMap` |
+| `CIM_Processor.UpgradeMethod` | 85, 0–84 | `cim/processor/decoder.go` — `upgradeMethodMap` |
+| `EnabledState` | 11, 0–10 | **DMTF `CIM_EnabledLogicalElement`** — see the warning below |
+| `OperationalStatus` | 20, 0–19 | **DMTF `CIM_ManagedSystemElement`** |
+
+Three traps in these tables, each of which would produce a plausible-looking wrong
+answer:
+
+- **`Security` is inverted relative to every other table here**: `1` is `Other` and `2`
+  is `Unknown`. `responses/cim/mediaaccess/pull.xml` reports `Security` 2 on both
+  devices, so a transposed table would report every disk as "other" and look entirely
+  reasonable doing it.
+- **`UpgradeMethod` has the same inversion**: `0` is `Other`, `1` is `Unknown`.
+- **`CIM_Chassis` carries `ChassisPackageType` *and* `PackageType`**, two different
+  enumerations, on the same instance — `responses/cim/chassis/get.xml` reports 0 and 3
+  respectively. Decoding one with the other's table is silent.
+
+**Do not use `go-wsman-messages`' `cim/processor` `enabledStateMap`.** It omits values
+0, 1 and 2, so its own decoder returns "Value not found in map" for its own captured
+firmware response, which reports `EnabledState` 2. Its `cim/mediaaccess` copy of the same
+enumeration is complete and agrees with DMTF exactly, which is what identifies the
+processor one as an omission rather than a disagreement. The full DMTF table is used for
+both classes here, and it is the same single table `amt_info` already applies to
+`CIM_ComputerSystem` — held in one place in `plugins/module_utils/models.py` and imported,
+never redeclared.
+
+#### Deliberately undecoded
+
+| Property | Why |
+|---|---|
+| `CIM_Processor.Family` | `go-wsman-messages` types it a plain `int` and defines **no** map; there is no `familyMap` in the library. The DMTF `Family` ValueMap has several hundred entries and no offline copy of the schema was available. Firmware reports `198`; the meaning ships unclaimed. `CIM_Chip.Version` supplies what a caller wanted from it anyway. |
+| `CIM_PhysicalMemory.FormFactor` | Also a plain `int` with no map, and **two published tables disagree about the value firmware actually reports**: the fixture says `13`, which is `SODIMM` under SMBIOS type 17 and `SRIMM` under the DMTF `CIM_PhysicalMemory.FormFactor` ValueMap. The fixture's part *is* a SODIMM, so SMBIOS looks right — but that is a hardware-dump inference about a *meaning*, which is the one thing a dump cannot establish. |
+| `RequestedState` | Reported raw, matching §2.7's treatment of the identical property on `CIM_ComputerSystem`. |
+
+#### Properties that do not exist on these classes
+
+Each is something a reader might reasonably go looking for. Verified absent from both
+the class definitions and the fixtures:
+
+- **No asset tag anywhere.** The string `AssetTag` does not occur in `go-wsman-messages`
+  at all. `CIM_Chassis`, `CIM_Card`, `CIM_Chip` and `CIM_PhysicalMemory` each carry
+  `Tag`, the DMTF key property, whose description says it "can contain information such
+  as asset tag or serial number data" — but on the fixtures firmware populates it with
+  the **class name** (`CIM_Chassis`, `CIM_Card`) or a bare number with a `(#1)`
+  disambiguating suffix for the second DIMM. Surfaced as `tag`, never as `asset_tag`.
+- **No processor core or thread count.** `CIM_Processor`'s full property set is
+  `DeviceID`, `CreationClassName`, `SystemName`, `SystemCreationClassName`,
+  `ElementName`, `OperationalStatus`, `HealthState`, `EnabledState`, `RequestedState`,
+  `Role`, `Family`, `OtherFamilyDescription`, `UpgradeMethod`, `MaxClockSpeed`,
+  `CurrentClockSpeed`, `Stepping`, `CPUStatus`, `ExternalBusClockSpeed`. DMTF defines
+  `NumberOfEnabledCores` in later schema versions; AMT does not expose it.
+- **No disk model, vendor or serial.** `CIM_MediaAccessDevice` carries only
+  `Capabilities`, `CreationClassName`, `DeviceID`, `ElementName`, `EnabledDefault`,
+  `EnabledState`, `MaxMediaSize`, `OperationalStatus`, `RequestedState`, `Security`,
+  `SystemCreationClassName`, `SystemName`. `ElementName` is the constant string
+  `Managed System Media Access Device` on both fixture devices, so it identifies nothing
+  either; `DeviceID` (`MEDIA DEV 0`/`1`) and `MaxMediaSize` are the only discriminators.
+
+#### Units, and two traps in them
+
+- **`CIM_PhysicalMemory.Capacity` is bytes.** The fixture's `17179869184` is exactly
+  16 GiB, which corroborates the class definition.
+- **`CIM_MediaAccessDevice.MaxMediaSize` is KBytes**, per the class definition. The
+  fixture's `960197124` and `500107862` read as a 960 GB and a 500 GB device under
+  KB = 1000. Suggestive, but nothing establishes 1000 versus 1024, so no conversion is
+  performed and the field is named `_kb`.
+- **`CIM_PhysicalMemory` has two speed properties in different units, and a flag
+  selecting between them.** The class definition: "A value of TRUE [for `IsSpeedInMhz`]
+  shall indicate that the speed is represented by the `MaxMemorySpeed` property. A value
+  of FALSE shall indicate that the speed is represented by the `Speed` property."
+  `Speed` is in **nanoseconds**; `MaxMemorySpeed` is in **MHz**. The fixture reports
+  `Speed` 0 with `IsSpeedInMhz` true and `MaxMemorySpeed` 2400 — so a naive read of
+  `Speed` reports every DIMM on that machine as zero. All four inputs (`Speed`,
+  `MaxMemorySpeed`, `ConfiguredMemoryClockSpeed`, `IsSpeedInMhz`) are reported and
+  nothing is derived, because the false branch has no honest single answer.
+- **`CIM_Processor.Stepping` is a free-form string**, not an integer, per the class
+  definition — firmware may report `B0`.
+
+#### Deliberately not read
+
+- `CIM_PhysicalPackage`, `CIM_SystemPackaging` — see above.
+- `CIM_Battery`, `CIM_Fan`, `CIM_Sensor` — fixtures exist in `go-wsman-messages` and
+  these are plausible future subsets, but nothing in the motivating use case (asset
+  inventory of a powered-off machine) needs them, and each would be another value table.
+- Any write path to any class in this subsection. Several carry methods
+  (`CIM_MediaAccessDevice.LockMedia`, `CIM_Processor.RequestStateChange`); all are out of
+  scope for a read-only capability.
+
 ---
 
 ## 3. Redirection plane — session handshake
