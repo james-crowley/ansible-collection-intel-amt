@@ -995,6 +995,85 @@ operation:
       type: int
       version_added: 0.5.0
       sample: 10
+    hardware_reads:
+      description:
+        - What happened when each hardware inventory class was read, keyed by
+          WS-Man class name. Present only when O(gather_subset) requested at
+          least one hardware subset, so the key's presence means inventory was
+          attempted.
+        - >-
+          B(This is diagnostics reported alongside the facts, never instead of
+          them.) A class that cannot be read still yields V(null) for its group
+          under RV(amt.hardware) -- the graceful degradation is unchanged. What
+          this adds is the B(reason), because V(null) on its own cannot
+          distinguish "this firmware does not expose the class" from "we asked
+          for it wrongly" from "it answered and the reader did not recognise the
+          shape".
+        - >-
+          It exists because the first hardware run needed exactly that
+          distinction and could not get it. That run reported four of the six
+          groups as V(null) on both lab machines when firmware had in fact
+          returned all six fully populated -- the fault was in the qualification
+          playbook's summary, which read C(amt.hardware.system) and
+          C(amt.hardware.processor), key names this module has never emitted. A
+          per-class read outcome makes that class of mistake self-refuting: a
+          summary claiming a group is absent can be checked against the receipt
+          saying the class answered.
+      type: dict
+      version_added: 0.6.0
+      contains:
+        fact_group:
+          description: >-
+            Which RV(amt.hardware) key this class's result was filed under. Stated
+            explicitly because the subset name, the class name and the fact key
+            are three different vocabularies: subset V(system) reads
+            C(CIM_Chassis) into RV(amt.hardware.chassis), and there is no
+            C(amt.hardware.system) at all.
+          type: str
+          sample: chassis
+        outcome:
+          description:
+            - V(read) -- firmware returned at least one instance.
+            - >-
+              V(empty) -- firmware answered with B(zero) instances. A real
+              reading, not a gap: a diskless machine genuinely has no
+              C(CIM_MediaAccessDevice), and the fact value is V([]) rather than
+              V(null).
+            - >-
+              V(absent) -- every verb tried was refused, so this firmware does
+              not expose the class. The fact value is V(null) and
+              RV(operation.hardware_reads.error_class) names the refusal.
+          type: str
+          choices: [read, empty, absent]
+          sample: read
+        verb:
+          description: >-
+            The WS-Man verb whose result is reported. For the two single-instance
+            classes (C(CIM_Chassis), C(CIM_Card)) a value of V(Enumerate) also
+            means the bare C(Get) was refused and the C(Enumerate) fallback ran,
+            so the V(system) subset cost two more requests than
+            RV(operation.wsman_requests_estimated) predicted.
+          type: str
+          choices: [Get, Enumerate]
+          sample: Get
+        instances:
+          description: >-
+            How many instances firmware returned. V(0) when the outcome is
+            V(empty); V(null) when it is V(absent), because nothing came back to
+            count.
+          type: int
+          sample: 2
+        error_class:
+          description: >-
+            The failure class the refusal carried, on V(absent) only; V(null)
+            otherwise. AMT answers an unimplemented resource URI with HTTP 400,
+            which this collection raises as a protocol error and so reports here
+            as V(protocol).
+          type: str
+          sample: protocol
+      sample:
+        CIM_Chassis: {fact_group: chassis, outcome: read, verb: Get, instances: 1, error_class: null}
+        CIM_PhysicalMemory: {fact_group: memory, outcome: read, verb: Enumerate, instances: 2, error_class: null}
 """
 
 import dataclasses
@@ -1009,7 +1088,7 @@ from ansible_collections.james_crowley.intel_amt.plugins.module_utils.hardware i
     resolve_gather_subset,
     round_trip_estimate,
 )
-from ansible_collections.james_crowley.intel_amt.plugins.module_utils.models import OperationReceipt
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.models import AmtFacts, OperationReceipt
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.wsman import HAS_REQUESTS, REQUESTS_IMPORT_ERROR, WsmanClient
 
 
@@ -1064,9 +1143,17 @@ def facts_to_result(client: AmtClient, subsets: frozenset[str] | None = None) ->
     ``subsets`` is a resolved subset set from
     ``hardware.resolve_gather_subset()``. ``None`` means the default -- exactly
     the pre-0.5.0 fact set, at exactly the pre-0.5.0 round-trip cost.
-    """
-    facts = client.get_facts(subsets)
 
+    Thin wrapper over :func:`amt_facts_to_dict` for callers that only want the
+    fact document. ``main()`` deliberately does **not** use it: the receipt needs
+    the per-class read outcomes from the same :class:`AmtFacts`, and gathering
+    twice to get them would double the round trips.
+    """
+    return amt_facts_to_dict(client.get_facts(subsets))
+
+
+def amt_facts_to_dict(facts: AmtFacts) -> dict:
+    """Shape an already-gathered :class:`AmtFacts` into this module's C(amt) return key."""
     power_state = None
     if facts.power_state is not None:
         power_state = dataclasses.asdict(facts.power_state)
@@ -1119,7 +1206,11 @@ def main() -> None:
     try:
         wsman = build_wsman_client(module.params)
         client = AmtClient(wsman)
-        amt = facts_to_result(client, subsets)
+        # Gathered once and shaped twice: the `amt` document and the receipt's
+        # per-class read outcomes both come from this one AmtFacts, so the receipt
+        # can never describe a different read than the facts it accompanies.
+        facts = client.get_facts(subsets)
+        amt = amt_facts_to_dict(facts)
     except AmtError as err:
         module.fail_json(**err.to_result())
         return
@@ -1137,6 +1228,13 @@ def main() -> None:
         extra={
             "gather_subset": sorted(subsets),
             "wsman_requests_estimated": round_trip_estimate(subsets),
+            # Per-class inventory read outcomes. Diagnostics reported *alongside*
+            # the facts, never instead of them: a class that cannot be read still
+            # yields `null` for its group under `amt.hardware`. The key is omitted
+            # entirely when no hardware subset was requested, so its presence
+            # means "inventory was attempted" -- the same absent-means-not-asked
+            # convention `amt.hardware` itself uses.
+            **({"hardware_reads": facts.hardware.reads_to_dict()} if facts.hardware is not None and facts.hardware.reads else {}),
         },
     )
     module.exit_json(changed=False, amt=amt, operation=receipt.to_dict())

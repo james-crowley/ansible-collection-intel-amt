@@ -134,18 +134,88 @@
               Hardware inventory read failed:
               error_class={{ ansible_failed_result.error_class | default('unknown') }}
 
+    # The six fact-group keys amt_info emits under amt.hardware for
+    # `gather_subset: [config, hardware]`. Asserted, not merely printed, and this
+    # is the guard that matters most in this whole stage.
+    #
+    # The first run of this stage reported `system: null` and `processor: null` on
+    # both machines and was believed for long enough to raise a firmware-limitation
+    # investigation. Firmware had in fact returned every group fully populated. The
+    # summary below used to read `amt.hardware.system` and `amt.hardware.processor`
+    # -- and amt_info has never emitted either key. `system` and `processor` are
+    # *gather_subset* names; the *fact groups* they fill are `chassis`+`baseboard`
+    # and `processors`+`chips`. `| default(none)` then turned each undefined lookup
+    # into a printed "null", so the report was not just wrong but structurally
+    # incapable of revealing that it was wrong. Only `memory` and `storage` happen
+    # to share a name with the group they fill, which is exactly why those two
+    # looked fine and hid the pattern.
+    #
+    # Hence: assert the key set first. A renamed or mistyped key now fails this
+    # stage loudly instead of being silently reported as an absent class.
+    - name: Require amt.hardware to carry exactly the six documented fact groups
+      vars:
+        expected_groups: [chassis, baseboard, processors, chips, memory, storage]
+      ansible.builtin.assert:
+        that:
+          - amt_hw.amt.hardware is mapping
+          - (amt_hw.amt.hardware.keys() | list | sort) == (expected_groups | sort)
+        fail_msg: >-
+          amt.hardware does not carry the expected fact groups for
+          {{ inventory_hostname }}. Expected {{ expected_groups | sort }}, got
+          {{ amt_hw.amt.hardware.keys() | list | sort if amt_hw.amt.hardware is mapping else 'not a mapping' }}.
+          Do not read this as a firmware finding: it means this playbook and
+          amt_info disagree about the return shape, and every per-group line
+          below would be reporting on keys that do not exist.
+        success_msg: >-
+          amt.hardware carries all six documented fact groups for
+          {{ inventory_hostname }}; the per-group report below is asking real questions.
+
     - name: Report which inventory groups the firmware actually populated
       ansible.builtin.debug:
         msg:
-          gathered: "{{ amt_hw.amt.hardware.keys() | list if amt_hw.amt.hardware is mapping else 'hardware key absent' }}"
-          # null here is the finding worth having: it means the class exists in
-          # our reader but this firmware did not return it, which no mock can
-          # tell us.
-          system: "{{ 'populated' if (amt_hw.amt.hardware.system | default(none)) is not none else 'null' }}"
-          processor: "{{ 'populated' if (amt_hw.amt.hardware.processor | default(none)) is not none else 'null' }}"
-          memory_modules: "{{ (amt_hw.amt.hardware.memory | default([])) | length }}"
-          storage_devices: "{{ (amt_hw.amt.hardware.storage | default([])) | length }}"
-          wsman_requests: "{{ amt_hw.operation.wsman_requests_estimated | default('not reported') }}"
+          gathered: "{{ amt_hw.amt.hardware.keys() | list }}"
+          # `null` here means the class was requested and this firmware did not
+          # return it -- which no mock can tell us. It is a real finding, but it
+          # is only legible next to operation.hardware_reads below, which says
+          # *why*: absent (firmware refused it, with an error_class), or empty
+          # (firmware answered with zero instances, which is itself an answer).
+          chassis: "{{ 'populated' if amt_hw.amt.hardware.chassis is not none else 'null' }}"
+          baseboard: "{{ 'populated' if amt_hw.amt.hardware.baseboard is not none else 'null' }}"
+          processors: "{{ 'null' if amt_hw.amt.hardware.processors is none else amt_hw.amt.hardware.processors | length }}"
+          chips: "{{ 'null' if amt_hw.amt.hardware.chips is none else amt_hw.amt.hardware.chips | length }}"
+          memory_modules: "{{ 'null' if amt_hw.amt.hardware.memory is none else amt_hw.amt.hardware.memory | length }}"
+          storage_devices: "{{ 'null' if amt_hw.amt.hardware.storage is none else amt_hw.amt.hardware.storage | length }}"
+          wsman_requests_estimated: "{{ amt_hw.operation.wsman_requests_estimated | default('not reported') }}"
+
+    # The per-class read outcomes, which are what make a null diagnosable rather
+    # than merely visible. Printed in full: on a firmware that does not expose a
+    # class, this is the record of how it refused, and it is the thing the first
+    # run of this stage most needed and did not have.
+    - name: Report the per-class read outcome for every inventory class
+      ansible.builtin.debug:
+        msg: "{{ amt_hw.operation.hardware_reads | default('not reported -- amt_info is older than 0.6.0') }}"
+
+    # Cross-check the facts against the diagnostics. These two are derived from
+    # the same reads, so they cannot legitimately disagree -- and a disagreement
+    # is precisely the failure this stage previously shipped, so it is worth one
+    # assertion rather than trusting either side alone.
+    - name: Require the read outcomes and the fact values to agree
+      vars:
+        reads: "{{ amt_hw.operation.hardware_reads }}"
+      ansible.builtin.assert:
+        that:
+          - reads | length == 6
+          # Every class filed its result under a key that actually exists.
+          - reads.values() | map(attribute='fact_group') | sort == (amt_hw.amt.hardware.keys() | list | sort)
+          # `absent` is the only outcome that may produce a null fact value, and
+          # it must always carry the error class that explains it.
+          - reads.values() | selectattr('outcome', 'eq', 'absent') | selectattr('error_class', 'none') | list | length == 0
+        fail_msg: >-
+          operation.hardware_reads disagrees with amt.hardware for
+          {{ inventory_hostname }}. reads={{ reads }}.
+        success_msg: >-
+          Per-class read outcomes agree with the reported facts for {{ inventory_hostname }}:
+          {{ reads.values() | map(attribute='outcome') | list | sort | unique | list | join(', ') }}.
 
     - name: Record hardware inventory evidence for this target
       ansible.builtin.copy:

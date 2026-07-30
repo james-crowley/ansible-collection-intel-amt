@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -951,6 +952,240 @@ class TestGetFactsHardwareInventory:
         wsman = self._inventory_wsman(CIM_Processor=processors)
         facts = _client(wsman).get_facts(resolve_gather_subset(["processor"]))
         assert [cpu.device_id for cpu in facts.hardware.processors] == ["CPU 0", "CPU 1"]
+
+
+class TestHardwareReadOutcomes(TestGetFactsHardwareInventory):
+    """Per-class read outcomes: **why** a group is null, not merely that it is.
+
+    These exist because of a specific and expensive failure. The first hardware
+    qualification run of the 0.5.0 inventory reported four of the six fact groups
+    as ``null`` on both lab machines. Firmware had in fact returned all six fully
+    populated -- the qualification playbook was reading ``amt.hardware.system``
+    and ``amt.hardware.processor``, key names this collection has never emitted,
+    and Jinja's ``| default(none)`` rendered each undefined lookup as ``null``.
+
+    The report was therefore not merely wrong, it was **unfalsifiable from the
+    module's own output**: a genuinely absent class produces the identical
+    ``null``. That is the gap this class covers. Every read now states its own
+    outcome, so a summary claiming a group is absent can be checked against a
+    receipt saying the class answered.
+
+    Subclasses :class:`TestGetFactsHardwareInventory` to reuse its
+    ``_inventory_wsman`` fake and class fixtures. The outcomes are a property of
+    the very same reads, and exercising them through a second fake would let the
+    two drift apart.
+    """
+
+    def test_every_requested_class_records_an_outcome_keyed_by_class_name(self):
+        facts = _client(self._inventory_wsman()).get_facts(resolve_gather_subset(["all"]))
+        assert set(facts.hardware.reads) == {
+            "CIM_Chassis",
+            "CIM_Card",
+            "CIM_Processor",
+            "CIM_Chip",
+            "CIM_PhysicalMemory",
+            "CIM_MediaAccessDevice",
+        }
+
+    def test_a_class_that_was_not_requested_records_no_outcome_at_all(self):
+        # Same convention as HardwareFacts.to_dict(): absent means "not asked",
+        # which must stay distinguishable from "asked and got nothing".
+        facts = _client(self._inventory_wsman()).get_facts(resolve_gather_subset(["memory"]))
+        assert set(facts.hardware.reads) == {"CIM_PhysicalMemory"}
+
+    def test_no_hardware_subset_reads_nothing_so_there_is_nothing_to_record(self):
+        assert _client(self._inventory_wsman()).get_facts().hardware is None
+
+    @pytest.mark.parametrize(
+        "resource_class,fact_group",
+        [
+            ("CIM_Chassis", "chassis"),
+            ("CIM_Card", "baseboard"),
+            ("CIM_Processor", "processors"),
+            ("CIM_Chip", "chips"),
+            ("CIM_PhysicalMemory", "memory"),
+            ("CIM_MediaAccessDevice", "storage"),
+        ],
+    )
+    def test_each_outcome_names_the_fact_group_its_result_was_filed_under(self, resource_class, fact_group):
+        # The regression test for the defect that motivated this class. The subset
+        # name, the class name and the fact key are three different vocabularies,
+        # and `system`/`processor` are subset names that are NOT fact keys.
+        # Recording the mapping explicitly is what makes a consumer reading the
+        # wrong key detectable rather than silently plausible.
+        facts = _client(self._inventory_wsman()).get_facts(resolve_gather_subset(["all"]))
+        assert facts.hardware.reads[resource_class].fact_group == fact_group
+        assert fact_group in facts.hardware.to_dict()
+
+    def test_the_recorded_fact_groups_are_exactly_the_keys_that_get_rendered(self):
+        facts = _client(self._inventory_wsman()).get_facts(resolve_gather_subset(["all"]))
+        assert sorted(read.fact_group for read in facts.hardware.reads.values()) == sorted(facts.hardware.to_dict())
+
+    def test_a_populated_class_reports_read_with_its_instance_count(self):
+        dimms = [{**self.DIMM, "BankLabel": f"BANK {index}"} for index in range(3)]
+        facts = _client(self._inventory_wsman(CIM_PhysicalMemory=dimms)).get_facts(resolve_gather_subset(["memory"]))
+        read = facts.hardware.reads["CIM_PhysicalMemory"]
+
+        assert (read.outcome, read.verb, read.instances, read.error_class) == ("read", "Enumerate", 3, None)
+
+    def test_zero_instances_reports_empty_and_not_absent(self):
+        # The distinction a bare null cannot make: a diskless machine answered,
+        # and answering with nothing is not the same as refusing to answer.
+        facts = _client(self._inventory_wsman(CIM_MediaAccessDevice=[])).get_facts(resolve_gather_subset(["storage"]))
+        read = facts.hardware.reads["CIM_MediaAccessDevice"]
+
+        assert facts.hardware.storage == []
+        assert (read.outcome, read.instances, read.error_class) == ("empty", 0, None)
+
+    def test_a_faulting_class_reports_absent_with_the_error_class_that_refused_it(self):
+        # AMT answers an unimplemented resource URI with HTTP 400, which this
+        # collection raises as ProtocolError -- so `protocol` here is what "this
+        # firmware does not have the class" actually looks like on the wire.
+        fault = ProtocolError("CIM_PhysicalMemory is not implemented", endpoint="10.0.0.5:16993")
+        facts = _client(self._inventory_wsman(CIM_PhysicalMemory=fault)).get_facts(resolve_gather_subset(["memory"]))
+        read = facts.hardware.reads["CIM_PhysicalMemory"]
+
+        assert facts.hardware.memory is None
+        assert (read.outcome, read.instances, read.error_class) == ("absent", None, "protocol")
+
+    def test_an_unsupported_capability_refusal_keeps_its_own_error_class(self):
+        # Both degradable errors mean "not here", but not for the same reason, and
+        # collapsing them would discard the distinction this map exists to keep.
+        wsman = self._inventory_wsman(CIM_PhysicalMemory=UnsupportedCapabilityError("no such class"))
+        facts = _client(wsman).get_facts(resolve_gather_subset(["memory"]))
+        assert facts.hardware.reads["CIM_PhysicalMemory"].error_class == "unsupported_capability"
+
+    def test_a_successful_read_never_carries_an_error_class(self):
+        facts = _client(self._inventory_wsman()).get_facts(resolve_gather_subset(["all"]))
+        for name, read in facts.hardware.reads.items():
+            assert read.error_class is None, f"{name} reported an error class on a successful read"
+
+    def test_every_null_group_carries_an_outcome_explaining_it(self):
+        # The property that makes a null diagnosable, stated as an invariant over
+        # every class at once rather than one at a time: no group may be null
+        # without a read outcome accounting for it.
+        faults = {
+            name: ProtocolError("absent", endpoint="10.0.0.5:16993")
+            for name in ("CIM_Chassis", "CIM_Card", "CIM_Processor", "CIM_Chip", "CIM_PhysicalMemory", "CIM_MediaAccessDevice")
+        }
+        facts = _client(self._inventory_wsman(**faults)).get_facts(resolve_gather_subset(["all"]))
+        rendered = facts.hardware.to_dict()
+
+        assert set(rendered.values()) == {None}
+        for name, read in facts.hardware.reads.items():
+            assert rendered[read.fact_group] is None
+            assert read.outcome != "read", f"{name} is null but claims it was read"
+
+    def test_the_two_verbs_of_a_singleton_are_distinguished_rather_than_merged(self):
+        # `_inventory_wsman` faults only the *Get* for the two singleton classes
+        # and lets their Enumerate answer with nothing, so this asserts a real and
+        # easily-lost distinction: both fact values are null, but the four
+        # enumerate-only classes were REFUSED (absent, with an error class) while
+        # the two singletons were ANSWERED with zero instances (empty, no error).
+        #
+        # Collapsing those two into one "it did not work" would put this map back
+        # in the position a bare null was already in.
+        faults = {
+            name: ProtocolError("absent", endpoint="10.0.0.5:16993")
+            for name in ("CIM_Chassis", "CIM_Card", "CIM_Processor", "CIM_Chip", "CIM_PhysicalMemory", "CIM_MediaAccessDevice")
+        }
+        reads = _client(self._inventory_wsman(**faults)).get_facts(resolve_gather_subset(["all"])).hardware.reads
+
+        assert (reads["CIM_Chassis"].outcome, reads["CIM_Chassis"].error_class) == ("empty", None)
+        assert (reads["CIM_Card"].outcome, reads["CIM_Card"].error_class) == ("empty", None)
+        for name in ("CIM_Processor", "CIM_Chip", "CIM_PhysicalMemory", "CIM_MediaAccessDevice"):
+            assert (reads[name].outcome, reads[name].error_class) == ("absent", "protocol")
+
+    def test_a_singleton_refused_by_both_verbs_is_absent_not_empty(self):
+        # The counterpart to the test above, with the Enumerate refused as well.
+        wsman = self._inventory_wsman()
+        wsman.get.side_effect = ProtocolError("no Get", endpoint="10.0.0.5:16993")
+        wsman.enumerate.side_effect = ProtocolError("no Enumerate", endpoint="10.0.0.5:16993")
+        reads = _client(wsman).get_facts(resolve_gather_subset(["system"])).hardware.reads
+
+        for name in ("CIM_Chassis", "CIM_Card"):
+            assert (reads[name].outcome, reads[name].error_class) == ("absent", "protocol")
+
+    def test_a_singleton_answered_by_the_bare_get_records_get_as_the_verb(self):
+        facts = _client(self._inventory_wsman()).get_facts(resolve_gather_subset(["system"]))
+        read = facts.hardware.reads["CIM_Chassis"]
+        assert (read.outcome, read.verb, read.instances) == ("read", "Get", 1)
+
+    def test_a_singleton_answered_only_by_enumerate_records_the_fallback_verb(self):
+        # `verb: Enumerate` on a singleton class is how an operator sees that the
+        # bare Get was refused, and therefore that the `system` subset cost more
+        # requests than wsman_requests_estimated predicted.
+        wsman = _fake_wsman()
+        wsman.get.side_effect = ProtocolError("no bare Get here", endpoint="10.0.0.5:16993")
+        wsman.enumerate.side_effect = lambda rc, **_kw: [{"SerialNumber": "MOCKCHASSIS0001"}] if rc == "CIM_Chassis" else []
+
+        facts = _client(wsman).get_facts(resolve_gather_subset(["system"]))
+        read = facts.hardware.reads["CIM_Chassis"]
+        assert (read.outcome, read.verb) == ("read", "Enumerate")
+
+    def test_a_singleton_refused_by_both_verbs_reports_absent(self):
+        wsman = _fake_wsman()
+        wsman.get.side_effect = ProtocolError("no", endpoint="10.0.0.5:16993")
+        wsman.enumerate.side_effect = ProtocolError("nor this", endpoint="10.0.0.5:16993")
+
+        facts = _client(wsman).get_facts(resolve_gather_subset(["system"]))
+        read = facts.hardware.reads["CIM_Card"]
+        assert (read.outcome, read.error_class) == ("absent", "protocol")
+
+    def test_a_singleton_enumerating_to_nothing_reports_empty_rather_than_absent(self):
+        wsman = _fake_wsman()
+        wsman.get.return_value = {}
+        wsman.enumerate.return_value = []
+
+        facts = _client(wsman).get_facts(resolve_gather_subset(["system"]))
+        assert facts.hardware.reads["CIM_Chassis"].outcome == "empty"
+        assert facts.hardware.chassis is None
+
+    def test_a_transport_failure_still_propagates_rather_than_being_recorded(self):
+        # The diagnostics must not widen what counts as degradable. A timeout is a
+        # real failure, and recording it as "absent" would report an unreachable
+        # endpoint as a machine that has no hardware.
+        wsman = self._inventory_wsman(CIM_PhysicalMemory=TimeoutError_("read timed out", endpoint="10.0.0.5:16993"))
+        with pytest.raises(TimeoutError_):
+            _client(wsman).get_facts(resolve_gather_subset(["memory"]))
+
+    def test_the_reads_are_not_rendered_into_the_published_fact_shape(self):
+        # amt.hardware's shape is a published interface. Diagnostics belong on the
+        # operation receipt, and to_dict() lists its fields explicitly so that
+        # adding one to the dataclass cannot silently move that shape.
+        facts = _client(self._inventory_wsman()).get_facts(resolve_gather_subset(["all"]))
+        rendered = facts.hardware.to_dict()
+
+        assert "reads" not in rendered
+        assert set(rendered) == {"chassis", "baseboard", "processors", "chips", "memory", "storage"}
+
+    def test_reads_to_dict_is_ordered_by_class_regardless_of_which_subsets_ran(self):
+        # A receipt that reordered itself per run would be needlessly hard to diff
+        # between two machines, which is the main thing anyone does with one.
+        everything = _client(self._inventory_wsman()).get_facts(resolve_gather_subset(["all"]))
+        assert list(everything.hardware.reads_to_dict()) == [
+            "CIM_Chassis",
+            "CIM_Card",
+            "CIM_Processor",
+            "CIM_Chip",
+            "CIM_PhysicalMemory",
+            "CIM_MediaAccessDevice",
+        ]
+
+        partial = _client(self._inventory_wsman()).get_facts(resolve_gather_subset(["storage", "system"]))
+        assert list(partial.hardware.reads_to_dict()) == ["CIM_Chassis", "CIM_Card", "CIM_MediaAccessDevice"]
+
+    def test_reads_to_dict_renders_plain_json_safe_scalars(self):
+        facts = _client(self._inventory_wsman()).get_facts(resolve_gather_subset(["memory"]))
+        assert json.loads(json.dumps(facts.hardware.reads_to_dict())) == {
+            "CIM_PhysicalMemory": {
+                "fact_group": "memory",
+                "outcome": "read",
+                "verb": "Enumerate",
+                "instances": 1,
+                "error_class": None,
+            }
+        }
 
 
 class TestHardwareSingletonVerbFallback:

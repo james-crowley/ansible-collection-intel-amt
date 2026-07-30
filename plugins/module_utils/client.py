@@ -38,7 +38,11 @@ from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors imp
     UnsupportedCapabilityError,
 )
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.hardware import (
+    FACT_GROUP_BY_CLASS,
     MINIMAL_SUBSET,
+    READ_OUTCOME_ABSENT,
+    READ_OUTCOME_EMPTY,
+    READ_OUTCOME_READ,
     SUBSET_MEMORY,
     SUBSET_PROCESSOR,
     SUBSET_STORAGE,
@@ -46,6 +50,7 @@ from ansible_collections.james_crowley.intel_amt.plugins.module_utils.hardware i
     BaseboardInfo,
     ChassisInfo,
     ChipInfo,
+    ClassRead,
     HardwareFacts,
     MemoryInfo,
     ProcessorInfo,
@@ -351,7 +356,19 @@ class AmtClient:
         fixture set ships ``enumerate.xml`` + ``pull.xml`` for every multi-instance
         class read here. So ``Enumerate`` is the right verb for the multi-instance
         ones and needs no ``Get`` fallback.
+
+        **Every read also records a** :class:`hardware.ClassRead` **in**
+        :attr:`last_hardware_reads`. The fact values are unchanged by this -- a
+        class that cannot be read still degrades to ``None``. What changes is that
+        the *reason* is no longer invisible. Before this existed, a ``null`` fact
+        group was indistinguishable between "this firmware has no such class", "we
+        asked with the wrong verb or selector" and "it answered and the reader did
+        not recognise the shape" -- and the first hardware run against real
+        firmware needed precisely that distinction. It reported four of the six
+        groups as ``null`` when firmware had in fact returned all six, and nothing
+        in the module's output could contradict the claim.
         """
+        reads: dict[str, ClassRead] = {}
         groups = requested_fact_groups(subsets)
         if not groups:
             return None
@@ -366,22 +383,34 @@ class AmtClient:
             # (chassis/{get,enumerate,pull}.xml, card/{get,enumerate,pull}.xml).
             # MeshCentral fetches both with Get -- its BatchEnum '*' prefix means
             # "Get instead of Enumerate, to reduce round trips" -- so Get is the
-            # cheap path and Enumerate the insurance.
-            chassis_instance = self._get_or_enumerate_first("CIM_Chassis")
+            # cheap path and Enumerate the insurance. Both reference
+            # implementations send a bare Get with NO SelectorSet, which is worth
+            # recording because "wrong selector" was a live hypothesis for the
+            # first hardware run's apparent nulls: go-wsman-messages' shared
+            # base.WSManService.Get() calls getBySelector(nil) and emits no
+            # <w:SelectorSet> element at all (v2.48.3, internal/message/base.go),
+            # and MeshCentral's obj.Get/ExecGet have no selectors parameter to
+            # pass one with. Real firmware settles it -- AMT 16.1.30 and 19.0.5
+            # both answer this bare Get with a populated instance.
+            chassis_instance, reads["CIM_Chassis"] = self._read_single("CIM_Chassis")
             chassis = ChassisInfo.from_instance(chassis_instance) if chassis_instance else None
-            card_instance = self._get_or_enumerate_first("CIM_Card")
+            card_instance, reads["CIM_Card"] = self._read_single("CIM_Card")
             baseboard = BaseboardInfo.from_instance(card_instance) if card_instance else None
 
         if SUBSET_PROCESSOR in subsets:
-            processors = self._enumerate_into(ProcessorInfo, "CIM_Processor")
-            chips = self._enumerate_into(ChipInfo, "CIM_Chip")
+            processors, reads["CIM_Processor"] = self._read_many(ProcessorInfo, "CIM_Processor")
+            chips, reads["CIM_Chip"] = self._read_many(ChipInfo, "CIM_Chip")
 
         if SUBSET_MEMORY in subsets:
-            memory = self._enumerate_into(MemoryInfo, "CIM_PhysicalMemory")
+            memory, reads["CIM_PhysicalMemory"] = self._read_many(MemoryInfo, "CIM_PhysicalMemory")
 
         if SUBSET_STORAGE in subsets:
-            storage = self._enumerate_into(StorageInfo, "CIM_MediaAccessDevice")
+            storage, reads["CIM_MediaAccessDevice"] = self._read_many(StorageInfo, "CIM_MediaAccessDevice")
 
+        # The reads travel with the facts they describe rather than being cached
+        # on the client. A client attribute would be a second source of truth for
+        # the same thing, and a receipt built from it could outlive the facts it
+        # claims to describe.
         return HardwareFacts(
             chassis=chassis,
             baseboard=baseboard,
@@ -390,46 +419,96 @@ class AmtClient:
             memory=memory,
             storage=storage,
             requested=groups,
+            reads=reads,
         )
 
-    def _get_or_enumerate_first(self, resource_class: str) -> dict[str, Any] | None:
+    def _read_single(self, resource_class: str) -> tuple[dict[str, Any] | None, ClassRead]:
         """``Get`` one instance, falling back to the first ``Enumerate`` result.
 
         Generalises what :meth:`_get_bios_version` does inline. Returns ``None``
         when neither verb yields an instance -- a firmware that does not
-        implement the class degrades one fact group rather than failing the read.
-        """
-        instance = self._get_optional(resource_class)
-        if instance:
-            return instance
-        try:
-            instances = self._wsman.enumerate(resource_class)
-        except _DEGRADABLE_ERRORS:
-            return None
-        for candidate in instances or ():
-            if isinstance(candidate, dict) and candidate:
-                return candidate
-        return None
+        implement the class degrades one fact group rather than failing the read
+        -- paired with the :class:`hardware.ClassRead` recording which of the
+        three outcomes that was and how.
 
-    def _enumerate_into(self, factory: Any, resource_class: str) -> list[Any] | None:
+        ``verb`` on the returned record names the verb that actually produced the
+        reported result, so a value of ``"Enumerate"`` is also the signal that the
+        bare ``Get`` was refused and this subset cost two round trips more than
+        ``hardware.round_trip_estimate()`` predicted.
+        """
+        fact_group = FACT_GROUP_BY_CLASS[resource_class]
+        instance, _get_error_class = self._get_with_error_class(resource_class)
+        if instance:
+            return instance, ClassRead(fact_group=fact_group, outcome=READ_OUTCOME_READ, verb="Get", instances=1)
+
+        instances, enumerate_error_class = self._enumerate_with_error_class(resource_class)
+        if enumerate_error_class is not None:
+            # Both verbs were refused. The Enumerate's error class is the one
+            # reported: Enumerate is the fallback, so its refusal is what actually
+            # settled the outcome.
+            return None, ClassRead(fact_group=fact_group, outcome=READ_OUTCOME_ABSENT, verb="Enumerate", error_class=enumerate_error_class)
+
+        candidates = [item for item in instances or () if isinstance(item, dict) and item]
+        if candidates:
+            return candidates[0], ClassRead(fact_group=fact_group, outcome=READ_OUTCOME_READ, verb="Enumerate", instances=len(candidates))
+        return None, ClassRead(fact_group=fact_group, outcome=READ_OUTCOME_EMPTY, verb="Enumerate", instances=0)
+
+    def _read_many(self, factory: Any, resource_class: str) -> tuple[list[Any] | None, ClassRead]:
         """``Enumerate`` a multi-instance class into a list of typed records.
 
-        Three outcomes, all of which a caller acts on differently:
+        Three outcomes, all of which a caller acts on differently, and each of
+        which the returned :class:`hardware.ClassRead` names explicitly rather
+        than leaving to be inferred from the fact value:
 
-        * ``None`` -- the class faulted or is not implemented here.
-        * ``[]`` -- the class answered with **zero** instances. A real answer:
-          a machine can genuinely have no ``CIM_MediaAccessDevice``. Collapsing
-          this to ``None`` would report a diskless machine as a firmware gap.
-        * a populated list -- one record per instance, in the order firmware
-          returned them. Order is preserved rather than sorted: firmware's order
-          is the only ordering that carries any meaning (DIMM slot sequence), and
-          re-sorting would invent a bookkeeping it does not promise.
+        * ``None`` / ``absent`` -- the class faulted or is not implemented here.
+        * ``[]`` / ``empty`` -- the class answered with **zero** instances. A real
+          answer: a machine can genuinely have no ``CIM_MediaAccessDevice``.
+          Collapsing this to ``None`` would report a diskless machine as a
+          firmware gap.
+        * a populated list / ``read`` -- one record per instance, in the order
+          firmware returned them. Order is preserved rather than sorted:
+          firmware's order is the only ordering that carries any meaning (DIMM
+          slot sequence), and re-sorting would invent a bookkeeping it does not
+          promise.
+        """
+        fact_group = FACT_GROUP_BY_CLASS[resource_class]
+        instances, error_class = self._enumerate_with_error_class(resource_class)
+        if error_class is not None:
+            return None, ClassRead(fact_group=fact_group, outcome=READ_OUTCOME_ABSENT, verb="Enumerate", error_class=error_class)
+
+        records = [factory.from_instance(instance) for instance in instances or () if isinstance(instance, dict)]
+        return records, ClassRead(
+            fact_group=fact_group,
+            outcome=READ_OUTCOME_READ if records else READ_OUTCOME_EMPTY,
+            verb="Enumerate",
+            instances=len(records),
+        )
+
+    def _get_with_error_class(self, resource_class: str, *, selectors: dict[str, str] | None = None) -> tuple[dict[str, Any] | None, str | None]:
+        """``Get``, returning ``(instance, error_class)`` rather than discarding the reason.
+
+        :meth:`_get_optional` throws away *which* degradable error occurred, which
+        is fine for a capability flag but is the entire diagnostic when the
+        question is why an inventory group came back ``null``. Identical
+        tolerance and identical caught exceptions -- only the reason survives.
         """
         try:
-            instances = self._wsman.enumerate(resource_class)
-        except _DEGRADABLE_ERRORS:
-            return None
-        return [factory.from_instance(instance) for instance in instances or () if isinstance(instance, dict)]
+            return self._wsman.get(resource_class, selectors=selectors), None
+        except _DEGRADABLE_ERRORS as err:
+            return None, err.error_class
+
+    def _enumerate_with_error_class(self, resource_class: str) -> tuple[list[dict[str, Any]] | None, str | None]:
+        """``Enumerate``, returning ``(instances, error_class)``.
+
+        ``error_class`` is ``None`` on success **including when firmware returns
+        zero instances**: an empty enumeration is an answer, not a refusal, and
+        the two must not collapse into each other here -- that distinction is the
+        whole reason ``[]`` and ``None`` are different fact values.
+        """
+        try:
+            return self._wsman.enumerate(resource_class), None
+        except _DEGRADABLE_ERRORS as err:
+            return None, err.error_class
 
     def _get_optional(self, resource_class: str, *, selectors: dict[str, str] | None = None) -> dict[str, Any] | None:
         """``Get`` a class that a firmware may legitimately not implement.

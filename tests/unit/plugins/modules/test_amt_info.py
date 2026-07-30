@@ -17,6 +17,7 @@ from ansible_collections.james_crowley.intel_amt.plugins.module_utils.hardware i
     BaseboardInfo,
     ChassisInfo,
     ChipInfo,
+    ClassRead,
     HardwareFacts,
     MemoryInfo,
     ProcessorInfo,
@@ -399,6 +400,18 @@ def _hardware_facts() -> HardwareFacts:
         ],
         storage=[StorageInfo.from_instance({"DeviceID": "MEDIA DEV 0", "MaxMediaSize": "960197124", "Capabilities": "4", "Security": "2"})],
         requested=frozenset({"chassis", "baseboard", "processors", "chips", "memory", "storage"}),
+        # The per-class read outcomes the client records alongside the facts. The
+        # two singletons answered their bare Get; the four multi-instance classes
+        # answered an Enumerate. Instance counts match the groups above, because a
+        # receipt that disagreed with its own facts would be worse than none.
+        reads={
+            "CIM_Chassis": ClassRead(fact_group="chassis", outcome="read", verb="Get", instances=1),
+            "CIM_Card": ClassRead(fact_group="baseboard", outcome="read", verb="Get", instances=1),
+            "CIM_Processor": ClassRead(fact_group="processors", outcome="read", verb="Enumerate", instances=1),
+            "CIM_Chip": ClassRead(fact_group="chips", outcome="read", verb="Enumerate", instances=1),
+            "CIM_PhysicalMemory": ClassRead(fact_group="memory", outcome="read", verb="Enumerate", instances=2),
+            "CIM_MediaAccessDevice": ClassRead(fact_group="storage", outcome="read", verb="Enumerate", instances=1),
+        },
     )
 
 
@@ -497,6 +510,48 @@ class TestMainGatherSubsetPlumbing:
         result, _client = self._run(monkeypatch, dict(BASE_ARGS))
         assert result["operation"]["gather_subset"] == ["config"]
         assert result["operation"]["wsman_requests_estimated"] == 10
+
+    def test_the_receipt_reports_the_per_class_read_outcome_for_every_class(self, monkeypatch):
+        # The diagnostic the first hardware run needed and did not have. A `null`
+        # fact group is correct behaviour but it is not a diagnosis, and this is
+        # where the reason lives.
+        result, _client = self._run(monkeypatch, {**BASE_ARGS, "gather_subset": ["all"]}, hardware=_hardware_facts())
+        reads = result["operation"]["hardware_reads"]
+
+        assert list(reads) == ["CIM_Chassis", "CIM_Card", "CIM_Processor", "CIM_Chip", "CIM_PhysicalMemory", "CIM_MediaAccessDevice"]
+        assert reads["CIM_Chassis"] == {"fact_group": "chassis", "outcome": "read", "verb": "Get", "instances": 1, "error_class": None}
+        assert reads["CIM_PhysicalMemory"]["fact_group"] == "memory"
+
+    def test_the_receipt_read_outcomes_map_onto_keys_that_actually_exist(self, monkeypatch):
+        # The regression guard for the qualification-playbook defect: that summary
+        # read `amt.hardware.system` and `amt.hardware.processor`, which are
+        # gather_subset names and not fact keys, so `| default(none)` printed
+        # "null" for four groups firmware had in fact populated. Every fact_group
+        # named in the receipt must be a key that really is present.
+        result, _client = self._run(monkeypatch, {**BASE_ARGS, "gather_subset": ["all"]}, hardware=_hardware_facts())
+        hardware = result["amt"]["hardware"]
+
+        for class_name, read in result["operation"]["hardware_reads"].items():
+            assert read["fact_group"] in hardware, f"{class_name} claims a fact group that is not in amt.hardware"
+        assert "system" not in hardware, "`system` is a gather_subset name, never a fact key"
+        assert "processor" not in hardware, "`processor` is a gather_subset name, never a fact key"
+
+    def test_a_degraded_class_reports_absent_with_its_error_class_beside_the_null(self, monkeypatch):
+        hardware = HardwareFacts(
+            requested=frozenset({"memory"}),
+            reads={"CIM_PhysicalMemory": ClassRead(fact_group="memory", outcome="absent", verb="Enumerate", error_class="protocol")},
+        )
+        result, _client = self._run(monkeypatch, {**BASE_ARGS, "gather_subset": ["memory"]}, hardware=hardware)
+        read = result["operation"]["hardware_reads"]["CIM_PhysicalMemory"]
+
+        assert result["amt"]["hardware"]["memory"] is None, "the null fact value must be unchanged by the diagnostics"
+        assert (read["outcome"], read["error_class"]) == ("absent", "protocol")
+
+    def test_the_receipt_omits_hardware_reads_entirely_when_no_inventory_was_asked_for(self, monkeypatch):
+        # Absent means "not attempted", the same convention amt.hardware itself
+        # uses. A key present but empty would claim inventory had been tried.
+        result, _client = self._run(monkeypatch, dict(BASE_ARGS))
+        assert "hardware_reads" not in result["operation"]
 
     def test_the_receipt_still_reports_changed_false_and_no_error(self, monkeypatch):
         result, _client = self._run(monkeypatch, {**BASE_ARGS, "gather_subset": ["all"]}, hardware=_hardware_facts())
