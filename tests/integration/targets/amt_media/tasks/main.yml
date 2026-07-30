@@ -12,10 +12,26 @@
 # TEST_UNIT_READY + READ_10 + WRITE_10 sequence automatically once a client connects --
 # see that script's docstring for why nothing else in this test could do that driving).
 #
-# Three independent mock instances, run one at a time: (A) the read+write proof over
+# Five independent mock instances, run one at a time: (A) the read+write proof over
 # plaintext, (B) the TLS/fingerprint-pinning happy path, (C) the wrong-password fault
-# injection. Keeping them sequential avoids juggling three sets of background pids at
+# injection, (D) firmware that refuses the IDE-R feature toggle, (E) firmware that never
+# answers it. Keeping them sequential avoids juggling several sets of background pids at
 # once and keeps IDE-R's single-connection-at-a-time nature from ever being in doubt.
+#
+# D and E are the only tier that drives the real IderEngine, over a real socket, against
+# an endpoint that does not agree to serve the media. Everything above them proves the
+# module reports success when it should; they are what proves it reports *failure* when it
+# must -- and specifically that it does not report `session_state: attached` for a session
+# whose feature toggle firmware declined, which is the defect issue #69 fixed. That fix
+# lives in media_session._run_daemon's attach gate and was, until these two scenarios,
+# guarded only by unit tests: the mock has always had a feature_toggle_status knob and
+# nothing had ever passed it anything but the happy-path default.
+#
+# The two are deliberately not one scenario. A refusal is definite -- firmware said no, so
+# no media is being served -- and classifies as `unsupported_capability`. A withheld
+# verdict leaves whether media is served genuinely unknown and can only be ended by a
+# bounded wait, so it classifies as `timeout`. Collapsing them would lose the distinction
+# a caller needs to decide between giving up on an endpoint and retrying it.
 
 - name: Create a scratch directory for this target's runtime files
   ansible.builtin.tempfile:
@@ -378,6 +394,173 @@
       ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
       changed_when: false
       when: ider_c_pid is defined
+
+# --------------------------------------------------------------------------------
+# (D) Fault injection -- firmware opens the session, then REFUSES the IDE-R feature
+# toggle. The connection is live and authenticated, so every signal short of the
+# toggle verdict says "fine"; nothing is serving the media. Must fail, and must fail
+# as unsupported_capability -- see media_session._run_daemon's attach gate.
+# --------------------------------------------------------------------------------
+- name: Scenario D -- the endpoint refuses the IDE-R feature toggle
+  block:
+    - name: Start a mock IDE-R server that refuses the feature toggle
+      ansible.builtin.shell: |
+        set -e
+        nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_ider_mock.py \
+          --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ scratch_dir.path }}/ider_d_ready.json \
+          --refuse-feature-toggle \
+          > {{ scratch_dir.path }}/ider_d.log 2>&1 &
+        echo $!
+      args:
+        executable: /bin/bash
+      register: ider_d_start
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Wait for the mock IDE-R server to report ready
+      ansible.builtin.wait_for:
+        path: "{{ scratch_dir.path }}/ider_d_ready.json"
+        state: present
+        timeout: 15
+      delegate_to: localhost
+
+    - name: Read the mock IDE-R server's connection info and pid
+      ansible.builtin.set_fact:
+        ider_d_info: "{{ lookup('ansible.builtin.file', scratch_dir.path + '/ider_d_ready.json') | from_json }}"
+        ider_d_pid: "{{ ider_d_start.stdout | trim }}"
+
+    - name: Attach against the endpoint that refuses the toggle
+      james_crowley.intel_amt.amt_media:
+        host: 127.0.0.1
+        port: "{{ ider_d_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        floppy: "{{ floppy_path }}"
+        state: attached
+        runtime_dir: "{{ runtime_dir }}"
+        attach_timeout: 15
+      delegate_to: localhost
+      no_log: true
+      register: media_toggle_refused
+      ignore_errors: true
+
+    - name: Assert the refused toggle failed the attach as unsupported_capability
+      ansible.builtin.assert:
+        that:
+          # The load-bearing pair. Before #69 this attach *succeeded* with
+          # session_state 'attached', which is what handed the caller a success
+          # receipt for media nobody was serving.
+          - media_toggle_refused.failed == true
+          - media_toggle_refused.session_state != 'attached'
+          - media_toggle_refused.error_class == 'unsupported_capability'
+          - media_toggle_refused.session_state == 'error'
+          - media_toggle_refused.changed == false
+          # The message must name the toggle, not just fail generically: a caller
+          # reading this needs to know to check whether redirection is enabled for
+          # the endpoint rather than to retry a transient.
+          - "'feature toggle' in media_toggle_refused.msg"
+          - "'no media is being served' in media_toggle_refused.msg"
+
+    - name: Confirm the refused session left no live daemon behind
+      ansible.builtin.assert:
+        that:
+          - media_toggle_refused.bytes_read == 0
+          - media_toggle_refused.bytes_written == 0
+  always:
+    - name: Stop the mock IDE-R server (scenario D)
+      ansible.builtin.command: "kill {{ ider_d_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
+      changed_when: false
+      when: ider_d_pid is defined
+
+# --------------------------------------------------------------------------------
+# (E) Fault injection -- firmware opens the session and then never reports the toggle
+# outcome at all. Distinct from (D): no verdict ever arrives, so whether media is being
+# served is unknown, and only the daemon's own bounded wait
+# (media_session._FEATURE_TOGGLE_TIMEOUT, 5s) can end it. attach_timeout is set well
+# above that on purpose so the daemon wins the race and the module reports the daemon's
+# specific classified timeout rather than a generic one of its own.
+# --------------------------------------------------------------------------------
+- name: Scenario E -- the endpoint never reports the IDE-R feature toggle outcome
+  block:
+    - name: Start a mock IDE-R server that never answers the feature toggle
+      ansible.builtin.shell: |
+        set -e
+        nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_ider_mock.py \
+          --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ scratch_dir.path }}/ider_e_ready.json \
+          --withhold-feature-toggle \
+          > {{ scratch_dir.path }}/ider_e.log 2>&1 &
+        echo $!
+      args:
+        executable: /bin/bash
+      register: ider_e_start
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Wait for the mock IDE-R server to report ready
+      ansible.builtin.wait_for:
+        path: "{{ scratch_dir.path }}/ider_e_ready.json"
+        state: present
+        timeout: 15
+      delegate_to: localhost
+
+    - name: Read the mock IDE-R server's connection info and pid
+      ansible.builtin.set_fact:
+        ider_e_info: "{{ lookup('ansible.builtin.file', scratch_dir.path + '/ider_e_ready.json') | from_json }}"
+        ider_e_pid: "{{ ider_e_start.stdout | trim }}"
+
+    - name: Attach against the endpoint that withholds the toggle verdict
+      james_crowley.intel_amt.amt_media:
+        host: 127.0.0.1
+        port: "{{ ider_e_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        floppy: "{{ floppy_path }}"
+        state: attached
+        runtime_dir: "{{ runtime_dir }}"
+        attach_timeout: 20
+      delegate_to: localhost
+      no_log: true
+      register: media_toggle_withheld
+      ignore_errors: true
+
+    - name: Assert the unanswered toggle failed the attach as a classified timeout
+      ansible.builtin.assert:
+        that:
+          - media_toggle_withheld.failed == true
+          - media_toggle_withheld.session_state != 'attached'
+          - media_toggle_withheld.error_class == 'timeout'
+          - media_toggle_withheld.session_state == 'error'
+          - media_toggle_withheld.changed == false
+          # Not merely a timeout: the message must say the outcome is *unknown*, which
+          # is the whole difference between this and scenario D's definite refusal.
+          - "'whether media is being served is unknown' in media_toggle_withheld.msg"
+
+    - name: Assert the mock did complete its side of the handshake in scenario E
+      ansible.builtin.set_fact:
+        ider_e_result: "{{ lookup('ansible.builtin.file', scratch_dir.path + '/ider_e_ready.json') | from_json }}"
+      delegate_to: localhost
+
+    - name: Confirm the failure was the withheld toggle, not a broken handshake
+      ansible.builtin.assert:
+        that:
+          # If the handshake itself had failed, the module would have failed too -- but
+          # for a different reason, and the assertions above would be proving nothing
+          # about the toggle. This pins which fault actually fired.
+          - ider_e_result.handshake == true
+          - ider_e_result.error is none
+  always:
+    - name: Stop the mock IDE-R server (scenario E)
+      ansible.builtin.command: "kill {{ ider_e_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
+      changed_when: false
+      when: ider_e_pid is defined
 
 - name: Remove the scratch directory
   ansible.builtin.file:

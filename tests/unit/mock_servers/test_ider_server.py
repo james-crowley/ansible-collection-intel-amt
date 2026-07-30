@@ -4,20 +4,36 @@
 
 """Self-tests for the mock IDE-R server.
 
-Two kinds of coverage:
+Three kinds of coverage:
 
 * Byte-exact frame builder/parser tests (``TestFrameEncoding*``) that need no
   running server at all -- they pin the wire format against hand-built
   expected bytes, independent of any implementation detail.
 * End-to-end handshake + SCSI round-trip tests that run the mock against a
   deliberately minimal "fake client" (``_FakeIderClient``, defined below).
-  That stand-in exists only because ``plugins/module_utils/ider.py`` (the
-  real client) is being written in parallel and does not exist yet; it is
-  *not* a reference implementation -- its SCSI reply payloads are synthetic
-  placeholders, not the canned byte arrays real firmware expects (those
-  belong to the real client, copied from ``amt-ider-module.js`` per
+  That stand-in is *not* a reference implementation -- its SCSI reply payloads
+  are synthetic placeholders, not the canned byte arrays real firmware expects
+  (those belong to the real client, copied from ``amt-ider-module.js`` per
   protocol-notes.md §4.5). It exists purely to prove the mock's frame
-  mechanics: chunking, reassembly, sequencing, and the write-path split.
+  mechanics -- chunking, reassembly, sequencing, and the write-path split --
+  with no dependency on the collection's own client being correct.
+* ``TestRealEngineAgainstMock``, which drives the **real** client
+  (``plugins/module_utils/redirection.RedirectionSession`` plus
+  ``plugins/module_utils/ider.IderEngine``) against the mock over a real socket.
+
+That third group exists because the first two, on their own, leave a gap that is
+easy to miss. This repository contains two independent implementations of one
+wire protocol -- the mock plays firmware, ``ider.py`` plays the client -- and
+each was tested only against its own hand-built expectations:
+``_FakeIderClient`` does not exercise ``ider.py`` at all, and
+``tests/unit/plugins/module_utils/test_ider.py`` feeds ``IderEngine`` frames it
+builds itself. The two met nowhere below the ``amt_media`` integration target,
+which needs a forked daemon and a playbook to run.
+
+``TestRealEngineAgainstMock`` is deliberately thin: a wiring check on the
+handshake and on the feature-toggle verdict, not a second SCSI suite. Keeping it
+small is the point -- it costs a socket and no daemon, and it is the cheapest
+place to notice the two implementations drifting apart.
 """
 
 from __future__ import annotations
@@ -26,6 +42,7 @@ import hashlib
 import secrets
 import socket
 import threading
+import time
 
 import pytest
 from ider_server import (
@@ -57,6 +74,9 @@ from ider_server import (
     encode_start_session_reply,
     encode_status_data,
 )
+
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.ider import DEVICE_FLOPPY, IderEngine, MediaImage
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.redirection import START_SESSION_IDER, RedirectionSession
 
 FAKE_USERNAME = "admin"
 FAKE_PASSWORD = "test-password-not-real"
@@ -650,3 +670,208 @@ class TestCleanShutdown:
 
         with pytest.raises(OSError):
             socket.create_connection(("127.0.0.1", port), timeout=1)
+
+
+# --------------------------------------------------------------------------
+# The real client against the mock -- see the module docstring for why this
+# group exists separately from the _FakeIderClient tests above.
+# --------------------------------------------------------------------------
+
+
+class _RealClientHarness:
+    """The real ``RedirectionSession`` + ``IderEngine`` pair, pumped by hand.
+
+    Deliberately mirrors what ``media_session._run_daemon`` does -- connect, build an
+    engine, attach media, ``start()``, feed the handshake leftover -- minus the fork,
+    the state file and the signal handling, none of which are protocol concerns. That
+    keeps this a test of the two protocol implementations agreeing, not a second test
+    of the daemon.
+
+    The receive pump comes in two forms because the tests need both:
+
+    * :meth:`pump_until` runs on the calling thread. Used when the test only waits on
+      the *client's* own state (session open, toggle verdict), so a failure surfaces as
+      an ordinary assertion with an ordinary traceback.
+    * :meth:`start_pump` runs it on a background thread. Required as soon as the mock
+      drives SCSI, because then both sides are waiting on each other: the mock's
+      ``read_data_to_host_stream`` blocks on its event queue while the engine still
+      needs feeding, and one thread cannot do both.
+
+    One ordering constraint, easy to get backwards: a test must **pump before** calling
+    ``srv.wait_for_handshake()``, never the other way round. The mock does not consider
+    its handshake finished until it has read the client's ``0x48``
+    DISABLE_ENABLE_FEATURES, and the real engine only sends that in reaction to being
+    fed the mock's ``0x41`` OPEN_SESSION_REPLY. Waiting first therefore deadlocks -- the
+    mock waits for a frame only the pump can cause -- and it surfaces as a bare
+    handshake timeout that reads like a protocol bug rather than a test-ordering
+    mistake. ``_FakeIderClient`` hides this because its ``start_ider_session()`` reads
+    and replies inline on the calling thread.
+    """
+
+    def __init__(self, srv: IderMockServer, image_path, *, writable: bool = False) -> None:
+        self.session = RedirectionSession(
+            srv.host,
+            username=FAKE_USERNAME,
+            password=FAKE_PASSWORD,
+            use_tls=False,
+            port=srv.port,
+            connect_timeout=5.0,
+            start_frame=START_SESSION_IDER,
+        )
+        leftover = self.session.connect()
+        self.image = MediaImage(image_path, device_code=DEVICE_FLOPPY, writable=writable)
+        self.engine = IderEngine(send=self.session.send)
+        self.engine.attach_device(self.image)
+        self.engine.start()
+        if leftover:
+            self.engine.feed(leftover)
+        # Short enough that pump_until's bound is the thing that actually decides how
+        # long a test waits, rather than one blocking recv overshooting it.
+        self.session.set_recv_timeout(0.25)
+        self.pump_error: BaseException | None = None
+        self._pumping = False
+        self._thread: threading.Thread | None = None
+
+    def _feed_once(self) -> bool:
+        """Receive and feed one chunk. Returns False when the connection is done."""
+        try:
+            chunk = self.session.recv()
+        except TimeoutError:
+            return True
+        except OSError:
+            return False
+        if not chunk:
+            return False
+        self.engine.feed(chunk)
+        return True
+
+    def pump_until(self, predicate, timeout: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while not predicate():
+            if time.monotonic() >= deadline or not self._feed_once():
+                break
+        return bool(predicate())
+
+    def start_pump(self) -> None:
+        self._pumping = True
+        self._thread = threading.Thread(target=self._pump_forever, name="real-engine-pump", daemon=True)
+        self._thread.start()
+
+    def _pump_forever(self) -> None:
+        # Any exception is captured rather than raised: this runs off the test thread,
+        # where a raise would be swallowed into a bare "exception in thread" on stderr
+        # and the test would fail later with an unrelated timeout. stop_pump() re-raises.
+        try:
+            while self._pumping and self._feed_once():
+                pass
+        except BaseException as exc:  # re-raised on the test thread by stop_pump()
+            self.pump_error = exc
+
+    def stop_pump(self) -> None:
+        self._pumping = False
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            self._thread = None
+        if self.pump_error is not None:
+            raise self.pump_error
+
+    def close(self) -> None:
+        self.image.close()
+        self.session.close()
+
+
+def _floppy_image(tmp_path, sectors: int = 4):
+    """A backing file whose every sector is a distinct repeated byte.
+
+    Distinct per sector so an assertion on the bytes read back proves the *right*
+    sectors came back, not merely that the right number of bytes did -- an off-by-one
+    LBA would return the correct length of the wrong data.
+    """
+    path = tmp_path / "answer.img"
+    path.write_bytes(b"".join(bytes([index]) * 512 for index in range(sectors)))
+    return path
+
+
+class TestRealEngineAgainstMock:
+    def test_handshake_completes_and_the_toggle_is_accepted(self, tmp_path):
+        with IderMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD, readbfr=512, writebfr=512) as srv:
+            harness = _RealClientHarness(srv, _floppy_image(tmp_path))
+            try:
+                assert harness.pump_until(lambda: harness.engine.feature_toggle_ok is not None)
+                srv.wait_for_handshake(timeout=5.0)
+                assert harness.engine.session_open is True
+                assert harness.engine.feature_toggle_ok is True
+                # The mock's advertised buffer size reached the real client intact, which
+                # is what it will chunk DATA_TO_HOST by. A mismatch here is silent until
+                # a read is large enough to need splitting.
+                assert harness.engine.session_info.readbfr == 512
+            finally:
+                harness.close()
+
+    def test_refused_toggle_is_observed_as_a_definite_false(self, tmp_path):
+        """The refusal path issue #69's attach gate exists for, at the engine level.
+
+        ``False`` and ``None`` are different answers to different questions -- "firmware
+        said no" versus "firmware has not said" -- and the gate in
+        ``media_session._run_daemon`` branches on exactly that difference, so a client
+        that reported the refusal as an absent verdict would make the gate wait out its
+        timeout and misclassify a definite refusal as a timeout.
+        """
+        with IderMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD, feature_toggle_status=0) as srv:
+            harness = _RealClientHarness(srv, _floppy_image(tmp_path))
+            try:
+                assert harness.pump_until(lambda: harness.engine.feature_toggle_ok is not None)
+                srv.wait_for_handshake(timeout=5.0)
+                assert harness.engine.session_open is True
+                assert harness.engine.feature_toggle_ok is False
+            finally:
+                harness.close()
+
+    def test_withheld_toggle_leaves_the_verdict_unanswered(self, tmp_path):
+        """The mock can express "never answers", and the engine reports it as unknown.
+
+        Asserting ``is None`` after a bounded pump is the whole point: the engine must
+        not default an unanswered toggle to either verdict. Defaulting to ``True`` is
+        the pre-#69 defect (media reported as served when nothing is serving it);
+        defaulting to ``False`` would report a definite refusal that never happened.
+        """
+        with IderMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD, feature_toggle_status=None) as srv:
+            harness = _RealClientHarness(srv, _floppy_image(tmp_path))
+            try:
+                # The session genuinely opens -- this is not a broken handshake.
+                assert harness.pump_until(lambda: harness.engine.session_open is True)
+                srv.wait_for_handshake(timeout=5.0)
+                # And then nothing arrives. Pump well past any plausible in-flight delay.
+                assert harness.pump_until(lambda: harness.engine.feature_toggle_ok is not None, timeout=1.5) is False
+                assert harness.engine.feature_toggle_ok is None
+                assert harness.engine.stopped is False
+            finally:
+                harness.close()
+
+    def test_read_10_serves_the_real_media_bytes_the_mock_asked_for(self, tmp_path):
+        """A full SCSI read across the seam, with a payload that must be split.
+
+        ``readbfr=512`` against a two-sector (1024-byte) read forces the real engine to
+        chunk DATA_TO_HOST, so this asserts the two implementations agree on the frame
+        prefix, the declared length, the completed bit and the chunk boundary -- not just
+        on the happy single-frame case.
+        """
+        image_path = _floppy_image(tmp_path, sectors=4)
+        expected = image_path.read_bytes()[512 : 512 + 1024]  # LBA 1, two sectors
+        with IderMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD, readbfr=512, writebfr=512) as srv:
+            harness = _RealClientHarness(srv, image_path)
+            try:
+                assert harness.pump_until(lambda: harness.engine.feature_toggle_ok is True)
+                srv.wait_for_handshake(timeout=5.0)
+                harness.start_pump()
+                srv.issue_scsi(_cdb_read_10(1, 2), device=DEVICE_FLOPPY)
+                data, completed_flags = srv.read_data_to_host_stream(timeout=5.0)
+                assert data == expected
+                # Only the final frame may claim completion; anything else would let a
+                # peer stop reassembling early.
+                assert completed_flags[-1] is True
+                assert completed_flags[:-1] == [False] * (len(completed_flags) - 1)
+                assert harness.image.bytes_read == len(expected)
+            finally:
+                harness.stop_pump()
+                harness.close()
