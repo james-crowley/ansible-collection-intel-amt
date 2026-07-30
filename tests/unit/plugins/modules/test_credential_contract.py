@@ -52,6 +52,7 @@ from unittest.mock import Mock
 
 import pytest
 from ansible.module_utils import basic
+from ansible.module_utils.common import parameters as _ansible_parameters
 from ansible.module_utils.common.text.converters import to_bytes
 
 from ansible_collections.james_crowley.intel_amt.plugins import modules as modules_package
@@ -201,7 +202,27 @@ class TestArgumentSpecCredentialContract:
         assert "password" not in exempted_options
 
 
+# ansible-core 2.21 made the invocation echo opt-in. `_return_formatted` now injects
+# `invocation.module_args` only when `_ansible_inject_invocation` is set, and strips the key
+# otherwise; the executor sets it in production, which is why real playbook output still has it.
+#
+# This matters more than a missing key. `invocation.module_args` is where this file's positive
+# control lives -- the assertion that the result really does echo the caller's arguments, without
+# which "the password is not in module_args" is satisfied just as well by module_args being
+# absent. On 2.21 an unfixed harness raises KeyError, which is at least loud; the danger is a
+# future variant that yields an empty dict and passes vacuously. That is precisely the failure
+# mode this file was written to close.
+#
+# Gate on the capability rather than a version number, because the flag is rejected as an
+# unsupported parameter on 2.17-2.20 -- passing it unconditionally turns every module invocation
+# there into a validation failure.
+_INJECT_INVOCATION_SUPPORTED = "inject_invocation" in getattr(_ansible_parameters, "PASS_VARS", {})
+
+
 def set_module_args(args: dict) -> None:
+    args = dict(args)
+    if _INJECT_INVOCATION_SUPPORTED:
+        args["_ansible_inject_invocation"] = True
     basic._ANSIBLE_ARGS = to_bytes(json.dumps({"ANSIBLE_MODULE_ARGS": args}))
     # ansible-core >= 2.18 requires an explicit args-decoding profile alongside _ANSIBLE_ARGS;
     # "legacy" is the plain-JSON profile, which is what this hand-built buffer actually is.
@@ -241,6 +262,16 @@ def emit(module_name: str, args: dict) -> EmittedResult:
 
 def assert_credential_absent_from(result: EmittedResult, module_name: str) -> None:
     """The actual invariant, plus the positive control that keeps it from being vacuous."""
+    # Not `result.document["invocation"]` directly: a core that stops echoing invocation turns
+    # every assertion here into a bare KeyError that reads like a broken test rather than a
+    # missing positive control. Say which it is. (ansible-core 2.21 did exactly this -- see
+    # _INJECT_INVOCATION_SUPPORTED above.)
+    assert "invocation" in result.document, (
+        f"{module_name}'s result has no `invocation` key, so the positive control below cannot run and "
+        f"nothing here would prove the password was censored rather than merely absent. If this "
+        f"appeared after an ansible-core upgrade, the harness needs to opt in to the invocation echo "
+        f"the way the executor does -- see _INJECT_INVOCATION_SUPPORTED."
+    )
     module_args = result.document["invocation"]["module_args"]
 
     # Positive control. If this fails, the document is not echoing the caller's arguments and
@@ -466,6 +497,10 @@ class TestCredentialNeverReachesTheEmittedDocument:
         # module that stopped emitting invocation.module_args at all would still satisfy a bare
         # `password not in output` assertion while telling us nothing.
         args = dict(CONNECTION_ARGS, port="not-an-int", **REQUIRED_ARGS.get(module_name, {}))
-        module_args = emit(module_name, args).document["invocation"]["module_args"]
+        emitted = emit(module_name, args)
+        assert "invocation" in emitted.document, (
+            f"{module_name} emitted no `invocation` key; see _INJECT_INVOCATION_SUPPORTED"
+        )
+        module_args = emitted.document["invocation"]["module_args"]
         assert "password" in module_args
         assert module_args["password"] == "VALUE_SPECIFIED_IN_NO_LOG_PARAMETER"
