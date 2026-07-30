@@ -76,6 +76,13 @@
               resolved_host: "{{ amt_baremetal_install_host | default(none) }}"
               resolved_port: "{{ amt_baremetal_install_port | default(none) }}"
               resolved_username: "{{ amt_baremetal_install_username | default(none) }}"
+              # The IDE-R redirection port the media phase aims at, which is a different
+              # plane from resolved_port above and must never be conflated with it.
+              resolved_media_port: "{{ amt_baremetal_install_media_port | default(none) }}"
+              # The hand-off endpoint. Asserted to be *unset* unless the caller named it:
+              # it must not fall back to the AMT management address (resolved_host), and
+              # it must not fall back to inventory_hostname either.
+              resolved_handoff_host: "{{ amt_baremetal_install_handoff_host | default(none) }}"
               # 'on' for an endpoint observed powered off, 'reset' for one observed
               # running. Undefined if the role never reached tasks/reset.yml.
               power_action: "{{ amt_baremetal_install_power_action | default(none) }}"

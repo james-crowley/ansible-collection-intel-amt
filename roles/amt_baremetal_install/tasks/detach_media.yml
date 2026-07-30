@@ -11,6 +11,22 @@
 # contract already reports changed=false with nothing to do when no state
 # file exists for the given session_id, so there is no need to duplicate that
 # check here beyond the truthiness guard below.
+#
+# Read that guard precisely: it guards against "the media phase never started", NOT
+# against "the attach failed". Those used to be the same condition, and that was the bug.
+# The session id was recorded only from a *successful* attach's result, so any failed
+# attach left session_id null here and this file did nothing -- while amt_media's forked
+# daemon, which outlives a failed attach by construction, kept holding the session open.
+# IDE-R being single-session, that orphan also blocked the next attempt against the same
+# endpoint. The role reported a media failure and then created a worse one.
+#
+# tasks/attach_media.yml now claims and persists the session id *before* amt_media can
+# spawn anything, so by the time any attach outcome exists -- success, error, or a
+# timeout whose outcome is indeterminate -- there is an id here to detach. That is what
+# makes "always detach" a guarantee rather than an intention, and it matters most in the
+# indeterminate case specifically: this collection's contract for indeterminate is to
+# re-probe rather than retry, and state=detached is a probe (it looks the daemon up by the
+# pid recorded in the state file and asks it to stop), never a retry of the attach.
 
 - name: Detach IDE-R media, if a session was ever attached this run
   james_crowley.intel_amt.amt_media:

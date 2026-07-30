@@ -72,6 +72,21 @@ amt_baremetal_install_iso_path: null
 amt_baremetal_install_answer_image_path: null
 amt_baremetal_install_answer_image_writable: true
 amt_baremetal_install_media_start_mode: on_reboot
+# TCP port of the IDE-R/redirection plane -- NOT the WS-Man management port that
+# amt_baremetal_install_port above sets. They are different planes on different
+# ports (16994/16995 vs 16992/16993), and amt_media speaks the redirection
+# protocol directly over socket/ssl rather than WS-Man; see its DOCUMENTATION.
+# Left unset, amt_media picks 16995 when use_tls is true and 16994 otherwise,
+# which is right for a stock endpoint -- so this exists for endpoints whose
+# redirection plane is somewhere else. Until it did, the media phase could not be
+# aimed anywhere but the stock ports: an operator whose endpoints redirect on a
+# non-default port could not use this role at all.
+#
+# Falls back to the conventional amt_media_port inventory variable, exactly like
+# the connection block above. amt_port is deliberately NOT the fallback: an
+# operator who sets amt_port for a non-default WS-Man port would otherwise have
+# their redirection traffic silently aimed at the WS-Man port as well.
+amt_baremetal_install_media_port: "{{ amt_media_port | default(None) }}"
 amt_baremetal_install_media_allowed_directory: null
 amt_baremetal_install_media_runtime_dir: ~/.ansible/intel_amt/media-sessions
 amt_baremetal_install_media_attach_timeout: 10
@@ -86,9 +101,22 @@ amt_baremetal_install_media_detach_timeout: 15
 # Postcondition wait: whether/how long to wait for something to answer on the
 # target after the reset, before declaring hand-off complete. Point this at
 # whatever the freshly installed/booted OS answers on (SSH by default).
+#
+# amt_baremetal_install_handoff_host has no default, and that is the whole point.
+# It used to default to amt_baremetal_install_host -- the AMT *management*
+# address -- while the sentence above told the operator to point it at whatever
+# the OS answers on. Those are not the same endpoint in general: whether AMT
+# shares the host's address or is given its own is a per-deployment provisioning
+# choice, and this role cannot see which. So the old default was a plausible
+# guess whose failure mode was a full amt_baremetal_install_handoff_timeout
+# (3600s) hang *after* the destructive boundary, on a machine that may well have
+# installed correctly. tasks/validate.yml now refuses up front instead, whenever
+# amt_baremetal_install_wait_for_handoff is true -- see the reasoning there,
+# including why this NOT defaulting to inventory_hostname is the right call even
+# though inventory_hostname is usually the right value for a caller to pass.
 # ---------------------------------------------------------------------------
 amt_baremetal_install_wait_for_handoff: true
-amt_baremetal_install_handoff_host: "{{ amt_baremetal_install_host }}"
+amt_baremetal_install_handoff_host: null
 amt_baremetal_install_handoff_port: 22
 amt_baremetal_install_handoff_timeout: 3600
 amt_baremetal_install_handoff_delay: 120

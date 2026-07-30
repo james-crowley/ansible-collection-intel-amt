@@ -55,11 +55,20 @@ failure message names the variable. Set it at the point of use
 play over ten hosts still issues ten resets, `serial: 1` or not. This role
 asserts, at runtime, that:
 
-- `ansible_play_hosts_all | length == 1` -- the play's full host roster
-  (not just the current serial batch) is exactly one host, and
-- `ansible_play_batch | length == 1` -- confirming `serial: 1` is actually set.
+- `ansible_play_hosts_all | length == 1` -- the play's full host roster,
+  **not** just the current serial batch, is exactly one host.
 
-Both must hold, independently. Point this role at exactly one host per play.
+That one assertion is the entire guard, and it is enough. `ansible_play_batch`
+is the current `serial:` batch drawn from the same roster, so it is always a
+subset of `ansible_play_hosts_all`: an assertion on the batch length cannot
+fail unless the roster assertion already has. This role used to carry such an
+assertion, billed as a "second, independent guard"; it was unreachable, and its
+message advised setting `serial: 1`, which does not make a multi-host play safe
+here -- the roster check ignores batch restrictions, so a ten-host `serial: 1`
+play is refused ten times over, once per host. The batch count is still
+reported in the refusal message, as a diagnostic.
+
+Point this role at exactly one host per play.
 
 ## Boot providers
 
@@ -123,6 +132,60 @@ Media attach/detach is wrapped in `block`/`rescue`/`always` at the top level
 wait-for-hand-off -- the `always` section still runs and detaches media. A
 failed install must never leave a background media daemon holding the
 target's boot device open.
+
+For that to be a guarantee rather than an intention, the role claims and
+persists its media `session_id` **before** `amt_media` can spawn anything, not
+after the attach returns. `amt_media`'s attach forks a detached daemon that
+owns the IDE-R connection, and that daemon outlives a failed attach; it also
+generates its own `session_id` when the caller supplies none. So recording the
+id from the attach's *result* meant recording nothing whenever the attach
+failed -- and the role then skipped its own detach and orphaned the daemon
+whose existence the failure was reporting. Because IDE-R is single-session,
+that orphan also blocked the next attempt against the same endpoint.
+
+`media_attached` is still only set *after* a confirmed attach. The two flags
+answer different questions: `session_id` is "which session might this run be
+responsible for", which has to be known before anything is spawned, and
+`media_attached` is "is media confirmed attached", which is only knowable
+afterwards. A resumed run reads both.
+
+If a run fails, the session id and its runtime directory appear in the failure
+output (`tasks/record_failure.yml`) along with a manual-detach hint -- so that
+in the one case the `always` block cannot cover, a detach that itself fails,
+the operator can still find what to clean up.
+
+## The hand-off wait needs an address you supply
+
+`amt_baremetal_install_wait_for_handoff` is `true` by default, and when it is,
+`amt_baremetal_install_handoff_host` is **required**. There is no default,
+because there is no address this role could correctly guess:
+
+- The AMT management address (`amt_baremetal_install_host`) is what it used to
+  default to, and it is wrong whenever AMT has been provisioned with its own
+  address rather than sharing the host's. That is a per-deployment choice this
+  role cannot see.
+- `inventory_hostname` is, for a conventional inventory, exactly right — and it
+  is what most callers should pass. But this role deliberately never *infers*
+  an endpoint from `inventory_hostname` (see `amt_baremetal_install_host`
+  below), and a silent hand-off probe against an address the operator never
+  named is the same mistake in the other direction.
+
+Note the asymmetry is correct in both directions: the connection variables
+address the **AMT management plane**, which `inventory_hostname` is not
+guaranteed to point at, so inferring it there was a bug. This variable
+addresses the **OS**, which `inventory_hostname` usually *is*. Different plane,
+different answer — but in both cases the caller names the endpoint.
+
+Getting this wrong is expensive specifically because it fails late: the wait
+runs *after* the reset, so a wrong address burns the whole
+`amt_baremetal_install_handoff_timeout` (default 3600s) and then reports
+failure for a machine that may have installed perfectly.
+
+```yaml
+amt_baremetal_install_handoff_host: "{{ inventory_hostname }}"   # conventional inventory
+# ...or opt out of the wait entirely:
+amt_baremetal_install_wait_for_handoff: false
+```
 
 ## The CD/DVD slot is read-only. Always.
 
@@ -211,11 +274,13 @@ as `defaults/main.yml` sets them.
 | `amt_baremetal_install_answer_image_path` | `null` | Writable floppy/USB-R slot |
 | `amt_baremetal_install_answer_image_writable` | `true` | Ignored (forced `false`) when `amt_baremetal_install_answer_image_path` is unset |
 | `amt_baremetal_install_media_start_mode` | `on_reboot` | Passed to `amt_media` |
+| `amt_baremetal_install_media_port` | `{{ amt_media_port \| default(None) }}` | IDE-R **redirection**-plane port, *not* the WS-Man port in `amt_baremetal_install_port`. Unset, `amt_media` picks `16995`/`16994` from `use_tls` — correct for a stock endpoint. Set it (or the conventional `amt_media_port`) for an endpoint that redirects elsewhere. `amt_port` is deliberately not the fallback |
 | `amt_baremetal_install_media_allowed_directory` | `null` | Restricts `amt_baremetal_install_iso_path`/`amt_baremetal_install_answer_image_path` |
 | `amt_baremetal_install_media_runtime_dir` | `~/.ansible/intel_amt/media-sessions` | Must match across attach/detach |
 | `amt_baremetal_install_media_attach_timeout` / `amt_baremetal_install_media_detach_timeout` | `10` / `15` | |
 | `amt_baremetal_install_wait_for_handoff` | `true` | Set `false` to skip the final wait |
-| `amt_baremetal_install_handoff_host` / `amt_baremetal_install_handoff_port` | `{{ amt_baremetal_install_host }}` / `22` | What to wait for after reset |
+| `amt_baremetal_install_handoff_host` | `null` (**required** when `amt_baremetal_install_wait_for_handoff` is `true`) | The address the freshly installed **OS** answers on. No default: it used to default to `amt_baremetal_install_host`, the AMT *management* address, which the OS does not necessarily answer on — and a wrong guess only shows up as a full `amt_baremetal_install_handoff_timeout` hang *after* the reset. `tasks/validate.yml` now refuses up front instead. For a conventional inventory `{{ inventory_hostname }}` is usually right; the caller still has to say so |
+| `amt_baremetal_install_handoff_port` | `22` | Port to wait for on `amt_baremetal_install_handoff_host` |
 | `amt_baremetal_install_handoff_timeout` / `amt_baremetal_install_handoff_delay` | `3600` / `120` | |
 | `amt_baremetal_install_observe_retries` / `amt_baremetal_install_observe_delay` | `5` / `10` | Bounded postcondition power probe |
 | `amt_baremetal_install_state_dir` | `~/.ansible/intel_amt/baremetal-install` | Resumability state; needs durable, per-controller-shared storage |

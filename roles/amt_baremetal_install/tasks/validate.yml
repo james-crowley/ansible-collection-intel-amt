@@ -6,6 +6,33 @@
 # Guards run before anything else, in order of how bad it would be to miss
 # each one. Fan-out is checked first because it is the one mistake that turns
 # a single-machine mistake into a many-machine incident.
+#
+# One assertion carries the whole fan-out guarantee, and deliberately so.
+# `ansible_play_hosts_all` is the play's *full* roster; `ansible_play_batch` is
+# the current `serial:` batch drawn from that same roster. Ansible's variable
+# manager builds the two from one inventory query that differs only in whether
+# the batch restriction is honoured (ansible/vars/manager.py):
+#
+#   ansible_play_hosts_all <- inventory.get_hosts(pattern=play.hosts, ignore_restrictions=True)
+#   ansible_play_batch     <- inventory.get_hosts()   # restrictions honoured == this batch
+#
+# `ansible_play_batch` is therefore always a subset of `ansible_play_hosts_all`,
+# and `ansible_play_batch | length == 1` cannot fail unless the roster check has
+# already failed: a batch of two or more implies a roster of two or more, and a
+# batch of zero means no task runs on any host, so this file never executes.
+#
+# There used to be a second assertion on the batch length here, described as "a
+# second, independent guard". It was neither. It was unreachable as a failure,
+# and its message told the operator to "set `serial: 1`" -- which reads as
+# though serialising a multi-host play would make this role safe to run. It does
+# not, precisely because the roster check ignores restrictions: a ten-host play
+# with `serial: 1` still has ten hosts in `ansible_play_hosts_all` and is still
+# refused, ten times over, one host at a time. The integration target proves
+# both halves of that, including that the batch assertion *on its own* lets a
+# serialised multi-host play straight through -- so it protected nothing.
+#
+# The batch count is still reported below, as a diagnostic rather than as a
+# guarantee, so an operator debugging a refusal keeps the same information.
 
 - name: Guard against inventory fan-out -- this role must run against exactly one host per play
   ansible.builtin.assert:
@@ -14,24 +41,14 @@
     fail_msg: >-
       amt_baremetal_install refuses to run: this play targets
       {{ ansible_play_hosts_all | length }} hosts
-      ({{ ansible_play_hosts_all | join(', ') }}). Power actions and one-time
-      boot arming are physically disruptive, and delegate_to: localhost does
-      not stop Ansible from fanning a task out across every host in a play --
-      a ten-host play still issues ten resets. Target exactly one host (e.g.
+      ({{ ansible_play_hosts_all | join(', ') }}); the current batch contains
+      {{ ansible_play_batch | length }}. Power actions and one-time boot arming
+      are physically disruptive, and delegate_to: localhost does not stop
+      Ansible from fanning a task out across every host in a play -- a ten-host
+      play still issues ten resets, and `serial: 1` does not change that, it
+      only spreads them out. Target exactly one host (e.g.
       `ansible-playbook ... -l <single-host>`).
     success_msg: Fan-out guard passed -- this play targets exactly one host.
-
-- name: Guard against a play that forgot serial -- one host per batch too
-  ansible.builtin.assert:
-    that:
-      - ansible_play_batch | length == 1
-    fail_msg: >-
-      amt_baremetal_install refuses to run: this play's current batch
-      contains {{ ansible_play_batch | length }} hosts. Set `serial: 1`
-      explicitly on the play. This is a second, independent guard against
-      fan-out, not a substitute for the host-count check above -- both must
-      hold.
-    success_msg: "serial: 1 guard passed."
 
 - name: Require the destructive-action confirmation variable
   ansible.builtin.assert:
@@ -66,6 +83,49 @@
       are always required; amt_baremetal_install_tls_fingerprint is required when amt_baremetal_install_use_tls is
       true (the default), and amt_baremetal_install_allow_insecure_transport must be explicitly
       true when amt_baremetal_install_use_tls is false. See plugins/doc_fragments/connection.py.
+
+- name: Require an explicit hand-off endpoint when the hand-off wait is enabled
+  # amt_baremetal_install_handoff_host has no default at all, on purpose -- the same
+  # reasoning as amt_baremetal_install_password and _tls_fingerprint above. It used to
+  # default to amt_baremetal_install_host, the AMT *management* address, which is the one
+  # endpoint a freshly installed OS is least likely to answer SSH on: whether AMT shares
+  # the host's address or has its own is a per-deployment provisioning choice this role
+  # cannot see. Guessing wrong cost an operator the full
+  # amt_baremetal_install_handoff_timeout (default 3600s) of waiting on a machine that had
+  # in fact installed correctly, and it cost it *after* the destructive boundary, where
+  # the run can no longer be cheaply retried. Refusing here -- before probe, before
+  # attach, before the reset -- is strictly cheaper and never wrong.
+  #
+  # Note the asymmetry with the connection variables above, which deliberately do NOT
+  # fall back to inventory_hostname: that is correct in both directions. Those address
+  # the AMT management plane, which answers somewhere inventory_hostname is not
+  # guaranteed to be, so inferring it from inventory_hostname was a bug. This one
+  # addresses the OS, which for a conventional inventory *is* inventory_hostname -- so
+  # `amt_baremetal_install_handoff_host: "{{ inventory_hostname }}"` is usually the right
+  # thing for a caller to write. It is still the caller who writes it: the role cannot
+  # tell a conventional inventory from one keyed on management addresses, and silently
+  # probing an address the operator never named is how the original defect worked.
+  ansible.builtin.assert:
+    that:
+      - amt_baremetal_install_handoff_host is truthy
+    fail_msg: >-
+      amt_baremetal_install_wait_for_handoff is true (the default) but
+      amt_baremetal_install_handoff_host is not set. This role waits for the freshly
+      installed OS to answer on port {{ amt_baremetal_install_handoff_port }}, and the OS
+      does not necessarily answer on {{ amt_baremetal_install_host }} -- that is the AMT
+      management address, which may or may not be the address the OS itself comes up on.
+      Set amt_baremetal_install_handoff_host explicitly to whatever the installed OS
+      answers on (for a conventional inventory that is usually
+      `{{ '{{' }} inventory_hostname {{ '}}' }}`), or set
+      amt_baremetal_install_wait_for_handoff=false to skip the hand-off wait entirely. It
+      is not defaulted because a wrong guess is only discovered after the reset has
+      already happened, having burnt amt_baremetal_install_handoff_timeout seconds
+      (currently {{ amt_baremetal_install_handoff_timeout }}) on a machine that may well
+      have installed perfectly.
+    success_msg: >-
+      Hand-off endpoint set explicitly ({{ amt_baremetal_install_handoff_host }}:{{
+      amt_baremetal_install_handoff_port }}).
+  when: amt_baremetal_install_wait_for_handoff | bool
 
 - name: Require at least one media source for the ider_cdrom provider
   ansible.builtin.assert:

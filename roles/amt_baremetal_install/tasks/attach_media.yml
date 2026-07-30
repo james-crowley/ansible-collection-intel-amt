@@ -11,6 +11,28 @@
 # before arming boot), amt_media confirms it instead of starting a second one
 # -- IDE-R is a single-session protocol, firmware only has one connection to
 # give, and amt_media's own contract guarantees this (see its DOCUMENTATION).
+#
+# The session id is chosen and persisted BEFORE the attach, never after. This is the
+# difference between "always detach" being a guarantee and being a hope.
+#
+# amt_media spawns a detached background daemon that owns the IDE-R connection, then
+# waits attach_timeout for it to report a verdict. If it reports none in time the module
+# fails -- and the daemon it forked is still running, still holding the session. The
+# role's `always` block calls tasks/detach_media.yml, but that file can only act on a
+# session id it knows, and amt_media generates its own id when the caller passes none
+# (`params.get("session_id") or media_session.generate_session_id()`). So recording the
+# id from the module's *result* meant recording nothing at all whenever the attach
+# failed: run state kept session_id=null, detach_media.yml's `when: ... is truthy`
+# skipped, and the role orphaned the very daemon whose existence the failure was
+# reporting. Because IDE-R is single-session, that also wedges the endpoint against the
+# next attempt.
+#
+# Generating the id here removes the whole class of problem: from this point on the role
+# owns a session id whatever amt_media does with it, so detach is reachable on every
+# path -- success, ordinary failure, or a timeout whose outcome is indeterminate.
+# Detaching an id nothing was ever spawned for is explicitly safe, and cheap: amt_media's
+# state=detached reports changed=false with nothing to do when no state file exists for
+# the id (see its DOCUMENTATION, and detach_media.yml's own header).
 
 - name: Ensure the IDE-R redirection service is enabled before attaching media
   james_crowley.intel_amt.amt_redirection:
@@ -30,9 +52,41 @@
   no_log: true
   register: amt_baremetal_install_redirection_result
 
+- name: Claim a media session id before anything can be spawned against it
+  # Generated only when there is not already one to reuse -- that is what the `true`
+  # (boolean) argument to `default` buys: a prior run's id is null rather than undefined
+  # in a fresh state (see vars/main.yml's amt_baremetal_install_default_state), so a plain
+  # `default` would keep the null and defeat the whole point. A resumed run must pass the
+  # prior run's id through unchanged so amt_media confirms that live session instead of
+  # starting a second one against firmware that has only one connection to give.
+  #
+  # Same idiom as the fresh action token in tasks/arm_boot.yml, and restricted to
+  # characters that are safe in a filename, because amt_media keys its state file on this
+  # value (media_session.state_file_path -> "<runtime_dir>/<session_id>.json").
+  ansible.builtin.set_fact:
+    amt_baremetal_install_run_state: >-
+      {{ amt_baremetal_install_run_state
+         | combine({'session_id': amt_baremetal_install_run_state.session_id
+                                  | default(lookup('ansible.builtin.password',
+                                                   '/dev/null length=32 chars=ascii_lowercase,digits'), true)}) }}
+
+- name: Persist the claimed session id before the attach, so the always-detach can find it
+  ansible.builtin.include_tasks: save_state.yml
+
 - name: Attach installer media over IDE-R
   james_crowley.intel_amt.amt_media:
     host: "{{ amt_baremetal_install_host }}"
+    # The redirection port, deliberately not amt_baremetal_install_port: amt_media
+    # talks to the IDE-R plane (16994/16995) while the task above talks WS-Man
+    # (16992/16993), so passing the WS-Man port here would aim the media session at
+    # the wrong plane. Unset by the caller this resolves to None and amt_media applies
+    # its own use_tls-dependent default, which is what a stock endpoint wants.
+    #
+    # ca_path, timeout and connect_timeout remain deliberately absent: amt_media
+    # *rejects* ca_path outright (the redirection plane has no CA-chain trust path,
+    # only tls_fingerprint pinning), and documents timeout as accepted-for-parity but
+    # unused -- attach_timeout below is what actually bounds this call.
+    port: "{{ amt_baremetal_install_media_port }}"
     username: "{{ amt_baremetal_install_username }}"
     password: "{{ amt_baremetal_install_password }}"
     use_tls: "{{ amt_baremetal_install_use_tls }}"
@@ -52,7 +106,18 @@
   no_log: true
   register: amt_baremetal_install_media_attach_result
 
-- name: Record the media session id and attached status
+- name: Record that media is genuinely attached
+  # session_id was already claimed and persisted above, so only media_attached changes
+  # here. It is still taken from the module's result rather than assumed: the two must
+  # agree, and if a future amt_media ever returned a different id than it was given, the
+  # id the role can actually detach is the one the module reports.
+  #
+  # media_attached is deliberately NOT set before the attach, unlike session_id. They
+  # answer different questions: session_id is "which session might this run be
+  # responsible for", which has to be known before anything is spawned; media_attached is
+  # "is media confirmed attached", which is only knowable afterwards. Conflating them
+  # would make a failed attach look like a successful one in the state file that a
+  # resumed run reads.
   ansible.builtin.set_fact:
     amt_baremetal_install_run_state: >-
       {{ amt_baremetal_install_run_state
