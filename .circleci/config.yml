@@ -42,6 +42,20 @@ parameters:
     type: string
     default: ""
 
+  # run-devel-canary runs sanity against ansible-core's devel branch. Off by
+  # default and deliberately NOT part of the PR path: devel breaks for reasons
+  # that are upstream's business, and a red PR check nobody can fix teaches
+  # people to ignore red checks. The weekly schedule sets this instead, which
+  # satisfies the collection requirement to test against devel or milestone "in
+  # every PR or on a scheduled basis of at least once per week" while keeping the
+  # signal advisory.
+  #
+  # The point is lead time: new sanity requirements land in devel first, so this
+  # is how we find out about one before it becomes a release blocker.
+  run-devel-canary:
+    type: boolean
+    default: false
+
 executors:
   python:
     parameters:
@@ -476,6 +490,34 @@ jobs:
           label: integration-mock
 
   # -------------------------------------------------------------------------
+  # Sanity against ansible-core devel. Advisory: see run-devel-canary above for
+  # why this is not on the PR path.
+  sanity-devel:
+    executor:
+      name: python
+      # devel targets the next core release, whose controller floor only ever
+      # rises. Newest available interpreter, so a Python-floor bump upstream
+      # shows up as a real failure here rather than as an install error.
+      python-version: "3.13"
+    steps:
+      - checkout
+      - run:
+          name: Install ansible-core from devel
+          command: |
+            python -m pip install --upgrade pip
+            python -m pip install "https://github.com/ansible/ansible/archive/devel.tar.gz"
+            ansible --version
+      - run:
+          name: Stage the collection tree
+          command: |
+            echo "export COLLECTION_PATH=$(./scripts/setup-collection-tree.sh)" >> "$BASH_ENV"
+      - run:
+          name: ansible-test sanity against devel
+          command: |
+            cd "${COLLECTION_PATH}"
+            ansible-test sanity --venv --python 3.13 --color no
+
+  # -------------------------------------------------------------------------
   build:
     executor:
       name: python
@@ -878,8 +920,17 @@ workflows:
               only: /^v.*/
           matrix:
             parameters:
+              # 3.12 is the one interpreter every supported core runs on: 2.17
+              # accepts 3.10-3.12, and 2.20/2.21 require 3.12+. Pinning it keeps
+              # this axis about the core version rather than multiplying cells.
               python-version: ["3.12"]
-              ansible-core-version: ["2.17", "2.18", "2.19"]
+              # Every currently-supported upstream core (2.19/2.20/2.21) plus the
+              # two EOL ones this collection still declares support for. The
+              # collection requirements are explicit that declaring an EOL core
+              # obliges sanity runs against it, so 2.17 and 2.18 are here because
+              # requires_ansible says >=2.17.0 -- not out of habit. If that floor
+              # ever rises, delete the corresponding cells in the same change.
+              ansible-core-version: ["2.17", "2.18", "2.19", "2.20", "2.21"]
       - units:
           requires: [lint]
           filters:
@@ -893,7 +944,7 @@ workflows:
               # two 3.11-only APIs (enum.StrEnum, datetime.UTC) that this matrix
               # had been blind to while it started at 3.11.
               python-version: ["3.10", "3.11", "3.12", "3.13"]
-              ansible-core-version: ["2.17", "2.19"]
+              ansible-core-version: ["2.17", "2.19", "2.21"]
             exclude:
               # Python 3.13 controller support arrived in ansible-core 2.18.
               - python-version: "3.13"
@@ -901,6 +952,12 @@ workflows:
               # ansible-core 2.19 requires Python 3.11+ on the controller.
               - python-version: "3.10"
                 ansible-core-version: "2.19"
+              # ansible-core 2.21 requires Python 3.12+ on the controller, so
+              # both 3.10 and 3.11 are impossible cells rather than untested ones.
+              - python-version: "3.10"
+                ansible-core-version: "2.21"
+              - python-version: "3.11"
+                ansible-core-version: "2.21"
       - integration-mock:
           requires: [lint]
           filters:
@@ -927,6 +984,14 @@ workflows:
               only: /^v.*/
             branches:
               ignore: /.*/
+
+  # -------------------------------------------------------------------------
+  # Advisory weekly canary against ansible-core devel. Set by the schedule, never
+  # by a push or a PR -- see the run-devel-canary parameter for why.
+  devel-canary:
+    when: << pipeline.parameters.run-devel-canary >>
+    jobs:
+      - sanity-devel
 
   # -------------------------------------------------------------------------
   # Opt-in only. Never runs on a normal push. See the hardware-tests job for the
