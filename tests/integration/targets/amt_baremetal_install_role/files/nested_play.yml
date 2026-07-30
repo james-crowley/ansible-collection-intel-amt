@@ -1,0 +1,88 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# The one nested playbook every scenario in tasks/main.yml runs, via
+# `ansible-playbook -i <inventory> nested_play.yml --extra-vars '<json>'`. Never run
+# directly, and never part of the outer ansible-test play.
+#
+# Why a nested playbook at all, rather than `include_role` from the target's own
+# tasks? Three of the behaviours under test are properties of the *play*, not of a
+# task, and cannot be reached any other way:
+#
+#   * The fan-out guard asserts on `ansible_play_hosts_all | length`. ansible-test's
+#     generated play always has exactly one host, so a two-host play has to be a
+#     separate playbook run with its own inventory.
+#   * The `serial: 1` guard asserts on `ansible_play_batch | length`, which only a
+#     play keyword can influence.
+#   * Every scenario needs a clean variable scope. The role communicates between its
+#     own phases with `set_fact` (amt_baremetal_install_run_state, _power_action,
+#     _state_file), and those are host facts: a second `include_role` in the same play
+#     would inherit the first run's facts and could pass for the wrong reason.
+#
+# A separate process also means a scenario's expected *failure* is an ordinary
+# non-zero rc rather than something the outer play has to survive.
+#
+# The role's own decisions are recovered from the JSON dump written in `always` below,
+# not by scraping stdout: the dump is written whether the role succeeded or failed, and
+# it carries structured values (the chosen power action, the reconciled run state, the
+# resolved connection host) that assertions can be precise about.
+- name: Drive amt_baremetal_install against a local mock endpoint
+  hosts: all
+  gather_facts: false
+  # 0 means "all hosts in one batch" -- the default. Only the serial-guard scenario
+  # passes anything else.
+  serial: "{{ nested_serial | default(0) }}"
+  tasks:
+    - name: Run the role under test, capturing whatever it decides to do
+      block:
+        - name: Include the role under test
+          # public: true so this play can still read the role's *defaults* (notably
+          # amt_baremetal_install_host) after it returns. Facts the role sets with
+          # set_fact survive either way; role defaults do not.
+          ansible.builtin.include_role:
+            name: james_crowley.intel_amt.amt_baremetal_install
+            public: true
+
+        - name: Record that the role ran to completion
+          ansible.builtin.set_fact:
+            nested_outcome: succeeded
+      rescue:
+        - name: Record the failure the role raised
+          ansible.builtin.set_fact:
+            nested_outcome: failed
+            nested_failed_msg: "{{ ansible_failed_result.msg | default('(no msg reported)') }}"
+            nested_failed_assertion: "{{ ansible_failed_result.assertion | default('(not an assert failure)') }}"
+            nested_failed_error_class: "{{ ansible_failed_result.error_class | default('(none reported)') }}"
+      always:
+        - name: Write everything observable about this run to a JSON file
+          ansible.builtin.copy:
+            content: "{{ nested_observation | to_nice_json }}\n"
+            dest: "{{ nested_dump_dir }}/{{ inventory_hostname }}.json"
+            mode: "0600"
+          vars:
+            nested_observation:
+              outcome: "{{ nested_outcome | default('unknown') }}"
+              failed_msg: "{{ nested_failed_msg | default(none) }}"
+              failed_assertion: "{{ nested_failed_assertion | default(none) }}"
+              failed_error_class: "{{ nested_failed_error_class | default(none) }}"
+              inventory_hostname: "{{ inventory_hostname }}"
+              play_hosts_all_count: "{{ ansible_play_hosts_all | length }}"
+              play_batch_count: "{{ ansible_play_batch | length }}"
+              # The resolved connection endpoint, straight from the role's defaults.
+              # This is the assertion surface for the inventory-variable regression:
+              # it must come from amt_host, never from inventory_hostname.
+              resolved_host: "{{ amt_baremetal_install_host | default(none) }}"
+              resolved_port: "{{ amt_baremetal_install_port | default(none) }}"
+              resolved_username: "{{ amt_baremetal_install_username | default(none) }}"
+              # 'on' for an endpoint observed powered off, 'reset' for one observed
+              # running. Undefined if the role never reached tasks/reset.yml.
+              power_action: "{{ amt_baremetal_install_power_action | default(none) }}"
+              run_state: "{{ amt_baremetal_install_run_state | default(none) }}"
+              state_file: "{{ amt_baremetal_install_state_file | default(none) }}"
+
+    - name: Re-raise a failed role so the caller sees a non-zero exit status
+      ansible.builtin.fail:
+        msg: "amt_baremetal_install failed as recorded in the dump: {{ nested_failed_msg | default('(no msg)') }}"
+      when: nested_outcome | default('unknown') == 'failed'

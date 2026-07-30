@@ -1,0 +1,19 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# A two-host inventory, used only to prove roles/amt_baremetal_install/tasks/validate.yml
+# actually refuses to run against more than one host per play.
+#
+# This is the guard standing between an operator and power-cycling a whole lab:
+# delegate_to: localhost does not stop Ansible fanning a task out across every host in
+# a play, so a ten-host play would issue ten resets. Both names are unresolvable
+# RFC 2606 .invalid names, and the guard fires before any connection is attempted, so
+# nothing here ever reaches a network.
+all:
+  vars:
+    ansible_connection: local
+  hosts:
+    amt-target-a.invalid: {}
+    amt-target-b.invalid: {}

@@ -1,0 +1,19 @@
+# Drives the real roles/amt_baremetal_install role end to end against local mock
+# WS-Man servers. No network access beyond 127.0.0.1, no privilege escalation, and no
+# destructive action against anything -- see docs/testing.md.
+#
+# ansible-test's per-target temp workdir only copies tests/integration/targets/<name>/
+# itself; these needs/file/* aliases pull the (non-target) mock server fixtures into
+# that same temp copy so tasks/main.yml's "{{ role_path }}/../../mock_servers/..."
+# paths resolve.
+#
+# context/controller because every task this role runs is `delegate_to: localhost`
+# (see roles/amt_baremetal_install/meta/main.yml), and the nested ansible-playbook
+# runs this target drives need the controller's ansible-playbook and collection path.
+# Without it ansible-test reports "Unable to determine context for the following test
+# targets": the other seven targets are each named after a module, which is how
+# ansible-test infers their context, and this one deliberately is not -- see the note
+# at the top of tasks/main.yml about why it cannot be called amt_baremetal_install.
+context/controller
+needs/file/tests/integration/mock_servers/wsman_server.py
+needs/file/tests/integration/mock_servers/run_wsman_mock.py

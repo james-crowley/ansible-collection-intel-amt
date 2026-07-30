@@ -1,0 +1,936 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Drives the real roles/amt_baremetal_install role -- 14 task files, previously with no
+# automated test of any kind -- against local mock WS-Man servers.
+#
+# What is under test here is the *role's* logic, not the modules beneath it: which power
+# transition it chooses, where it resolves its endpoint from, what it refuses, and what
+# it always cleans up. Every module the role calls already has its own integration
+# target next to this one.
+#
+# Two of the six defects hardware qualification found were in this role, and both are
+# regression-tested here:
+#
+#   1. It always issued `reset`. A master bus reset does nothing to a machine that is
+#      already off, so the role attached media, armed a one-shot boot, and reported
+#      success having booted nothing. Scenarios 7 and 8 assert the transition is chosen
+#      from the *observed* power state: `on` for an endpoint that is off, `reset` for
+#      one that is running.
+#   2. Its connection variables defaulted to `inventory_hostname`. AMT answers on a
+#      separate management address, so that silently targeted the wrong endpoint or an
+#      unresolvable name. Scenario 4 asserts an unset `amt_host` fails loudly in
+#      validate.yml, and scenario 7 asserts a set one resolves from `amt_host` while
+#      `inventory_hostname` is something else entirely.
+#
+# Why this target is called amt_baremetal_install_role and not amt_baremetal_install:
+# ansible-test runs each target as a role and resolves it by the collection-qualified
+# name, so a target sharing a name with a role in roles/ silently runs *that role* with
+# no assertions at all instead of the target. Verified: a target directory named
+# amt_baremetal_install ran roles/amt_baremetal_install/tasks/validate.yml directly and
+# none of the target's own tasks executed.
+#
+# No hardware, no network beyond 127.0.0.1, nothing destructive, and HOME is redirected
+# into this target's scratch directory for every nested run so that not even the role's
+# default `~/.ansible/intel_amt/...` state paths can touch the real one.
+
+- name: Create a scratch directory for this target's runtime files
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: amt_baremetal_install_role_integration_
+  register: scratch_dir
+  delegate_to: localhost
+
+- name: Set the paths this target works from
+  ansible.builtin.set_fact:
+    mock_servers_dir: "{{ role_path }}/../../mock_servers"
+    # ansible-test's per-target workdir deliberately contains non-ASCII characters. The
+    # nested playbook and inventories are copied into the plain scratch path instead, so
+    # nothing depends on how a second ansible-playbook process, its argv encoding and the
+    # ambient locale interact.
+    nested_dir: "{{ scratch_dir.path }}/nested"
+    plain_ready_file: "{{ scratch_dir.path }}/wsman_plain_ready.json"
+    powered_off_ready_file: "{{ scratch_dir.path }}/wsman_powered_off_ready.json"
+    no_caps_ready_file: "{{ scratch_dir.path }}/wsman_no_caps_ready.json"
+    media_allowed_dir: "{{ scratch_dir.path }}/media/allowed"
+    media_outside_dir: "{{ scratch_dir.path }}/media/outside"
+
+- name: Create the directories the nested runs need
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0700"
+  loop:
+    - "{{ nested_dir }}"
+    - "{{ scratch_dir.path }}/home"
+    - "{{ scratch_dir.path }}/dumps"
+    - "{{ scratch_dir.path }}/state"
+    - "{{ media_allowed_dir }}"
+    - "{{ media_outside_dir }}"
+  delegate_to: localhost
+
+- name: Stage the nested playbook and its inventories
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ nested_dir }}/{{ item }}"
+    mode: "0600"
+  loop:
+    - nested_play.yml
+    - inventory_one_host.yml
+    - inventory_two_hosts.yml
+  delegate_to: localhost
+
+- name: Write the configuration the nested runs use
+  ansible.builtin.copy:
+    # Explicit and minimal, so a nested run inherits none of the ansible.cfg
+    # ansible-test generates for the outer run.
+    content: |
+      [defaults]
+      gathering = explicit
+      retry_files_enabled = false
+      host_key_checking = false
+      interpreter_python = auto_silent
+    dest: "{{ nested_dir }}/nested_ansible.cfg"
+    mode: "0600"
+  delegate_to: localhost
+
+- name: Create the CD/DVD image the media-phase scenario points at
+  # Deliberately *outside* the allowed directory the same scenario passes, which is how
+  # that scenario forces a failure inside the media phase with no IDE-R endpoint
+  # involved at all. 4096 bytes = 2 CD sectors (see ider.MediaImage).
+  ansible.builtin.command: "dd if=/dev/zero of={{ media_outside_dir }}/boot.iso bs=512 count=8"
+  delegate_to: localhost
+  changed_when: true
+
+- name: Resolve how the nested ansible-playbook runs are invoked
+  ansible.builtin.set_fact:
+    nested_ansible_playbook: ansible-playbook
+    # ansible-test exports this for the integration run; the fallback derives the same
+    # path from role_path for anyone running the target another way.
+    nested_collections_path: >-
+      {{ lookup('ansible.builtin.env', 'ANSIBLE_COLLECTIONS_PATH')
+         | default(role_path | regex_replace('/ansible_collections/.*$', ''), true) }}
+
+- name: Compose the environment every nested run uses
+  # Deliberately short. ansible-test exports a dozen ANSIBLE_* variables for the outer
+  # run and most are harmless to inherit; the ones that are not get a real value rather
+  # than an empty one, because several of these are list-typed and an empty string
+  # parses as a one-element list containing "" (ANSIBLE_CALLBACKS_ENABLED="" fails the
+  # whole run with "A non-empty plugin name is required").
+  ansible.builtin.set_fact:
+    nested_env:
+      ANSIBLE_CONFIG: "{{ nested_dir }}/nested_ansible.cfg"
+      ANSIBLE_COLLECTIONS_PATH: "{{ nested_collections_path }}"
+      ANSIBLE_PLAYBOOK_DIR: "{{ nested_dir }}"
+      ANSIBLE_FORCE_COLOR: "false"
+      ANSIBLE_NOCOLOR: "1"
+      # ansible-test enables its junit callback for the outer run and every nested run
+      # inherits it. Point it at the scratch tree so 14 nested playbooks do not litter
+      # the real ansible-test junit output that CI collects.
+      JUNIT_OUTPUT_DIR: "{{ scratch_dir.path }}/junit"
+      # Belt and braces: the role's own defaults put its run-state and media-session
+      # directories under ~, and no scenario should ever be able to reach the real one.
+      HOME: "{{ scratch_dir.path }}/home"
+
+- name: Start the mock WS-Man server the powered-on scenarios drive
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ plain_ready_file }} \
+      > {{ scratch_dir.path }}/wsman_plain.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: plain_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Start a second mock WS-Man server, to be powered off before it is used
+  # A separate endpoint rather than powering the first one off and back on between
+  # scenarios: the observed power state is the input to the decision under test, so each
+  # of the two decisions gets an endpoint whose state nothing else in this target moves.
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ powered_off_ready_file }} \
+      > {{ scratch_dir.path }}/wsman_powered_off.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: powered_off_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Start a mock WS-Man server whose firmware advertises neither IDE-R nor forced PXE
+  # See files/run_wsman_mock_capabilities.py for why this needs a wrapper around the
+  # shared runner rather than a flag on it.
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ role_path }}/files/run_wsman_mock_capabilities.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ no_caps_ready_file }} \
+      --no-ider --no-force-pxe \
+      > {{ scratch_dir.path }}/wsman_no_caps.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: no_caps_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Wait for all three mock servers to report ready
+  ansible.builtin.wait_for:
+    path: "{{ item }}"
+    state: present
+    timeout: 15
+  loop:
+    - "{{ plain_ready_file }}"
+    - "{{ powered_off_ready_file }}"
+    - "{{ no_caps_ready_file }}"
+  delegate_to: localhost
+
+- name: Read mock server connection info and pids
+  ansible.builtin.set_fact:
+    plain_info: "{{ lookup('ansible.builtin.file', plain_ready_file) | from_json }}"
+    powered_off_info: "{{ lookup('ansible.builtin.file', powered_off_ready_file) | from_json }}"
+    no_caps_info: "{{ lookup('ansible.builtin.file', no_caps_ready_file) | from_json }}"
+    plain_pid: "{{ plain_start.stdout | trim }}"
+    powered_off_pid: "{{ powered_off_start.stdout | trim }}"
+    no_caps_pid: "{{ no_caps_start.stdout | trim }}"
+
+- name: Exercise the role against the mock endpoints
+  block:
+    # ------------------------------------------------------------------------------
+    # Preconditions. Every scenario below depends on one of these being true of the
+    # endpoint it drives, so each is asserted directly rather than assumed. If the mock
+    # ever stops modelling one of them, the precondition fails here by name instead of
+    # a scenario quietly proving something else.
+    # ------------------------------------------------------------------------------
+    - name: Confirm the powered-on endpoint really reports power on and both capabilities
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: precondition_plain
+
+    - name: Assert the powered-on endpoint's preconditions
+      ansible.builtin.assert:
+        that:
+          - precondition_plain.amt.power_state.normalized == 'on'
+          - precondition_plain.amt.capabilities.boot_once_pxe == true
+          - precondition_plain.amt.capabilities.storage_redirection == true
+        fail_msg: >-
+          The scenarios below need an endpoint observed powered on that advertises both
+          boot capabilities.
+
+    - name: Power the second endpoint off, so the role observes a machine that is off
+      james_crowley.intel_amt.amt_power:
+        host: 127.0.0.1
+        port: "{{ powered_off_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: "off"
+      delegate_to: localhost
+      no_log: true
+      register: precondition_power_off
+
+    - name: Confirm the second endpoint now reports power off
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ powered_off_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: precondition_powered_off
+
+    - name: Assert the powered-off endpoint's precondition
+      ansible.builtin.assert:
+        that:
+          - precondition_power_off.changed == true
+          - precondition_powered_off.amt.power_state.normalized == 'off'
+        fail_msg: >-
+          Scenario 7 is only a regression test for the always-reset defect if the
+          endpoint it drives is genuinely observed powered off first.
+
+    - name: Confirm the capability-degraded endpoint really advertises neither capability
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ no_caps_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: precondition_no_caps
+
+    - name: Assert the capability-degraded endpoint's precondition
+      ansible.builtin.assert:
+        that:
+          - precondition_no_caps.amt.reachable == true
+          - precondition_no_caps.amt.capabilities.storage_redirection == false
+          - precondition_no_caps.amt.capabilities.boot_once_pxe == false
+        fail_msg: >-
+          files/run_wsman_mock_capabilities.py did not actually make this endpoint report
+          the capabilities absent, so scenarios 5 and 6 would pass against a fully
+          capable endpoint and prove nothing. See that script's docstring.
+
+    - name: Reserve, then release, a TCP port nothing is listening on
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "-c"
+          - "import socket; s = socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1]); s.close()"
+      register: closed_port_probe
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Confirm nothing is listening on the released port
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ closed_port_probe.stdout | trim | int }}"
+        state: stopped
+        timeout: 10
+      delegate_to: localhost
+
+    - name: Compose the connection variables every scenario shares
+      ansible.builtin.set_fact:
+        closed_port: "{{ closed_port_probe.stdout | trim | int }}"
+        # Deliberately the conventional `amt_*` inventory variables rather than
+        # `amt_baremetal_install_*` ones: that fallback is the mechanism the
+        # inventory-variable regression lives in, so every scenario exercises it.
+        # amt_host is *not* here -- scenario 4 is the one that leaves it unset.
+        nested_base_vars:
+          ansible_python_interpreter: "{{ ansible_playbook_python }}"
+          amt_username: admin
+          amt_password: test-password-not-real
+          amt_use_tls: false
+          amt_allow_insecure_transport: true
+          amt_baremetal_install_confirm_destructive: true
+          amt_baremetal_install_boot_provider: pxe
+          amt_baremetal_install_wait_for_handoff: false
+          amt_baremetal_install_observe_retries: 2
+          amt_baremetal_install_observe_delay: 1
+          amt_baremetal_install_media_runtime_dir: "{{ scratch_dir.path }}/media-runtime"
+
+    # ------------------------------------------------------------------------------
+    # (1) The fan-out guard. This is what stands between an operator and power-cycling
+    # every machine in a play, and it had never been exercised.
+    # ------------------------------------------------------------------------------
+    - name: Scenario 1 -- a two-host play is refused
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: fanout_two_hosts
+        scenario_inventory: "{{ nested_dir }}/inventory_two_hosts.yml"
+        scenario_hosts: [amt-target-a.invalid, amt-target-b.invalid]
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_port': plain_info.port,
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/fanout_two_hosts',
+             }) }}
+
+    - name: Assert a two-host play is refused by the host-count guard, on every host
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc != 0
+          - nested_obs['amt-target-a.invalid'].outcome == 'failed'
+          - nested_obs['amt-target-b.invalid'].outcome == 'failed'
+          - nested_obs['amt-target-a.invalid'].failed_assertion == 'ansible_play_hosts_all | length == 1'
+          - nested_obs['amt-target-b.invalid'].failed_assertion == 'ansible_play_hosts_all | length == 1'
+          - nested_obs['amt-target-a.invalid'].play_hosts_all_count | int == 2
+          # Nothing was reconciled or persisted: the guard fires before state.yml.
+          - nested_obs['amt-target-a.invalid'].run_state is none
+          - nested_obs['amt-target-a.invalid'].power_action is none
+        fail_msg: >-
+          The fan-out guard did not refuse a two-host play. rc={{ nested_run.rc }}.
+          Nested output tail:
+          {{ nested_tail }}
+
+    - name: Scenario 2 -- a two-host play is still refused with serial 1
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: fanout_two_hosts_serial_one
+        scenario_inventory: "{{ nested_dir }}/inventory_two_hosts.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_port': plain_info.port,
+               'nested_serial': 1,
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/fanout_serial',
+             }) }}
+
+    - name: Assert serial 1 does not buy a way past the host-count guard
+      # ansible_play_batch is always a subset of ansible_play_hosts_all, so the second
+      # guard in validate.yml (`ansible_play_batch | length == 1`) cannot fail unless the
+      # first one already has. That makes it unreachable as an independent failure, which
+      # is why this scenario asserts the *first* guard fires even with serial: 1 -- with
+      # batch length genuinely 1 -- rather than claiming to test the second.
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc != 0
+          - nested_obs['amt-target-a.invalid'].failed_assertion == 'ansible_play_hosts_all | length == 1'
+          - nested_obs['amt-target-a.invalid'].play_hosts_all_count | int == 2
+          - nested_obs['amt-target-a.invalid'].play_batch_count | int == 1
+        fail_msg: >-
+          A serial: 1 two-host play was not refused. rc={{ nested_run.rc }}.
+          Nested output tail:
+          {{ nested_tail }}
+
+    # ------------------------------------------------------------------------------
+    # (2) The destructive-action confirmation gate.
+    # ------------------------------------------------------------------------------
+    - name: Scenario 3 -- nothing happens without amt_baremetal_install_confirm_destructive
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: confirm_destructive_missing
+        scenario_inventory: "{{ nested_dir }}/inventory_one_host.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_port': plain_info.port,
+               'amt_baremetal_install_confirm_destructive': false,
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/confirm_destructive',
+             }) }}
+
+    - name: Assert the role refuses to do anything destructive unconfirmed
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc != 0
+          - nested_obs['amt-target-a.invalid'].outcome == 'failed'
+          - nested_obs['amt-target-a.invalid'].failed_assertion == 'amt_baremetal_install_confirm_destructive | bool'
+          - nested_obs['amt-target-a.invalid'].run_state is none
+          - nested_obs['amt-target-a.invalid'].power_action is none
+        fail_msg: >-
+          The role got past validation with confirmation withheld. rc={{ nested_run.rc }}.
+          Nested output tail:
+          {{ nested_tail }}
+
+    # ------------------------------------------------------------------------------
+    # (3) Connection-variable resolution -- regression 2. The negative half; scenario 7
+    # asserts the positive half.
+    # ------------------------------------------------------------------------------
+    - name: Scenario 4 -- an unset amt_host fails at validation, it does not fall back to inventory_hostname
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: amt_host_unset
+        scenario_inventory: "{{ nested_dir }}/inventory_one_host.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        # No amt_host and no amt_baremetal_install_host anywhere. The play's one host is
+        # amt-target-a.invalid, so a fallback to inventory_hostname would get past this
+        # assert and fail later, in probe.yml, with a name-resolution error instead.
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_port': plain_info.port,
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/amt_host_unset',
+             }) }}
+
+    - name: Assert the unset endpoint is caught by validate.yml, not by a failed connection
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc != 0
+          - nested_obs['amt-target-a.invalid'].failed_assertion == 'amt_baremetal_install_host is truthy'
+          - nested_obs['amt-target-a.invalid'].resolved_host is falsy
+          - nested_obs['amt-target-a.invalid'].resolved_host != nested_obs['amt-target-a.invalid'].inventory_hostname
+          # Never reached probe.yml, so nothing was ever contacted.
+          - nested_obs['amt-target-a.invalid'].run_state is none
+        fail_msg: >-
+          An unset amt_host did not fail loudly in validate.yml. If failed_assertion is
+          something else, the role resolved an endpoint from somewhere -- and
+          inventory_hostname is the one it must never use. rc={{ nested_run.rc }}.
+          Nested output tail:
+          {{ nested_tail }}
+
+    # ------------------------------------------------------------------------------
+    # (4) Capability preflight: amt_info runs before any mutation, and the role refuses
+    # to arm a boot selection the firmware does not advertise.
+    # ------------------------------------------------------------------------------
+    - name: Scenario 5 -- ider_cdrom is refused when the firmware does not advertise IDE-R
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: capability_ider_absent
+        scenario_inventory: "{{ nested_dir }}/inventory_one_host.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_port': no_caps_info.port,
+               'amt_baremetal_install_boot_provider': 'ider_cdrom',
+               'amt_baremetal_install_iso_path': media_outside_dir ~ '/boot.iso',
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/capability_ider',
+             }) }}
+
+    - name: Assert the IDE-R preflight refuses the endpoint before mutating it
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc != 0
+          - "'AMT_BootCapabilities.IDER' in nested_obs['amt-target-a.invalid'].failed_msg"
+          # The preflight is the whole point: nothing was armed, nothing was reset, and
+          # no media session was ever started.
+          - nested_obs['amt-target-a.invalid'].run_state.boot_armed == false
+          - nested_obs['amt-target-a.invalid'].run_state.reset_issued == false
+          - nested_obs['amt-target-a.invalid'].run_state.media_attached == false
+          - nested_obs['amt-target-a.invalid'].power_action is none
+        fail_msg: >-
+          The role did not refuse an endpoint that advertises no IDE-R support.
+          rc={{ nested_run.rc }}. Nested output tail:
+          {{ nested_tail }}
+
+    - name: Scenario 6 -- pxe is refused when the firmware does not advertise forced PXE boot
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: capability_pxe_absent
+        scenario_inventory: "{{ nested_dir }}/inventory_one_host.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_port': no_caps_info.port,
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/capability_pxe',
+             }) }}
+
+    - name: Assert the forced-PXE preflight refuses the endpoint before mutating it
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc != 0
+          - "'AMT_BootCapabilities.ForcePXEBoot' in nested_obs['amt-target-a.invalid'].failed_msg"
+          - nested_obs['amt-target-a.invalid'].run_state.boot_armed == false
+          - nested_obs['amt-target-a.invalid'].run_state.reset_issued == false
+          - nested_obs['amt-target-a.invalid'].power_action is none
+        fail_msg: >-
+          The role did not refuse an endpoint that advertises no forced-PXE support.
+          rc={{ nested_run.rc }}. Nested output tail:
+          {{ nested_tail }}
+
+    # ------------------------------------------------------------------------------
+    # (5) The power-transition decision -- regression 1, and the highest-value pair of
+    # assertions in this target.
+    # ------------------------------------------------------------------------------
+    - name: Scenario 7 -- an endpoint observed powered off is sent 'on', not 'reset'
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: powered_off_gets_on
+        scenario_inventory: "{{ nested_dir }}/inventory_one_host.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_port': powered_off_info.port,
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/powered_off',
+             }) }}
+
+    - name: Assert the powered-off endpoint was powered on and the run completed
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc == 0
+          - nested_obs['amt-target-a.invalid'].outcome == 'succeeded'
+          # Regression 1. `reset` here is the defect: a master bus reset does nothing to
+          # a machine that is already off, and the role would have reported success
+          # having booted nothing.
+          - nested_obs['amt-target-a.invalid'].power_action == 'on'
+          # Regression 2, positive half: resolved from amt_host, and demonstrably not
+          # from inventory_hostname, which is a different (unresolvable) name.
+          - nested_obs['amt-target-a.invalid'].resolved_host == '127.0.0.1'
+          - nested_obs['amt-target-a.invalid'].inventory_hostname == 'amt-target-a.invalid'
+          - nested_obs['amt-target-a.invalid'].resolved_port | int == powered_off_info.port | int
+          - nested_obs['amt-target-a.invalid'].resolved_username == 'admin'
+          - nested_obs['amt-target-a.invalid'].run_state.boot_armed == true
+          - nested_obs['amt-target-a.invalid'].run_state.reset_issued == true
+          - nested_obs['amt-target-a.invalid'].run_state.reset_confirmed == true
+        fail_msg: >-
+          A machine observed powered off was not sent 'on'
+          (power_action={{ nested_obs['amt-target-a.invalid'].power_action }}).
+          rc={{ nested_run.rc }}. Nested output tail:
+          {{ nested_tail }}
+
+    - name: Read the run-state file scenario 7 left on disk
+      ansible.builtin.stat:
+        path: "{{ scratch_dir.path }}/state/powered_off/127.0.0.1.json"
+      register: powered_off_state_stat
+      delegate_to: localhost
+
+    - name: Assert the run state is persisted per target, private, and matches what the run reported
+      ansible.builtin.assert:
+        that:
+          - powered_off_state_stat.stat.exists == true
+          - powered_off_state_stat.stat.mode == '0600'
+          - powered_off_state_on_disk.reset_confirmed == true
+          - powered_off_state_on_disk.boot_armed == true
+          - powered_off_state_on_disk.action_token_issued_at is truthy
+          - powered_off_state_on_disk == nested_obs['amt-target-a.invalid'].run_state
+        fail_msg: >-
+          The per-target run-state file is what makes an interrupted run resumable, so it
+          has to exist, be private, and agree with what the run actually did.
+      vars:
+        powered_off_state_on_disk: "{{ lookup('ansible.builtin.file', scratch_dir.path ~ '/state/powered_off/127.0.0.1.json') | from_json }}"
+
+    - name: Scenario 8 -- an endpoint observed powered on is sent 'reset'
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: powered_on_gets_reset
+        scenario_inventory: "{{ nested_dir }}/inventory_one_host.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_port': plain_info.port,
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/powered_on',
+             }) }}
+
+    - name: Assert the powered-on endpoint was reset and the run completed
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc == 0
+          - nested_obs['amt-target-a.invalid'].outcome == 'succeeded'
+          - nested_obs['amt-target-a.invalid'].power_action == 'reset'
+          - nested_obs['amt-target-a.invalid'].run_state.reset_issued == true
+          - nested_obs['amt-target-a.invalid'].run_state.reset_confirmed == true
+        fail_msg: >-
+          A machine observed powered on was not sent 'reset'
+          (power_action={{ nested_obs['amt-target-a.invalid'].power_action }}).
+          rc={{ nested_run.rc }}. Nested output tail:
+          {{ nested_tail }}
+
+    # ------------------------------------------------------------------------------
+    # (6) Resumability. A separate ansible-playbook invocation has no memory of an
+    # interrupted one, so the state file is the only thing standing between a resumed
+    # run and blindly re-arming a one-time boot or re-issuing a reset whose outcome
+    # nobody confirmed.
+    # ------------------------------------------------------------------------------
+    - name: Seed the state directories the resumability scenarios read
+      ansible.builtin.file:
+        path: "{{ scratch_dir.path }}/state/{{ item }}"
+        state: directory
+        mode: "0700"
+      loop:
+        - resume_refused
+        - resume_acknowledged
+        - clean_slate
+        - handoff_failure
+        - media_failure
+      delegate_to: localhost
+
+    - name: Seed an interrupted prior run -- boot armed, outcome never confirmed
+      ansible.builtin.copy:
+        content: "{{ interrupted_prior_state | to_nice_json }}\n"
+        dest: "{{ scratch_dir.path }}/state/{{ item }}/127.0.0.1.json"
+        mode: "0600"
+      loop:
+        - resume_refused
+        - resume_acknowledged
+      delegate_to: localhost
+      vars:
+        interrupted_prior_state:
+          media_attached: false
+          session_id: null
+          boot_armed: true
+          action_token_issued_at: "2026-01-01T00:00:00Z"
+          reset_issued: true
+          reset_confirmed: false
+          detached: true
+          last_failure: seeded by the integration target, not a real failure
+
+    - name: Scenario 9 -- an uncertain prior run is not silently resumed
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: resume_refused
+        scenario_inventory: "{{ nested_dir }}/inventory_one_host.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_port': plain_info.port,
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/resume_refused',
+             }) }}
+
+    - name: Assert a boot armed with no confirmed outcome blocks the run
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc != 0
+          - nested_obs['amt-target-a.invalid'].failed_assertion == 'amt_baremetal_install_force_resume | bool'
+          - "'127.0.0.1.json' in nested_obs['amt-target-a.invalid'].failed_msg"
+          # Read the prior run's history rather than starting from scratch, and stopped
+          # before probe.yml -- so nothing was re-armed and nothing was reset.
+          - nested_obs['amt-target-a.invalid'].run_state.boot_armed == true
+          - nested_obs['amt-target-a.invalid'].power_action is none
+        fail_msg: >-
+          The role resumed past an unconfirmed boot/reset without acknowledgement.
+          rc={{ nested_run.rc }}. Nested output tail:
+          {{ nested_tail }}
+
+    - name: Assert the refusal did not rewrite the prior state file
+      ansible.builtin.assert:
+        that:
+          - refused_state_on_disk.action_token_issued_at == '2026-01-01T00:00:00Z'
+          - refused_state_on_disk.boot_armed == true
+        fail_msg: >-
+          A refused run must leave the prior run's record exactly as it found it -- that
+          record is what the operator inspects before deciding to force a resume.
+      vars:
+        refused_state_on_disk: "{{ lookup('ansible.builtin.file', scratch_dir.path ~ '/state/resume_refused/127.0.0.1.json') | from_json }}"
+
+    - name: Scenario 10 -- an acknowledged resume proceeds and re-arms with a fresh token
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: resume_acknowledged
+        scenario_inventory: "{{ nested_dir }}/inventory_one_host.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_port': plain_info.port,
+               'amt_baremetal_install_force_resume': true,
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/resume_acknowledged',
+             }) }}
+
+    - name: Assert the acknowledged resume ran and never reused the prior token's timestamp
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc == 0
+          - nested_obs['amt-target-a.invalid'].run_state.boot_armed == true
+          - nested_obs['amt-target-a.invalid'].run_state.reset_confirmed == true
+          - nested_obs['amt-target-a.invalid'].run_state.action_token_issued_at != '2026-01-01T00:00:00Z'
+        fail_msg: >-
+          -e amt_baremetal_install_force_resume=true must let the run proceed, and every
+          arm must issue a brand new action token rather than reusing a prior attempt's.
+          rc={{ nested_run.rc }}. Nested output tail:
+          {{ nested_tail }}
+
+    - name: Seed a prior run that completed cleanly, with stale session state attached
+      ansible.builtin.copy:
+        content: "{{ completed_prior_state | to_nice_json }}\n"
+        dest: "{{ scratch_dir.path }}/state/clean_slate/127.0.0.1.json"
+        mode: "0600"
+      delegate_to: localhost
+      vars:
+        completed_prior_state:
+          media_attached: true
+          session_id: stale-session-from-a-finished-run
+          boot_armed: true
+          action_token_issued_at: "2026-01-01T00:00:00Z"
+          reset_issued: true
+          reset_confirmed: true
+          detached: true
+          last_failure: seeded by the integration target, not a real failure
+
+    - name: Scenario 11 -- a confirmed prior run starts the next one from a clean slate
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: clean_slate
+        scenario_inventory: "{{ nested_dir }}/inventory_one_host.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_port': plain_info.port,
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/clean_slate',
+             }) }}
+
+    - name: Assert a completed prior run's session id and failure are not carried forward
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc == 0
+          # A finished prior run's session was already detached, so carrying its id
+          # forward would hand amt_media a session that no longer exists.
+          - nested_obs['amt-target-a.invalid'].run_state.session_id is none
+          - nested_obs['amt-target-a.invalid'].run_state.last_failure is none
+          - nested_obs['amt-target-a.invalid'].run_state.action_token_issued_at != '2026-01-01T00:00:00Z'
+        fail_msg: >-
+          A prior run with reset_confirmed=true must reset the slate, not resume from it.
+          rc={{ nested_run.rc }}. Nested output tail:
+          {{ nested_tail }}
+
+    # ------------------------------------------------------------------------------
+    # (7) wait_for_handoff. Both hardware stages that drive this role set it false, so
+    # until now this phase had never run anywhere. The mock WS-Man server is a listening
+    # TCP socket on 127.0.0.1, which is all wait_for needs to answer.
+    # ------------------------------------------------------------------------------
+    - name: Scenario 12 -- wait_for_handoff succeeds when something answers on the target
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: handoff_success
+        scenario_inventory: "{{ nested_dir }}/inventory_one_host.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_port': plain_info.port,
+               'amt_baremetal_install_wait_for_handoff': true,
+               'amt_baremetal_install_handoff_port': plain_info.port,
+               'amt_baremetal_install_handoff_delay': 0,
+               'amt_baremetal_install_handoff_timeout': 20,
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/handoff_success',
+             }) }}
+
+    - name: Assert the hand-off phase ran and the run completed through it
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc == 0
+          - nested_obs['amt-target-a.invalid'].outcome == 'succeeded'
+          - nested_obs['amt-target-a.invalid'].run_state.reset_confirmed == true
+          # The wait_for task is the only thing in the role that names the hand-off
+          # port, so its appearance in the nested output is what proves the phase ran
+          # rather than being skipped by the `when` in tasks/main.yml.
+          - "'Wait for the installed/booted OS to answer' in nested_run.stdout"
+        fail_msg: >-
+          wait_for_handoff=true did not complete against a listening port.
+          rc={{ nested_run.rc }}. Nested output tail:
+          {{ nested_tail }}
+
+    # ------------------------------------------------------------------------------
+    # (8) Media is always detached, even on failure. A leaked IDE-R session holds the
+    # target's boot device open, so the `always` block has to run whatever failed.
+    #
+    # Both scenarios below seed a session id into the prior state so that
+    # detach_media.yml's `when: session_id is truthy` is actually satisfied and the real
+    # amt_media state=detached call runs, rather than being skipped.
+    # ------------------------------------------------------------------------------
+    - name: Seed a prior run that left a media session id behind
+      ansible.builtin.copy:
+        content: "{{ attached_prior_state | to_nice_json }}\n"
+        dest: "{{ scratch_dir.path }}/state/{{ item }}/127.0.0.1.json"
+        mode: "0600"
+      loop:
+        - handoff_failure
+        - media_failure
+      delegate_to: localhost
+      vars:
+        attached_prior_state:
+          media_attached: true
+          session_id: seeded-session-not-a-real-ider-session
+          boot_armed: false
+          action_token_issued_at: null
+          reset_issued: false
+          reset_confirmed: false
+          detached: false
+          last_failure: null
+
+    - name: Scenario 13 -- a failure after the reset still detaches media
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: handoff_failure
+        scenario_inventory: "{{ nested_dir }}/inventory_one_host.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        # Points the hand-off wait at a port nothing is listening on, with a short
+        # timeout: a deterministic mid-run failure *after* the destructive boundary.
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_port': plain_info.port,
+               'amt_baremetal_install_wait_for_handoff': true,
+               'amt_baremetal_install_handoff_port': closed_port,
+               'amt_baremetal_install_handoff_delay': 0,
+               'amt_baremetal_install_handoff_timeout': 5,
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/handoff_failure',
+             }) }}
+
+    - name: Assert the post-reset failure was recorded, re-raised, and still detached
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc != 0
+          - nested_obs['amt-target-a.invalid'].outcome == 'failed'
+          # rescue -> record_failure.yml ran.
+          - nested_obs['amt-target-a.invalid'].run_state.last_failure is truthy
+          # always -> detach_media.yml ran, after the rescue, and persisted the fact.
+          - nested_obs['amt-target-a.invalid'].run_state.detached == true
+          - handoff_failure_state_on_disk.detached == true
+          - handoff_failure_state_on_disk.last_failure is truthy
+          # The reset genuinely happened before the failure, and the role says so.
+          - handoff_failure_state_on_disk.reset_issued == true
+        fail_msg: >-
+          A failure after the reset must still detach media -- a leaked IDE-R session
+          holds the target's boot device open. rc={{ nested_run.rc }}.
+          Nested output tail:
+          {{ nested_tail }}
+      vars:
+        handoff_failure_state_on_disk: "{{ lookup('ansible.builtin.file', scratch_dir.path ~ '/state/handoff_failure/127.0.0.1.json') | from_json }}"
+
+    - name: Scenario 14 -- a failure in the media phase never reaches the destructive boundary
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: media_failure
+        scenario_inventory: "{{ nested_dir }}/inventory_one_host.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        # allowed_directory and the ISO deliberately disagree, so amt_media refuses the
+        # image during its own validation -- before it opens any redirection connection.
+        # That makes this a deterministic failure inside the media phase with no IDE-R
+        # endpoint involved at all.
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_port': plain_info.port,
+               'amt_baremetal_install_boot_provider': 'ider_cdrom',
+               'amt_baremetal_install_iso_path': media_outside_dir ~ '/boot.iso',
+               'amt_baremetal_install_media_allowed_directory': media_allowed_dir,
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/media_failure',
+             }) }}
+
+    - name: Assert a failed media attach arms nothing, resets nothing, and still detaches
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc != 0
+          - nested_obs['amt-target-a.invalid'].outcome == 'failed'
+          - "'outside allowed directory' in nested_obs['amt-target-a.invalid'].failed_msg"
+          # The ordering in tasks/main.yml is the safety property: media comes before the
+          # one-time boot arm, which comes before the reset. A failure in the media phase
+          # must therefore leave the machine untouched.
+          - nested_obs['amt-target-a.invalid'].run_state.boot_armed == false
+          - nested_obs['amt-target-a.invalid'].run_state.reset_issued == false
+          - nested_obs['amt-target-a.invalid'].power_action is none
+          # ...and the always block still ran.
+          - media_failure_state_on_disk.detached == true
+          - media_failure_state_on_disk.reset_issued == false
+          - media_failure_state_on_disk.last_failure is truthy
+        fail_msg: >-
+          A failure in the media phase must not arm a boot selection or reset the
+          machine, and must still detach. rc={{ nested_run.rc }}.
+          Nested output tail:
+          {{ nested_tail }}
+      vars:
+        media_failure_state_on_disk: "{{ lookup('ansible.builtin.file', scratch_dir.path ~ '/state/media_failure/127.0.0.1.json') | from_json }}"
+
+    - name: Assert nothing in this target ever wrote to the real home directory
+      # Every nested run had HOME redirected into the scratch tree, and every scenario
+      # overrode the role's state and media-session directories. This confirms both.
+      ansible.builtin.stat:
+        path: "{{ scratch_dir.path }}/home/.ansible/intel_amt"
+      register: redirected_home_stat
+      delegate_to: localhost
+
+    - name: Assert the redirected home was used if the role's defaults were ever reached
+      ansible.builtin.assert:
+        that:
+          - redirected_home_stat.stat.exists == false
+        fail_msg: >-
+          Something fell back to the role's `~/.ansible/intel_amt/...` defaults. Harmless
+          here because HOME was redirected, but it means a scenario was not passing the
+          state or runtime directory it thought it was.
+  always:
+    - name: Stop the mock WS-Man servers
+      ansible.builtin.command: "kill {{ item }}"
+      loop:
+        - "{{ plain_pid }}"
+        - "{{ powered_off_pid }}"
+        - "{{ no_caps_pid }}"
+      delegate_to: localhost
+      failed_when: false
+      changed_when: false
+
+    - name: Remove the scratch directory
+      ansible.builtin.file:
+        path: "{{ scratch_dir.path }}"
+        state: absent
+      delegate_to: localhost

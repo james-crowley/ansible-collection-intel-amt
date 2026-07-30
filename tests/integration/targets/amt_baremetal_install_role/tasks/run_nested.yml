@@ -1,0 +1,82 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# The mechanics every scenario in main.yml shares: run files/nested_play.yml as its own
+# ansible-playbook process, then load the structured observation each host dumped.
+#
+# Callers pass, via `vars:` on the include:
+#   scenario           - short slug; names this run's observation directory
+#   scenario_inventory - path to the inventory to run against
+#   scenario_hosts     - the host names that inventory contains, in any order
+#   scenario_vars      - the --extra-vars dict (usually nested_base_vars | combine(...))
+#
+# and afterwards read:
+#   nested_run  - the registered command result (rc, stdout_lines)
+#   nested_obs  - {host: observation dict}, parsed from the dumps
+#   nested_tail - the tail of the nested playbook's output, for assertion fail_msgs
+#
+# rc is captured rather than enforced (`failed_when: false`): most scenarios here are
+# proving the role *refuses* something, so a non-zero rc is the expected result and the
+# caller is the only thing that knows which way round it should be.
+
+- name: "Derive the observation directory for scenario {{ scenario }}"
+  ansible.builtin.set_fact:
+    nested_dump_dir: "{{ scratch_dir.path }}/dumps/{{ scenario }}"
+    # Reset, so a scenario can never accidentally assert on the previous one's dump.
+    nested_obs: {}
+
+- name: "Start from an empty observation directory for scenario {{ scenario }}"
+  ansible.builtin.file:
+    path: "{{ nested_dump_dir }}"
+    state: "{{ item }}"
+    mode: "0700"
+  loop:
+    - absent
+    - directory
+  delegate_to: localhost
+
+- name: "Run the role under test in its own ansible-playbook process for scenario {{ scenario }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ nested_ansible_playbook }}"
+      - "-i"
+      - "{{ scenario_inventory }}"
+      - "{{ nested_dir }}/nested_play.yml"
+      - "--extra-vars"
+      - "{{ scenario_vars | combine({'nested_dump_dir': nested_dump_dir}) | to_json }}"
+    # A directory this target owns, so the nested run never inherits a world-writable
+    # working directory (which Ansible warns about) or anything from the outer run.
+    chdir: "{{ nested_dir }}"
+  environment: "{{ nested_env }}"
+  register: nested_run
+  changed_when: true
+  failed_when: false
+  delegate_to: localhost
+
+- name: "Keep the tail of the nested output for assertion messages in scenario {{ scenario }}"
+  ansible.builtin.set_fact:
+    nested_tail: '{{ (nested_run.stdout_lines | default([]))[-40:] | join("\n") }}'
+
+- name: "Confirm every host wrote an observation dump in scenario {{ scenario }}"
+  ansible.builtin.stat:
+    path: "{{ nested_dump_dir }}/{{ item }}.json"
+  loop: "{{ scenario_hosts }}"
+  register: nested_dump_stat
+  delegate_to: localhost
+
+- name: "Assert the dumps exist before anything asserts on them, for scenario {{ scenario }}"
+  ansible.builtin.assert:
+    that:
+      - nested_dump_stat.results | map(attribute='stat.exists') | list == [true] * (scenario_hosts | length)
+    fail_msg: >-
+      {{ scenario }}: the nested play did not write an observation dump for every host,
+      so it failed before or during files/nested_play.yml itself rather than inside the
+      role. Nested output tail:
+      {{ nested_tail }}
+
+- name: "Load each host's observation dump for scenario {{ scenario }}"
+  ansible.builtin.set_fact:
+    nested_obs: "{{ nested_obs | combine({item: lookup('ansible.builtin.file', nested_dump_dir ~ '/' ~ item ~ '.json') | from_json}) }}"
+  loop: "{{ scenario_hosts }}"

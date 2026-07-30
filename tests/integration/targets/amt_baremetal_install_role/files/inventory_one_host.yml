@@ -1,0 +1,21 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# A single-host inventory for files/nested_play.yml.
+#
+# The host name is deliberately an unresolvable RFC 2606 .invalid name, and
+# deliberately *not* the address the mock endpoint listens on: that mismatch is the
+# whole point. AMT answers on its own management address, so a role that resolved its
+# endpoint from inventory_hostname would try to reach amt-target-a.invalid and fail
+# with a name-resolution error instead of talking to the mock. Every amt_* connection
+# variable arrives from --extra-vars instead, exactly as a conventional inventory
+# would supply them (see tests/hardware/inventory.yml.example).
+all:
+  vars:
+    # Nothing is ever executed on these hosts -- the role delegates every task to
+    # localhost -- but the play still needs a connection plugin for them.
+    ansible_connection: local
+  hosts:
+    amt-target-a.invalid: {}
