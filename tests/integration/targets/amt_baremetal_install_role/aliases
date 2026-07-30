@@ -1,6 +1,12 @@
 # Drives the real roles/amt_baremetal_install role end to end against local mock
-# WS-Man servers. No network access beyond 127.0.0.1, no privilege escalation, and no
-# destructive action against anything -- see docs/testing.md.
+# WS-Man servers, and its media phase against the local mock IDE-R server. No network
+# access beyond 127.0.0.1, no privilege escalation, and no destructive action against
+# anything -- see docs/testing.md.
+#
+# skip/windows because the media-phase scenario reaches amt_media's attach path, which
+# forks a real detached background process via media_session.spawn_session() and so
+# requires os.fork() -- matching what amt_media.py itself requires and documents, and
+# what the amt_media target's own aliases already declare.
 #
 # ansible-test's per-target temp workdir only copies tests/integration/targets/<name>/
 # itself; these needs/file/* aliases pull the (non-target) mock server fixtures into
@@ -15,5 +21,8 @@
 # ansible-test infers their context, and this one deliberately is not -- see the note
 # at the top of tasks/main.yml about why it cannot be called amt_baremetal_install.
 context/controller
+skip/windows
 needs/file/tests/integration/mock_servers/wsman_server.py
 needs/file/tests/integration/mock_servers/run_wsman_mock.py
+needs/file/tests/integration/mock_servers/ider_server.py
+needs/file/tests/integration/mock_servers/run_ider_mock.py

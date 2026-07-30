@@ -25,6 +25,27 @@
 #      validate.yml, and scenario 7 asserts a set one resolves from `amt_host` while
 #      `inventory_hostname` is something else entirely.
 #
+# Three further defects were found by this target itself and are regression-tested here:
+#
+#   3. validate.yml's second fan-out assertion (`ansible_play_batch | length == 1`) was
+#      dead code billed as "a second, independent guard". Scenario 2 now asserts the
+#      counterfactual directly: in a two-host `serial: 1` play -- the exact case that
+#      assertion claimed to catch -- its predicate *holds* while the roster assertion is
+#      the one that fires. It could never have caught anything.
+#   4. attach_media.yml never forwarded a port to `amt_media`, so IDE-R could only ever
+#      reach the stock redirection ports (16994/16995). Scenario 16 drives the whole
+#      media phase against the mock IDE-R server on an ephemeral port, which is only
+#      reachable via the new `amt_baremetal_install_media_port`.
+#   5. `amt_baremetal_install_handoff_host` defaulted to the AMT *management* address
+#      while the role's own comment said to point it at whatever the OS answers on.
+#      Scenario 15 asserts it is now required (and refused up front, before the
+#      destructive boundary) whenever the hand-off wait is enabled.
+#   6. A failed media attach orphaned the IDE-R daemon it had already spawned, because
+#      the session id was only recorded from a *successful* attach. Scenario 17 asserts
+#      the id is claimed before the attach and that the always-detach therefore actually
+#      runs -- measured by amt_media's own session state file being gone from the runtime
+#      directory afterwards, which only state=detached removes.
+#
 # Why this target is called amt_baremetal_install_role and not amt_baremetal_install:
 # ansible-test runs each target as a role and resolves it by the collection-qualified
 # name, so a target sharing a name with a role in roles/ silently runs *that role* with
@@ -54,6 +75,7 @@
     plain_ready_file: "{{ scratch_dir.path }}/wsman_plain_ready.json"
     powered_off_ready_file: "{{ scratch_dir.path }}/wsman_powered_off_ready.json"
     no_caps_ready_file: "{{ scratch_dir.path }}/wsman_no_caps_ready.json"
+    ider_ready_file: "{{ scratch_dir.path }}/ider_ready.json"
     media_allowed_dir: "{{ scratch_dir.path }}/media/allowed"
     media_outside_dir: "{{ scratch_dir.path }}/media/outside"
 
@@ -96,11 +118,19 @@
     mode: "0600"
   delegate_to: localhost
 
-- name: Create the CD/DVD image the media-phase scenario points at
-  # Deliberately *outside* the allowed directory the same scenario passes, which is how
-  # that scenario forces a failure inside the media phase with no IDE-R endpoint
-  # involved at all. 4096 bytes = 2 CD sectors (see ider.MediaImage).
-  ansible.builtin.command: "dd if=/dev/zero of={{ media_outside_dir }}/boot.iso bs=512 count=8"
+- name: Create the CD/DVD images the media-phase scenarios point at
+  # Two images, 4096 bytes each = 2 CD sectors (see ider.MediaImage):
+  #
+  #   outside/boot.iso - deliberately *outside* the allowed directory scenario 14 passes,
+  #                      which is how that scenario forces a failure inside the media
+  #                      phase with no IDE-R endpoint involved at all.
+  #   allowed/boot.iso - inside it, for scenario 16, which is the opposite case: the
+  #                      media phase running all the way through to a real IDE-R
+  #                      handshake against the mock server.
+  ansible.builtin.command: "dd if=/dev/zero of={{ item }}/boot.iso bs=512 count=8"
+  loop:
+    - "{{ media_outside_dir }}"
+    - "{{ media_allowed_dir }}"
   delegate_to: localhost
   changed_when: true
 
@@ -373,21 +403,52 @@
              }) }}
 
     - name: Assert serial 1 does not buy a way past the host-count guard
-      # ansible_play_batch is always a subset of ansible_play_hosts_all, so the second
-      # guard in validate.yml (`ansible_play_batch | length == 1`) cannot fail unless the
-      # first one already has. That makes it unreachable as an independent failure, which
-      # is why this scenario asserts the *first* guard fires even with serial: 1 -- with
-      # batch length genuinely 1 -- rather than claiming to test the second.
+      # ansible_play_batch is always a subset of ansible_play_hosts_all -- Ansible's
+      # variable manager builds them from one inventory query differing only in whether
+      # the batch restriction is honoured (ansible/vars/manager.py) -- so the batch
+      # assertion validate.yml used to carry (`ansible_play_batch | length == 1`) could
+      # not fail unless the roster assertion already had.
+      #
+      # This is where that is proved rather than argued. The recorded counts below are a
+      # two-host play with batch length 1: exactly the case the removed assertion claimed
+      # to be an independent guard against. Its predicate HOLDS here (batch == 1) while
+      # the roster assertion is the one that fires. So on its own it would have let a
+      # serialised multi-host play straight through to the destructive boundary, and
+      # removing it lost nothing.
       ansible.builtin.assert:
         that:
           - nested_run.rc != 0
           - nested_obs['amt-target-a.invalid'].failed_assertion == 'ansible_play_hosts_all | length == 1'
           - nested_obs['amt-target-a.invalid'].play_hosts_all_count | int == 2
           - nested_obs['amt-target-a.invalid'].play_batch_count | int == 1
+          # The counterfactual, stated as an assertion: the removed guard's predicate is
+          # satisfied in a play that must be (and is) refused.
+          - (nested_obs['amt-target-a.invalid'].play_batch_count | int == 1) == true
+          - (nested_obs['amt-target-a.invalid'].play_hosts_all_count | int == 1) == false
+          # Nothing was reached: the roster guard is the first task in the role.
+          - nested_obs['amt-target-a.invalid'].run_state is none
+          - nested_obs['amt-target-a.invalid'].power_action is none
         fail_msg: >-
           A serial: 1 two-host play was not refused. rc={{ nested_run.rc }}.
           Nested output tail:
           {{ nested_tail }}
+
+    - name: Assert the surviving fan-out refusal still reports the batch count as a diagnostic
+      # The removed assertion was the only thing that told an operator how big the
+      # current batch was. That information is deliberately preserved -- as a diagnostic
+      # in the surviving guard's message, not as a second guarantee -- so a refusal is no
+      # less diagnosable than it was before. This also pins the message against
+      # regressing back to advising `serial: 1`, which does not help here and read as
+      # though it would.
+      ansible.builtin.assert:
+        that:
+          - "'the current batch contains 1' in nested_obs['amt-target-a.invalid'].failed_msg"
+          - "'this play targets 2 hosts' in nested_obs['amt-target-a.invalid'].failed_msg"
+          - "'`serial: 1` does not change that' in nested_obs['amt-target-a.invalid'].failed_msg"
+        fail_msg: >-
+          The fan-out refusal message no longer carries the batch count, so removing the
+          batch assertion cost an operator diagnostic information. Message was:
+          {{ nested_obs['amt-target-a.invalid'].failed_msg }}
 
     # ------------------------------------------------------------------------------
     # (2) The destructive-action confirmation gate.
@@ -757,6 +818,11 @@
     # (7) wait_for_handoff. Both hardware stages that drive this role set it false, so
     # until now this phase had never run anywhere. The mock WS-Man server is a listening
     # TCP socket on 127.0.0.1, which is all wait_for needs to answer.
+    #
+    # Every scenario that enables the wait names amt_baremetal_install_handoff_host
+    # explicitly. That is now required rather than merely tidy -- see scenario 15 -- and
+    # it is the whole point: the role must not infer the OS's address from the AMT
+    # management address it was given.
     # ------------------------------------------------------------------------------
     - name: Scenario 12 -- wait_for_handoff succeeds when something answers on the target
       ansible.builtin.include_tasks: run_nested.yml
@@ -769,6 +835,7 @@
                'amt_host': '127.0.0.1',
                'amt_port': plain_info.port,
                'amt_baremetal_install_wait_for_handoff': true,
+               'amt_baremetal_install_handoff_host': '127.0.0.1',
                'amt_baremetal_install_handoff_port': plain_info.port,
                'amt_baremetal_install_handoff_delay': 0,
                'amt_baremetal_install_handoff_timeout': 20,
@@ -785,6 +852,8 @@
           # port, so its appearance in the nested output is what proves the phase ran
           # rather than being skipped by the `when` in tasks/main.yml.
           - "'Wait for the installed/booted OS to answer' in nested_run.stdout"
+          # Explicitly supplied, and used as supplied.
+          - nested_obs['amt-target-a.invalid'].resolved_handoff_host == '127.0.0.1'
         fail_msg: >-
           wait_for_handoff=true did not complete against a listening port.
           rc={{ nested_run.rc }}. Nested output tail:
@@ -831,6 +900,7 @@
                'amt_host': '127.0.0.1',
                'amt_port': plain_info.port,
                'amt_baremetal_install_wait_for_handoff': true,
+               'amt_baremetal_install_handoff_host': '127.0.0.1',
                'amt_baremetal_install_handoff_port': closed_port,
                'amt_baremetal_install_handoff_delay': 0,
                'amt_baremetal_install_handoff_timeout': 5,
@@ -902,6 +972,334 @@
       vars:
         media_failure_state_on_disk: "{{ lookup('ansible.builtin.file', scratch_dir.path ~ '/state/media_failure/127.0.0.1.json') | from_json }}"
 
+    # ------------------------------------------------------------------------------
+    # (9) The hand-off endpoint is required, not guessed. It used to default to
+    # amt_baremetal_install_host -- the AMT *management* address -- which the freshly
+    # installed OS does not necessarily answer on. A wrong guess is only discovered after
+    # the reset, once the full amt_baremetal_install_handoff_timeout has elapsed, so the
+    # refusal has to happen in validate.yml where nothing has been touched yet.
+    # ------------------------------------------------------------------------------
+    - name: Scenario 15 -- wait_for_handoff without a hand-off host is refused up front
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: handoff_host_missing
+        scenario_inventory: "{{ nested_dir }}/inventory_one_host.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        # amt_host is set, so a fallback to the management address would sail past
+        # validation and only fail an hour later in wait_for. Nothing sets
+        # amt_baremetal_install_handoff_host.
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_port': plain_info.port,
+               'amt_baremetal_install_wait_for_handoff': true,
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/handoff_host_missing',
+             }) }}
+
+    - name: Assert the missing hand-off host is caught in validate.yml, before anything is touched
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc != 0
+          - nested_obs['amt-target-a.invalid'].outcome == 'failed'
+          - nested_obs['amt-target-a.invalid'].failed_assertion == 'amt_baremetal_install_handoff_host is truthy'
+          # The regression itself: it must not have fallen back to the AMT management
+          # address, which is set and would have looked entirely plausible...
+          - nested_obs['amt-target-a.invalid'].resolved_handoff_host is falsy
+          - nested_obs['amt-target-a.invalid'].resolved_host == '127.0.0.1'
+          - nested_obs['amt-target-a.invalid'].resolved_handoff_host != nested_obs['amt-target-a.invalid'].resolved_host
+          # ...nor to inventory_hostname, the other plausible-looking wrong answer.
+          - nested_obs['amt-target-a.invalid'].resolved_handoff_host != nested_obs['amt-target-a.invalid'].inventory_hostname
+          # Refused before state.yml, so nothing was reconciled, contacted or reset. This
+          # is the entire value of moving the failure up front.
+          - nested_obs['amt-target-a.invalid'].run_state is none
+          - nested_obs['amt-target-a.invalid'].power_action is none
+          - "'amt_baremetal_install_wait_for_handoff=false' in nested_obs['amt-target-a.invalid'].failed_msg"
+        fail_msg: >-
+          wait_for_handoff=true with no handoff_host must fail in validate.yml. If
+          failed_assertion is something else, or resolved_handoff_host is truthy, the role
+          guessed an address the operator never named. rc={{ nested_run.rc }}.
+          Nested output tail:
+          {{ nested_tail }}
+
+    - name: Scenario 15b -- the same run is fine once the hand-off wait is opted out of
+      # The refusal above must be reachable *only* by the wait being enabled: it is a
+      # conditional requirement, not a new unconditional one. Both hardware qualification
+      # stages set wait_for_handoff=false, so this is the path they take.
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: handoff_host_not_needed
+        scenario_inventory: "{{ nested_dir }}/inventory_one_host.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_port': plain_info.port,
+               'amt_baremetal_install_wait_for_handoff': false,
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/handoff_host_not_needed',
+             }) }}
+
+    - name: Assert no hand-off host is required when the hand-off wait is disabled
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc == 0
+          - nested_obs['amt-target-a.invalid'].outcome == 'succeeded'
+          - nested_obs['amt-target-a.invalid'].resolved_handoff_host is falsy
+          - nested_obs['amt-target-a.invalid'].run_state.reset_confirmed == true
+          - "'Wait for the installed/booted OS to answer' not in nested_run.stdout"
+        fail_msg: >-
+          The hand-off host requirement must be conditional on wait_for_handoff. A run
+          with the wait disabled and no handoff_host has to complete. rc={{ nested_run.rc }}.
+          Nested output tail:
+          {{ nested_tail }}
+
+    # ------------------------------------------------------------------------------
+    # (10) The media phase, driven all the way to a real IDE-R handshake.
+    #
+    # attach_media.yml forwarded every connection option to amt_media except `port`, and
+    # the role had no media-port variable at all, so IDE-R could only ever reach the stock
+    # redirection ports (16995 with TLS, 16994 without). That had two consequences: an
+    # operator whose endpoints redirect on a non-default port could not use this role,
+    # and this target could not aim the media phase at the mock IDE-R server -- which
+    # binds an ephemeral port -- so scenario 14 could only reach amt_media's own
+    # validation and stop there.
+    #
+    # This scenario is the coverage that unblocks. Two mock servers, two planes, two
+    # ports: the WS-Man mock answers probe/redirection/boot/power on amt_port, and the
+    # IDE-R mock answers the media session on amt_baremetal_install_media_port. Nothing
+    # is listening on 16994, so an unforwarded port cannot pass this.
+    # ------------------------------------------------------------------------------
+    - name: Start the mock IDE-R server the media-phase scenario attaches against
+      # Started here rather than alongside the WS-Man mocks at the top: this server plays
+      # firmware for exactly one redirection session (see run_ider_mock.py's docstring),
+      # so it is brought up immediately before the one scenario that connects to it.
+      ansible.builtin.shell: |
+        set -e
+        nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_ider_mock.py \
+          --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ ider_ready_file }} \
+          --handshake-timeout 60 \
+          > {{ scratch_dir.path }}/ider.log 2>&1 &
+        echo $!
+      args:
+        executable: /bin/bash
+      register: ider_start
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Wait for the mock IDE-R server to report ready
+      ansible.builtin.wait_for:
+        path: "{{ ider_ready_file }}"
+        state: present
+        timeout: 15
+      delegate_to: localhost
+
+    - name: Read the mock IDE-R server's connection info and pid
+      ansible.builtin.set_fact:
+        ider_info: "{{ lookup('ansible.builtin.file', ider_ready_file) | from_json }}"
+        ider_pid: "{{ ider_start.stdout | trim }}"
+
+    - name: Assert the IDE-R mock is on an ephemeral port, not a stock redirection port
+      # The premise of the scenario. If the mock happened to land on 16994/16995 the
+      # attach could succeed with the port never forwarded at all, and this would prove
+      # nothing.
+      ansible.builtin.assert:
+        that:
+          - ider_info.port | int not in [16994, 16995]
+          - ider_info.port | int != plain_info.port | int
+          - ider_info.handshake == false
+        fail_msg: >-
+          The mock IDE-R server must be on an ephemeral port distinct from the WS-Man
+          mock's, and must not have handshaked with anything yet. port={{ ider_info.port }}.
+
+    - name: Scenario 16 -- the media phase reaches a mock IDE-R server on an ephemeral port
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: media_ider_port
+        scenario_inventory: "{{ nested_dir }}/inventory_one_host.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_port': plain_info.port,
+               'amt_baremetal_install_boot_provider': 'ider_cdrom',
+               'amt_baremetal_install_media_port': ider_info.port,
+               'amt_baremetal_install_iso_path': media_allowed_dir ~ '/boot.iso',
+               'amt_baremetal_install_media_allowed_directory': media_allowed_dir,
+               'amt_baremetal_install_media_attach_timeout': 30,
+               'amt_baremetal_install_media_detach_timeout': 20,
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/media_ider_port',
+             }) }}
+
+    - name: Read what the mock IDE-R server recorded about the session it was given
+      ansible.builtin.set_fact:
+        ider_result: "{{ lookup('ansible.builtin.file', ider_ready_file) | from_json }}"
+      delegate_to: localhost
+
+    - name: Assert the role's media session actually reached the ephemeral IDE-R port
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc == 0
+          - nested_obs['amt-target-a.invalid'].outcome == 'succeeded'
+          # The fix, observed from the far end: the mock completed an IDE-R handshake, so
+          # amt_media connected to *this* port. Before the port was forwarded, amt_media
+          # applied its own default (16994, since use_tls is false here) and the attach
+          # failed with nothing listening there.
+          - ider_result.handshake == true
+          - ider_result.error is none
+          # ...and observed from the role's side: the value was forwarded, not defaulted.
+          - nested_obs['amt-target-a.invalid'].resolved_media_port | int == ider_info.port | int
+          # The two planes stayed separate. This is the assertion that would catch
+          # "forward amt_baremetal_install_port to amt_media" as a fix, which would be wrong.
+          - nested_obs['amt-target-a.invalid'].resolved_media_port | int != nested_obs['amt-target-a.invalid'].resolved_port | int
+          # A real session was attached and recorded, so the media phase genuinely ran
+          # rather than being skipped.
+          - nested_obs['amt-target-a.invalid'].run_state.media_attached == true
+          - nested_obs['amt-target-a.invalid'].run_state.session_id is truthy
+          # ...and the lifecycle continued past it, through the destructive boundary.
+          - nested_obs['amt-target-a.invalid'].run_state.boot_armed == true
+          - nested_obs['amt-target-a.invalid'].run_state.reset_confirmed == true
+          # The always block detached it again, so no daemon is left holding the mock's
+          # connection open.
+          - nested_obs['amt-target-a.invalid'].run_state.detached == true
+          - media_ider_state_on_disk.detached == true
+          - media_ider_state_on_disk.media_attached == true
+        fail_msg: >-
+          The media phase did not reach the mock IDE-R server on port {{ ider_info.port }}.
+          handshake={{ ider_result.handshake }}, error={{ ider_result.error }},
+          resolved_media_port={{ nested_obs['amt-target-a.invalid'].resolved_media_port }}.
+          If handshake is false and the media port resolved correctly, amt_media was given
+          the port but could not use it; if resolved_media_port is empty, attach_media.yml
+          is not forwarding it. rc={{ nested_run.rc }}. Nested output tail:
+          {{ nested_tail }}
+      vars:
+        media_ider_state_on_disk: "{{ lookup('ansible.builtin.file', scratch_dir.path ~ '/state/media_ider_port/127.0.0.1.json') | from_json }}"
+
+    - name: Confirm the media session left no state file behind in the runtime directory
+      ansible.builtin.find:
+        paths: "{{ scratch_dir.path }}/media-runtime"
+        patterns: "*.json"
+      register: media_runtime_leftovers
+      delegate_to: localhost
+
+    - name: Assert the detach cleaned up amt_media's own session state file
+      ansible.builtin.assert:
+        that:
+          - media_runtime_leftovers.matched == 0
+        fail_msg: >-
+          amt_media's session state file was left behind, which means the role's always
+          block did not detach the session it attached. Found:
+          {{ media_runtime_leftovers.files | map(attribute='path') | list }}
+
+    # ------------------------------------------------------------------------------
+    # (11) A failed attach must not orphan the IDE-R session it spawned.
+    #
+    # amt_media's state=attached forks a detached daemon that owns the connection, and
+    # that daemon outlives a failed attach by construction. The role used to record the
+    # session id only from a *successful* attach's result -- and amt_media generates its
+    # own id when the caller passes none -- so a failed attach left run state with
+    # session_id=null, detach_media.yml's `when: ... is truthy` skipped, and the role
+    # orphaned the very daemon whose existence the failure was reporting. IDE-R being
+    # single-session, that orphan also wedges the endpoint against the next attempt.
+    #
+    # The leak is observable on the filesystem, which is what this scenario asserts
+    # against rather than anything self-reported: amt_media's attach path writes a state
+    # file at "<runtime_dir>/<session_id>.json" before it connects, and does not remove it
+    # when the attach fails. Only state=detached removes it. So a leftover *.json in the
+    # runtime directory after a failed attach *is* the orphan, and an empty runtime
+    # directory is proof the always-detach genuinely ran.
+    #
+    # Note what is deliberately NOT asserted here: `detached` in the run state is useless
+    # as evidence, because amt_baremetal_install_default_state starts it at true. A fresh
+    # failed run has detached=true whether or not the detach ever happened.
+    #
+    # The media port points at a port nothing is listening on, so the daemon spawns,
+    # fails to connect, and dies -- deterministic, fast, and needs no mock IDE-R server.
+    # See the note in the PR description about why the "daemon still alive when
+    # attach_timeout expires" variant cannot be expressed against amt_media as it stands.
+    - name: Scenario 17 -- a failed media attach does not orphan the session it spawned
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: media_attach_orphan
+        scenario_inventory: "{{ nested_dir }}/inventory_one_host.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_port': plain_info.port,
+               'amt_baremetal_install_boot_provider': 'ider_cdrom',
+               'amt_baremetal_install_media_port': closed_port,
+               'amt_baremetal_install_iso_path': media_allowed_dir ~ '/boot.iso',
+               'amt_baremetal_install_media_attach_timeout': 10,
+               'amt_baremetal_install_media_detach_timeout': 15,
+               'amt_baremetal_install_media_runtime_dir': scratch_dir.path ~ '/media-runtime-orphan',
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/media_attach_orphan',
+             }) }}
+
+    - name: Look for an IDE-R session state file the failed attach may have left behind
+      ansible.builtin.find:
+        paths: "{{ scratch_dir.path }}/media-runtime-orphan"
+        patterns: "*.json"
+        file_type: file
+      register: orphaned_session_files
+      delegate_to: localhost
+
+    - name: Assert the failed attach was recorded against a known session id and cleaned up
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc != 0
+          - nested_obs['amt-target-a.invalid'].outcome == 'failed'
+          # The attach genuinely failed at the connection, so a daemon really was spawned.
+          # Asserted against failed_msg rather than failed_error_class because the role's
+          # rescue re-raises through ansible.builtin.fail (tasks/main.yml), so
+          # ansible_failed_result at the nested play's level is that fail task, not
+          # amt_media's result. record_failure.yml folds the module's error_class into the
+          # message it builds, which is what survives -- same as scenario 14 asserts.
+          - "'error_class=connection' in nested_obs['amt-target-a.invalid'].failed_msg"
+          - "'amt_media attach failed' in nested_obs['amt-target-a.invalid'].failed_msg"
+          # The fix: the role claimed and persisted a session id BEFORE the attach, so it
+          # knows what to detach even though the attach never returned an id to it.
+          - nested_obs['amt-target-a.invalid'].run_state.session_id is truthy
+          - orphan_state_on_disk.session_id is truthy
+          # ...and the attach is still honestly recorded as never confirmed. Claiming the
+          # id early must not make a failed attach look like a successful one to a resumed
+          # run.
+          - nested_obs['amt-target-a.invalid'].run_state.media_attached == false
+          - orphan_state_on_disk.media_attached == false
+          # The leak itself, measured on the filesystem: state=detached is the only thing
+          # that removes this file, so an empty runtime directory proves the always-detach
+          # ran. Pre-fix this directory retained the orphaned session's state file.
+          - orphaned_session_files.matched == 0
+          # Nothing past the media phase happened, so the machine was never touched.
+          - nested_obs['amt-target-a.invalid'].run_state.boot_armed == false
+          - nested_obs['amt-target-a.invalid'].run_state.reset_issued == false
+          - nested_obs['amt-target-a.invalid'].power_action is none
+        fail_msg: >-
+          A failed media attach orphaned its IDE-R session. session_id in run state was
+          {{ nested_obs['amt-target-a.invalid'].run_state.session_id | default('(absent)') }};
+          leftover session state files:
+          {{ orphaned_session_files.files | map(attribute='path') | list }}.
+          If session_id is null the role never claimed one before the attach, so
+          detach_media.yml was skipped and amt_media's daemon was left holding the session
+          -- which for a single-session protocol also blocks the next attempt.
+          rc={{ nested_run.rc }}. Nested output tail:
+          {{ nested_tail }}
+      vars:
+        orphan_state_on_disk: "{{ lookup('ansible.builtin.file', scratch_dir.path ~ '/state/media_attach_orphan/127.0.0.1.json') | from_json }}"
+
+    - name: Assert the failure output names the session id an operator would need to clean up
+      # A failure that strands a session the operator cannot name is worse than one that
+      # names it. record_failure.yml reports the id and runtime directory on every
+      # failure, so the recovery path is in the output the operator already has.
+      ansible.builtin.assert:
+        that:
+          - nested_obs['amt-target-a.invalid'].run_state.session_id in nested_run.stdout
+          - "'media_session_id' in nested_run.stdout"
+          - "'manual_detach_hint' in nested_run.stdout"
+        fail_msg: >-
+          The role failed without naming the media session id in its output, so an
+          operator whose detach also failed has no way to find the stranded session.
+          Nested output tail:
+          {{ nested_tail }}
+
     - name: Assert nothing in this target ever wrote to the real home directory
       # Every nested run had HOME redirected into the scratch tree, and every scenario
       # overrode the role's state and media-session directories. This confirms both.
@@ -928,6 +1326,15 @@
       delegate_to: localhost
       failed_when: false
       changed_when: false
+
+    - name: Stop the mock IDE-R server
+      # Guarded by `is defined` because this one is started partway through the block
+      # above, so an earlier scenario failing means it was never launched.
+      ansible.builtin.command: "kill {{ ider_pid }}"
+      delegate_to: localhost
+      failed_when: false
+      changed_when: false
+      when: ider_pid is defined
 
     - name: Remove the scratch directory
       ansible.builtin.file:
