@@ -23,6 +23,23 @@ polls for. The exact write payload is supplied by the caller (``--write-payload-
 never invented here, so the playbook's later assertion that the payload landed in the
 backing image file on disk is checking a value it already knew, not trusting this
 script's self-report.
+
+Fault injection follows ``run_wsman_mock.py``'s convention exactly: **start-up flags,
+never a control channel**. Nothing here lets a task reach into an already-running mock
+and flip a switch, so every running server's behaviour is fixed for its whole lifetime
+and a failure stays attributable to one endpoint's configuration. A target that needs a
+fault starts a second mock process configured that way.
+
+Most IDE-R faults need no flag at all, because they are properties of what the *client*
+does: a wrong password fails the redirection-plane digest on the first exchange. The
+feature-toggle flags below are the other kind -- properties of the endpoint, unreachable
+by anything a client can do to it. ``--refuse-feature-toggle`` is firmware that opens the
+session and then declines to engage IDE-R; ``--withhold-feature-toggle`` is firmware that
+never answers either way. They are mutually exclusive and deliberately separate, because
+they are not the same fault: a refusal is a definite "no media is being served", while
+withholding leaves that genuinely unknown and can only be ended by a bounded wait. A
+client that collapses them into one failure has lost the distinction between "stop, this
+endpoint cannot do this" and "stop, this endpoint did not say".
 """
 
 from __future__ import annotations
@@ -79,7 +96,38 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--write-payload-b64", default=None, help="If set, WRITE_10 this payload (base64) to the floppy device once connected")
     parser.add_argument("--write-lba", type=int, default=0)
     parser.add_argument("--write-frame-size", type=int, default=0, help="0 means one single DATA_FROM_HOST frame carrying the whole payload")
+    toggle = parser.add_mutually_exclusive_group()
+    toggle.add_argument(
+        "--refuse-feature-toggle",
+        action="store_true",
+        help=(
+            "Report failure for the IDE-R feature toggle (STATUS_DATA type 3 / REGS_TOGGLE), standing in for "
+            "firmware that opens the redirection session and then declines to engage IDE-R -- no media is served"
+        ),
+    )
+    toggle.add_argument(
+        "--withhold-feature-toggle",
+        action="store_true",
+        help=(
+            "Never send the STATUS_DATA REGS_TOGGLE frame at all, standing in for firmware that leaves the "
+            "toggle outcome unreported -- whether media is served is unknown rather than known-bad"
+        ),
+    )
     return parser.parse_args()
+
+
+#: What STATUS_DATA type 3 (REGS_TOGGLE) reports. 1 accepted, 0 refused, None never sent.
+#: See ``ider_server.IderMockServer``'s class docstring for why all three are distinct.
+_TOGGLE_ACCEPTED = 1
+_TOGGLE_REFUSED = 0
+
+
+def _feature_toggle_status(args: argparse.Namespace) -> int | None:
+    if args.refuse_feature_toggle:
+        return _TOGGLE_REFUSED
+    if args.withhold_feature_toggle:
+        return None
+    return _TOGGLE_ACCEPTED
 
 
 def _drive_read(server, info: dict, args: argparse.Namespace) -> None:
@@ -125,6 +173,9 @@ def main() -> None:
         use_tls=args.use_tls,
         readbfr=args.readbfr,
         writebfr=args.writebfr,
+        # Set before start(): this describes what this endpoint *is*, so it must hold for
+        # the endpoint's whole lifetime rather than changing under a running client.
+        feature_toggle_status=_feature_toggle_status(args),
     ).start()
 
     info = {

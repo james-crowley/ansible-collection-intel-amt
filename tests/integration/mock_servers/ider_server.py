@@ -390,6 +390,35 @@ class IderMockServer:
             reply = server.next_event()
 
     Binds an ephemeral TCP port on 127.0.0.1 only, one session at a time.
+
+    **Fault injection.** Like the WS-Man mock's :class:`wsman_server.FaultConfig`, the
+    knobs below describe what this *endpoint is*, so they are constructor arguments set
+    before :meth:`start` rather than switches a running client can flip -- a server that
+    changed its answers mid-session would make a failure unattributable. Two of them
+    concern the IDE-R feature toggle, which is the one place where "the session is open"
+    and "firmware agreed to redirect media" are separate wire facts:
+
+    ``start_session_status``
+        Non-zero makes ``0x11`` StartRedirectionSessionReply report failure and aborts
+        the handshake, standing in for a redirection plane that is reachable but refuses
+        to open a session at all.
+
+    ``feature_toggle_status``
+        What ``0x49`` STATUS_DATA type 3 (REGS_TOGGLE) reports for the client's
+        ``0x48`` DISABLE_ENABLE_FEATURES, or :data:`None` to never answer it. Three
+        distinguishable endpoint behaviours, because the client must distinguish them:
+
+        * ``1`` -- accepted. Media is being served. The default, and the only value any
+          happy-path scenario should use.
+        * ``0`` (any non-1 value) -- **refused**. Firmware opened the session and then
+          declined to engage IDE-R, so nothing is serving the media even though the
+          connection is live and authenticated. A client that reports this as
+          "attached" leads its caller to arm a one-time boot and reset a machine into
+          media that does not exist.
+        * ``None`` -- **withheld**: the toggle request is read and simply never
+          answered. Not the same fault as a refusal, and not the same classification: a
+          refusal is definite, whereas withholding leaves whether media is served
+          genuinely unknown, and only a bounded wait can end it.
     """
 
     AUTH_URI = "/RedirectionService"
@@ -407,7 +436,7 @@ class IderMockServer:
         writebfr: int = 1024,
         proto: int = 0,
         start_session_status: int = 0,
-        feature_toggle_status: int = 1,
+        feature_toggle_status: int | None = 1,
     ) -> None:
         self.username = username
         self.password = password
@@ -624,6 +653,15 @@ class IderMockServer:
             raise ProtocolViolation(f"expected DISABLE_ENABLE_FEATURES (0x48) at seq {self._expected_in_seq}, got cmd={cmdid:#x} seq={seq}")
         reader.recv_exact(5)
         self._expected_in_seq = 2
+        if self.feature_toggle_status is None:
+            # Withhold the verdict: the toggle request has been consumed off the wire
+            # (so the client's framing stays in sync and the session is genuinely open),
+            # but no STATUS_DATA ever comes back. The handshake is still complete from
+            # the mock's point of view -- wait_for_handshake() returns, and the reader
+            # loop below runs normally -- because from firmware's side nothing failed.
+            # It is the *client* that is left holding an unanswered question, which is
+            # exactly the condition under test.
+            return
         self._send_frame(0x49, encode_status_data(3, self.feature_toggle_status))
 
     def wait_for_handshake(self, timeout: float = 5.0) -> None:
