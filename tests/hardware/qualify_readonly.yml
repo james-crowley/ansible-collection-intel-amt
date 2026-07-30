@@ -91,6 +91,69 @@
         mode: "0600"
       delegate_to: localhost
 
+    # ---------------------------------------------------------------------
+    # Hardware/asset inventory, new in 0.5.0. A second amt_info call rather
+    # than widening the first, because the first one's evidence file is the
+    # baseline every earlier run is compared against and its shape should not
+    # move. This one is read-only in exactly the same way -- gather_subset only
+    # ever adds Get/Enumerate reads -- so it stays inside stage 1 rather than
+    # earning a stage number of its own.
+    #
+    # This is the first time any real firmware has been asked for these fields.
+    # Everything under amt.hardware is Tier 2 until this stage runs: the value
+    # tables come from go-wsman-messages and the DMTF schema, which establishes
+    # what a value MEANS but not that firmware returns it at all. What this
+    # stage can promote is existence and shape. It cannot confirm a decoded name
+    # is right -- only the machine's own label or MEBx can do that -- which is
+    # why the raw integer travels alongside every decoded name.
+    - name: "Stage 1b: hardware/asset inventory (read-only)"
+      block:
+        - name: Gather hardware inventory facts
+          james_crowley.intel_amt.amt_info:
+            host: "{{ amt_host }}"
+            username: "{{ amt_username }}"
+            password: "{{ amt_password }}"
+            tls_fingerprint: "{{ amt_tls_fingerprint }}"
+            gather_subset:
+              - config
+              - hardware
+          delegate_to: localhost
+          no_log: true
+          register: amt_hw
+      rescue:
+        - name: Report the redacted failure detail for the inventory read
+          ansible.builtin.debug:
+            msg:
+              error_class: "{{ ansible_failed_result.error_class | default('none') }}"
+              endpoint: "{{ ansible_failed_result.endpoint | default('none') }}"
+              operation: "{{ ansible_failed_result.operation | default('none') }}"
+              message: "{{ ansible_failed_result.msg | default('none') }}"
+        - name: Fail with the inventory error class named
+          ansible.builtin.fail:
+            msg: >-
+              Hardware inventory read failed:
+              error_class={{ ansible_failed_result.error_class | default('unknown') }}
+
+    - name: Report which inventory groups the firmware actually populated
+      ansible.builtin.debug:
+        msg:
+          gathered: "{{ amt_hw.amt.hardware.keys() | list if amt_hw.amt.hardware is mapping else 'hardware key absent' }}"
+          # null here is the finding worth having: it means the class exists in
+          # our reader but this firmware did not return it, which no mock can
+          # tell us.
+          system: "{{ 'populated' if (amt_hw.amt.hardware.system | default(none)) is not none else 'null' }}"
+          processor: "{{ 'populated' if (amt_hw.amt.hardware.processor | default(none)) is not none else 'null' }}"
+          memory_modules: "{{ (amt_hw.amt.hardware.memory | default([])) | length }}"
+          storage_devices: "{{ (amt_hw.amt.hardware.storage | default([])) | length }}"
+          wsman_requests: "{{ amt_hw.operation.wsman_requests_estimated | default('not reported') }}"
+
+    - name: Record hardware inventory evidence for this target
+      ansible.builtin.copy:
+        content: "{{ amt_hw.amt | to_nice_json }}\n"
+        dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_hardware_inventory.json"
+        mode: "0600"
+      delegate_to: localhost
+
     - name: Remind the operator what amt_expected_uuid is for, if it is still unset
       ansible.builtin.debug:
         msg: >-

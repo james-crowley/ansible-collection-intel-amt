@@ -1,0 +1,14 @@
+---
+minor_changes:
+  - "tests/hardware/qualify_readonly.yml - add a read-only stage 1b that gathers the 0.5.0 hardware inventory subsets
+    against real firmware and records its own evidence file. Until this runs, everything under C(amt.hardware) is Tier 2:
+    the value tables establish what a value MEANS, never that firmware returns it at all. The stage reports which groups
+    came back populated versus C(null), which is the finding no mock can produce."
+
+bugfixes:
+  - "tests/hardware/redact-evidence.py - redact serial numbers and asset tags. The 0.5.0 inventory facts put
+    C(serial_number), board and DIMM serials, and C(asset_tag) into evidence artifacts, and the redactor had no concept
+    of them -- so a hardware run would have published them. A serial is arguably the most identifying value AMT reports:
+    it is what a vendor keys a warranty and a support case on, and unlike an address it never changes. These match no
+    general pattern -- a serial is indistinguishable from a firmware version or part number -- so they are caught by key
+    rather than by regex. Model, manufacturer and every decoded enum are deliberately preserved as diagnostic."
