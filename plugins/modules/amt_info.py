@@ -51,9 +51,12 @@ options:
         module returned before 0.5.0.
       - >-
         V(system) reads C(CIM_Chassis) and C(CIM_Card) -- the system serial
-        number, model and manufacturer, plus the baseboard's own serial. B(Two)
-        C(Get) requests, or up to six on firmware where those C(Get)s fault and
-        the C(Enumerate) fallback runs.
+        number, model and manufacturer, plus the baseboard's model, manufacturer,
+        version and its own serial. B(Two) C(Get) requests, or up to six on
+        firmware where those C(Get)s fault and the C(Enumerate) fallback runs.
+        Note the baseboard serial is B(empty on both lab machines) even though the
+        rest of C(CIM_Card) populates -- treat it as optional. See
+        C(docs/amt_info.md).
       - >-
         V(processor) reads C(CIM_Processor) and C(CIM_Chip). Both, always:
         C(CIM_Processor) carries clocks, socket and stepping but identifies the
