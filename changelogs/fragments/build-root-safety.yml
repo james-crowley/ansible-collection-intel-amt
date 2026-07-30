@@ -1,9 +1,0 @@
----
-bugfixes:
-  - "scripts/setup-collection-tree.sh - refuse to C(rm -rf) a build root this script did not create. The path came from
-    caller-supplied C(COLLECTION_BUILD_ROOT) and the only validation was a C(-n) test, so a one-character mistake such as
-    C(COLLECTION_BUILD_ROOT=$HOME) deleted a home directory wholesale. A marker file now gates the delete."
-  - "scripts/setup-collection-tree.sh - refuse to stage into a build root a live process is still using. The default root
-    is keyed on the repository path, which separates different checkouts but does nothing for two processes staging the
-    SAME checkout -- the common case when several agents or terminals share one clone. The second run's C(rm -rf) landed
-    while the first was mid-test, producing failures that named files from the wrong tree. It now fails with the remedy."
