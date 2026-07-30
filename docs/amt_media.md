@@ -219,10 +219,32 @@ as well as whether the task itself failed.
   whatever host the module runs on (normally the controller, via `delegate_to:
   localhost`); running attach and detach from different controllers/users will not
   find each other's sessions.
-- **`attach_timeout` is an early-confirmation bound, not an attach deadline.** A slow
-  but eventually-successful attach that exceeds it is not reported as a failure —
-  `session_state` may still read `starting`; poll again with a repeated
-  `state=attached` call for the same `session_id`.
+- **`attach_timeout` is an attach deadline.** If it expires with no verdict — the
+  daemon still running but never having reported `attached` — the module **fails**
+  with `error_class: timeout` and `indeterminate: true`, and the receipt still carries
+  the `session_id`.
+
+  This reverses what this module did before 0.4.0, and the reversal is deliberate.
+  Previously such an attach returned **success** with `session_state: starting`, on
+  the reasoning that a slow-but-working attach should not be failed. The problem is
+  what a caller does next: it arms a one-time boot and resets the machine, into media
+  that may never have been served. Reporting success for an unconfirmed attach is the
+  worst available outcome for a module whose whole job is serving boot media.
+
+  `indeterminate: true` carries this collection's usual meaning — the operation may
+  have taken effect, so **re-probe rather than retry**. The re-probe is a repeated
+  `state=attached` call for the same `session_id`, which takes the idempotency path
+  and reports what the daemon has since published. Do not blindly retry: IDE-R is
+  single-session, so a second attach collides with a daemon that may still be holding
+  the first.
+
+  A genuinely slow endpoint should be given a larger `attach_timeout` rather than
+  having its unconfirmed attaches treated as successes.
+
+  The module does **not** tear the session down for you. That is deliberate too: the
+  session log is removed alongside the state file, so an automatic teardown would
+  delete the only record of how far the attach got — and `indeterminate` promises
+  something left to inspect.
 - **Hardware-qualified against AMT 16.1.30 and AMT 19.0.5**, and this module carries
   the most protocol surface of the five (the entire IDE-R/SCSI emulation in
   `plugins/module_utils/ider.py`). In stage 5 the native Python IDE-R engine served
