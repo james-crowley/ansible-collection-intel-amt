@@ -2,37 +2,89 @@
 
 **Topics**
 
-- <a href="#v0-4-0">v0\.4\.0</a>
+- <a href="#v0-5-0">v0\.5\.0</a>
     - <a href="#release-summary">Release Summary</a>
     - <a href="#minor-changes">Minor Changes</a>
+    - <a href="#known-issues">Known Issues</a>
+- <a href="#v0-4-0">v0\.4\.0</a>
+    - <a href="#release-summary-1">Release Summary</a>
+    - <a href="#minor-changes-1">Minor Changes</a>
     - <a href="#breaking-changes--porting-guide">Breaking Changes / Porting Guide</a>
     - <a href="#bugfixes">Bugfixes</a>
 - <a href="#v0-3-1">v0\.3\.1</a>
-    - <a href="#release-summary-1">Release Summary</a>
+    - <a href="#release-summary-2">Release Summary</a>
     - <a href="#bugfixes-1">Bugfixes</a>
 - <a href="#v0-3-0">v0\.3\.0</a>
-    - <a href="#release-summary-2">Release Summary</a>
-    - <a href="#minor-changes-1">Minor Changes</a>
-    - <a href="#security-fixes">Security Fixes</a>
-    - <a href="#bugfixes-2">Bugfixes</a>
-    - <a href="#known-issues">Known Issues</a>
-    - <a href="#new-modules">New Modules</a>
-- <a href="#v0-2-0">v0\.2\.0</a>
     - <a href="#release-summary-3">Release Summary</a>
     - <a href="#minor-changes-2">Minor Changes</a>
-    - <a href="#bugfixes-3">Bugfixes</a>
-- <a href="#v0-1-0">v0\.1\.0</a>
+    - <a href="#security-fixes">Security Fixes</a>
+    - <a href="#bugfixes-2">Bugfixes</a>
+    - <a href="#known-issues-1">Known Issues</a>
+    - <a href="#new-modules">New Modules</a>
+- <a href="#v0-2-0">v0\.2\.0</a>
     - <a href="#release-summary-4">Release Summary</a>
     - <a href="#minor-changes-3">Minor Changes</a>
+    - <a href="#bugfixes-3">Bugfixes</a>
+- <a href="#v0-1-0">v0\.1\.0</a>
+    - <a href="#release-summary-5">Release Summary</a>
+    - <a href="#minor-changes-4">Minor Changes</a>
     - <a href="#breaking-changes--porting-guide-1">Breaking Changes / Porting Guide</a>
     - <a href="#security-fixes-1">Security Fixes</a>
     - <a href="#bugfixes-4">Bugfixes</a>
     - <a href="#new-modules-1">New Modules</a>
 
+<a id="v0-5-0"></a>
+## v0\.5\.0
+
+<a id="release-summary"></a>
+### Release Summary
+
+Adds hardware and asset inventory to <code>amt\_info</code>\: serial number\, model\,
+manufacturer\, CPUs\, per\-DIMM memory\, and disks\.
+
+The reason this matters more than an ordinary fact addition is <em>when</em> AMT can answer\.
+It runs beneath the operating system\, so it will tell you a machine\'s serial number
+while that machine is <strong>powered off</strong>\, or before any OS has been installed on it\. For
+a host with no agent to ask\, AMT is the only source of truth — which is exactly the
+situation this collection is always in\.
+
+Selected with a new <code>gather\_subset</code> option using the vocabulary you already know
+from <code>ansible\.builtin\.setup</code>\, including <code>all</code>\, <code>min</code> and <code>\!</code>\-negation\, so
+<code>\[\'all\'\, \'\!storage\'\]</code> behaves as expected\.
+
+<strong>It deliberately differs from \`\`setup\`\` on one point\: the default is the pre\-0\.5\.0
+fact set\, not \`\`all\`\`\.</strong> Inventory costs extra WS\-Man round trips\, and no existing
+caller should get slower for facts it never asked for\. If you do not opt in\, both the
+return shape and the request count are unchanged\. The operation receipt also now
+reports <code>wsman\_requests\_estimated</code> so that cost is visible rather than implied\.
+
+<strong>These facts are Tier 2 and not hardware\-verified\.</strong> No qualification stage reads
+them\, so no real firmware has returned any of these fields to this collection\. The
+value tables behind them come from Intel\'s <code>go\-wsman\-messages</code> and the DMTF schema
+only — never from a hardware dump\, because a dump proves a value was <em>returned</em> and
+never what it <em>means</em>\. That distinction is what inverted <code>wake\_on\_lan\_capable</code> for
+two releases\, and every decoded name here carries its raw integer alongside so a
+wrong label stays diagnosable\.
+
+Unit tests 1078 to 1687\.
+
+<a id="minor-changes"></a>
+### Minor Changes
+
+* amt\_info \- C\(gather\_subset\) uses the same vocabulary as M\(ansible\.builtin\.setup\)\, including V\(all\)\, V\(min\) and C\(\!\)\-negation\, so C\(\[\'all\'\, \'\!storage\'\]\) works as a reader of C\(setup\) would expect\. It deliberately differs from C\(setup\) on one point\: the B\(default is the pre\-0\.5\.0 fact set\)\, not V\(all\)\. Inventory costs extra WS\-Man round trips\, and no existing caller should get slower for facts it never asked for\. Both shape and cost stay unchanged for anyone who does not opt in\.
+* amt\_info \- add hardware/asset inventory under C\(amt\.hardware\)\, selected with a new C\(gather\_subset\) option\: serial\, model and manufacturer from C\(CIM\_Chassis\) and C\(CIM\_Card\)\, CPUs from C\(CIM\_Processor\)\, per\-DIMM capacity and speed from C\(CIM\_PhysicalMemory\)\, and disks from C\(CIM\_MediaAccessDevice\)\. AMT answers these with the machine B\(powered off\)\, which is what makes it the only source for a serial number on a host with no OS installed yet\.
+* amt\_info \- every decoded DMTF enum reports its raw integer alongside the name\, and an unrecognised value renders as C\(unknown\(\<raw\>\)\) rather than a bare C\(unknown\)\. Value tables come from C\(go\-wsman\-messages\) and the DMTF schema only\, never from a hardware dump \-\- a dump proves a value was returned\, never what it means\, which is the mistake that inverted C\(wake\_on\_lan\_capable\) for two releases\.
+* amt\_info \- the operation receipt gains C\(wsman\_requests\_estimated\)\, the best\-case HTTP request count for the resolved subsets\. Best\-case is load\-bearing\: a faulting C\(Get\) costs a further C\(Enumerate\)/C\(Pull\) pair\.
+
+<a id="known-issues"></a>
+### Known Issues
+
+* amt\_info \- the hardware inventory subsets are Tier 2 in C\(docs/capability\-matrix\.md\)\: mock\-tested and fixture\-derived\, and B\(not\) hardware\-verified\. No qualification stage reads them\, so no real firmware has returned any of these fields to this collection\.
+
 <a id="v0-4-0"></a>
 ## v0\.4\.0
 
-<a id="release-summary"></a>
+<a id="release-summary-1"></a>
 ### Release Summary
 
 A correctness release\. No new modules\; the work went into finding and fixing things
@@ -72,7 +124,7 @@ the media\-session daemon lifecycle was false when written\.
 Unit tests 902 to 1070\; branch coverage 85\% to 92\%\, with the two least\-covered files
 — which were also the two highest\-consequence ones — going 50\% to 81\% and 75\% to 92\%\.
 
-<a id="minor-changes"></a>
+<a id="minor-changes-1"></a>
 ### Minor Changes
 
 * <code>amt\_baremetal\_install</code> role \- add C\(amt\_baremetal\_install\_media\_port\)\, the IDE\-R/redirection\-plane port for the media phase\, falling back to a conventional C\(amt\_media\_port\) inventory variable like the role\'s other connection options\. C\(tasks/attach\_media\.yml\) forwarded every connection option to M\(james\_crowley\.intel\_amt\.amt\_media\) except C\(port\)\, and the role had no media\-port variable at all\, so an IDE\-R session could only ever reach the stock redirection ports \(V\(16995\) with TLS\, V\(16994\) without\) \-\- an operator whose endpoints redirect elsewhere could not use the role\. Note this is deliberately a separate variable from C\(amt\_baremetal\_install\_port\)\, which addresses the WS\-Man plane \(V\(16993\)/V\(16992\)\)\: reusing that one would silently aim redirection traffic at the management port\.
@@ -146,7 +198,7 @@ Unit tests 902 to 1070\; branch coverage 85\% to 92\%\, with the two least\-cove
 <a id="v0-3-1"></a>
 ## v0\.3\.1
 
-<a id="release-summary-1"></a>
+<a id="release-summary-2"></a>
 ### Release Summary
 
 Patch release\, and worth taking if you read <code>amt\_info</code>\'s
@@ -181,7 +233,7 @@ No other module is affected\, and no return key was added or removed\.
 <a id="v0-3-0"></a>
 ## v0\.3\.0
 
-<a id="release-summary-2"></a>
+<a id="release-summary-3"></a>
 ### Release Summary
 
 Additive release\. No return shape from 0\.2\.0 changed\, so this is a drop\-in upgrade\.
@@ -224,7 +276,7 @@ does not catch\, and because that workflow is only reachable via a pipeline
 parameter the break survived two releases\. A guard script now fails the lint job on
 any stray double angle bracket\.
 
-<a id="minor-changes-1"></a>
+<a id="minor-changes-2"></a>
 ### Minor Changes
 
 * CI \- add a C\(hardware\-limit\) pipeline parameter that restricts the destructive hardware stages to a subset of the rendered inventory as an Ansible C\(\-\-limit\) pattern\. The stage playbooks target C\(hosts\: amt\_targets\)\, so without it a run authorised for one machine power\-cycles every machine in the lab\. Empty keeps the previous behaviour\. The flag is derived once by a shared C\(export\-hardware\-limit\) command rather than per job\, so a stage cannot silently omit it and widen the blast radius\.
@@ -267,7 +319,7 @@ any stray double angle bracket\.
 * docs/maintainer\-setup\.md \- record that machine 1 was re\-run and the v0\.2\.0 facts are confirmed on both firmware generations\. It still listed that re\-run as a remaining action and stated the facts had only ever been read on one generation\, both of which contradicted the capability matrix\.
 * tests/hardware/qualify\_checkmode\.yml \- write the stage\-3 evidence file\. The playbook runs under C\(\-\-check\) by design \(it asserts C\(ansible\_check\_mode\)\)\, which also made its own C\(copy\) task a no\-op\, so stage 3 was the one stage that left no reviewable record of the plans it computed\. C\(check\_mode\: false\) on that task fixes it\; the endpoint is still never touched\, because every AMT task in the playbook carries check mode of its own\.
 
-<a id="known-issues"></a>
+<a id="known-issues-1"></a>
 ### Known Issues
 
 * hardware \- C\(tests/hardware/qualify\_checkmode\.yml\) writes no evidence file\. Its C\(ansible\.builtin\.copy\) evidence task carries no C\(check\_mode\: false\) and stage 3 runs under C\(\-\-check\)\, so the C\(\-qualify\_checkmode\.json\) file is never created and never appears in the C\(hardware\-evidence\) artifact\. Observed on the 2026\-07\-29 re\-run\, where a three\-stage run produced two evidence files\. Nothing leaks as a result \-\- a file that does not exist cannot be published \-\- but stage 3 leaves no reviewable record of the plans it computed\.
@@ -281,7 +333,7 @@ any stray double angle bracket\.
 <a id="v0-2-0"></a>
 ## v0\.2\.0
 
-<a id="release-summary-3"></a>
+<a id="release-summary-4"></a>
 ### Release Summary
 
 Additive release\. Nothing in 0\.1\.0\'s return shapes changed\, so this is a drop\-in
@@ -312,7 +364,7 @@ user modules\. <code>docs/capability\-matrix\.md</code> records why\, and the sh
 that each is either a non\-functional stub or capable of stranding the management
 path in a way only a physical MEBx visit recovers\.
 
-<a id="minor-changes-2"></a>
+<a id="minor-changes-3"></a>
 ### Minor Changes
 
 * amt\_info \- derive C\(amt\.network\.wake\_on\_lan\_capable\) from whether C\(LinkPolicy\) contains V\(16\) \(network link always on\)\, and report C\(link\_policy\_names\) decoded alongside the raw list\. An endpoint without V\(16\) does not answer WS\-Man while powered off\, so C\(amt\_power\) with C\(state\=on\) fails there looking exactly like a network fault\; surfacing it read\-only turns that into a diagnosis\. V\(null\)\, not V\(false\)\, when C\(LinkPolicy\) is absent\.
@@ -334,7 +386,7 @@ path in a way only a physical MEBx visit recovers\.
 <a id="v0-1-0"></a>
 ## v0\.1\.0
 
-<a id="release-summary-4"></a>
+<a id="release-summary-5"></a>
 ### Release Summary
 
 First release\. Manages Intel AMT / vPro endpoints from Ansible\: capability
@@ -355,7 +407,7 @@ what is only covered by mock fixtures\, and what remains unproven\. That
 distinction is maintained deliberately\, and the \"still unproven\" list is short
 and specific rather than absent\.
 
-<a id="minor-changes-3"></a>
+<a id="minor-changes-4"></a>
 ### Minor Changes
 
 * Add C\(CONTRIBUTING\.md\) documenting the local verification sequence\, the C\(scripts/setup\-collection\-tree\.sh\) staging requirement \(it copies rather than symlinks\, and C\(COLLECTION\_BUILD\_ROOT\) must be set when several checkouts stage concurrently\)\, conventional commits\, the changelog\-fragment requirement\, and the two gates in front of hardware\-in\-the\-loop tests \([https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/issues/10](https\://github\.com/james\-crowley/ansible\-collection\-intel\-amt/issues/10)\)\.

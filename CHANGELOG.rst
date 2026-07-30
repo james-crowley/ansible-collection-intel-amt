@@ -4,6 +4,54 @@ james\_crowley.intel\_amt Release Notes
 
 .. contents:: Topics
 
+v0.5.0
+======
+
+Release Summary
+---------------
+
+Adds hardware and asset inventory to ``amt_info``: serial number, model,
+manufacturer, CPUs, per-DIMM memory, and disks.
+
+The reason this matters more than an ordinary fact addition is *when* AMT can answer.
+It runs beneath the operating system, so it will tell you a machine's serial number
+while that machine is **powered off**, or before any OS has been installed on it. For
+a host with no agent to ask, AMT is the only source of truth — which is exactly the
+situation this collection is always in.
+
+Selected with a new ``gather_subset`` option using the vocabulary you already know
+from ``ansible.builtin.setup``, including ``all``, ``min`` and ``!``-negation, so
+``['all', '!storage']`` behaves as expected.
+
+**It deliberately differs from ``setup`` on one point: the default is the pre-0.5.0
+fact set, not ``all``.** Inventory costs extra WS-Man round trips, and no existing
+caller should get slower for facts it never asked for. If you do not opt in, both the
+return shape and the request count are unchanged. The operation receipt also now
+reports ``wsman_requests_estimated`` so that cost is visible rather than implied.
+
+**These facts are Tier 2 and not hardware-verified.** No qualification stage reads
+them, so no real firmware has returned any of these fields to this collection. The
+value tables behind them come from Intel's ``go-wsman-messages`` and the DMTF schema
+only — never from a hardware dump, because a dump proves a value was *returned* and
+never what it *means*. That distinction is what inverted ``wake_on_lan_capable`` for
+two releases, and every decoded name here carries its raw integer alongside so a
+wrong label stays diagnosable.
+
+Unit tests 1078 to 1687.
+
+Minor Changes
+-------------
+
+- amt_info - C(gather_subset) uses the same vocabulary as M(ansible.builtin.setup), including V(all), V(min) and C(!)-negation, so C(['all', '!storage']) works as a reader of C(setup) would expect. It deliberately differs from C(setup) on one point: the B(default is the pre-0.5.0 fact set), not V(all). Inventory costs extra WS-Man round trips, and no existing caller should get slower for facts it never asked for. Both shape and cost stay unchanged for anyone who does not opt in.
+- amt_info - add hardware/asset inventory under C(amt.hardware), selected with a new C(gather_subset) option: serial, model and manufacturer from C(CIM_Chassis) and C(CIM_Card), CPUs from C(CIM_Processor), per-DIMM capacity and speed from C(CIM_PhysicalMemory), and disks from C(CIM_MediaAccessDevice). AMT answers these with the machine B(powered off), which is what makes it the only source for a serial number on a host with no OS installed yet.
+- amt_info - every decoded DMTF enum reports its raw integer alongside the name, and an unrecognised value renders as C(unknown(<raw>)) rather than a bare C(unknown). Value tables come from C(go-wsman-messages) and the DMTF schema only, never from a hardware dump -- a dump proves a value was returned, never what it means, which is the mistake that inverted C(wake_on_lan_capable) for two releases.
+- amt_info - the operation receipt gains C(wsman_requests_estimated), the best-case HTTP request count for the resolved subsets. Best-case is load-bearing: a faulting C(Get) costs a further C(Enumerate)/C(Pull) pair.
+
+Known Issues
+------------
+
+- amt_info - the hardware inventory subsets are Tier 2 in C(docs/capability-matrix.md): mock-tested and fixture-derived, and B(not) hardware-verified. No qualification stage reads them, so no real firmware has returned any of these fields to this collection.
+
 v0.4.0
 ======
 
