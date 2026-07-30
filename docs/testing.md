@@ -48,21 +48,51 @@ shorthand and it would overstate coverage by half:
 
 | Job | Python | ansible-core | Cells |
 |---|---|---|---|
-| `sanity` | 3.12 only | 2.17, 2.18, 2.19 | **3** |
-| `units` | 3.10, 3.11, 3.12, 3.13 | 2.17, 2.19 | **6** after excludes |
+| `sanity` | 3.12 only | 2.17, 2.18, 2.19, 2.20, 2.21 | **5** |
+| `units` | 3.10, 3.11, 3.12, 3.13 | 2.17, 2.19, 2.21 | **8** after excludes |
+| `sanity-devel` | 3.13 | `devel` branch | **1**, weekly only — see below |
 
-The `units` excludes are both forced by upstream support ranges, not choice:
-3.13 has no ansible-core 2.17 cell (3.13 controller support arrived in 2.18), and
-3.10 has no 2.19 cell (2.19 requires 3.11+). That leaves six of the eight
-combinations.
+`sanity` covers **every currently-supported upstream core** (2.19, 2.20, 2.21) plus
+the two EOL ones this collection still declares. That second part is an obligation
+rather than a courtesy: the collection requirements state that if a collection
+supports EOL core releases it MUST run sanity against all of them, so `requires_ansible:
+'>=2.17.0'` is what puts 2.17 and 2.18 in this table. Raising the floor would delete
+cells rather than add them — worth knowing, because the intuition runs the other way.
 
-**ansible-core 2.18 has no unit-test cell at all.** It is covered by `sanity`
-across all three core versions, and by the hardware jobs, which pin
-`ansible-core~=2.18.18` in the lab virtualenv (see "Runner Python version"
-below) — so 2.18 is the version the hardware tier actually executes on, while
-the unit tier brackets it from either side. That is a real gap in unit
-coverage, and it is a deliberate cost/coverage trade rather than an oversight:
-adding 2.18 to `units` would take the matrix from six cells to nine or ten.
+Every `units` exclude is forced by an upstream support range, not chosen:
+
+| Excluded | Because |
+|---|---|
+| 3.13 × 2.17 | 3.13 controller support arrived in 2.18 |
+| 3.10 × 2.19 | 2.19 requires Python 3.11+ |
+| 3.10, 3.11 × 2.21 | 2.21 requires Python 3.12+ |
+
+**ansible-core 2.18 and 2.20 have no unit-test cell.** Both are covered by `sanity`,
+and 2.18 additionally by the hardware jobs, which pin `ansible-core~=2.18.18` in the
+lab virtualenv (see "Runner Python version" below) — so 2.18 is the version the
+hardware tier actually executes on, while the unit tier brackets it from either side.
+That is a deliberate cost/coverage trade: a full cross-product would be twenty cells,
+and the versions chosen for `units` are the floor, the middle and the newest, which is
+where a Python-version incompatibility actually shows up.
+
+### The `devel` canary
+
+`sanity-devel` runs `ansible-test sanity` against ansible-core's `devel` branch. It is
+**advisory and weekly, not part of the PR path**, which is deliberate on both counts.
+
+The collection requirements mandate testing against `devel` or `milestone` "in every PR
+or on a scheduled basis of at least once per week", and the weekly option is the right
+one here: `devel` breaks for reasons that are upstream's business, and a red PR check
+nobody can act on teaches people to ignore red checks. It runs on the newest
+interpreter available so that a controller-Python floor rising upstream surfaces as a
+real failure rather than an install error.
+
+The value is **lead time**. New sanity requirements land in `devel` first — the
+boilerplate change that set this collection's 2.17 floor is exactly that kind of event
+— so this is how such a change is found before it becomes a release blocker.
+
+It is triggered by the `run-devel-canary` pipeline parameter, which the weekly schedule
+sets. A failure there is a signal to investigate, never a reason to block a merge.
 
 ### Why `--venv` and not `--docker`
 
