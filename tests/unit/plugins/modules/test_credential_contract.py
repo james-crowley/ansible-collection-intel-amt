@@ -498,9 +498,7 @@ class TestCredentialNeverReachesTheEmittedDocument:
         # `password not in output` assertion while telling us nothing.
         args = dict(CONNECTION_ARGS, port="not-an-int", **REQUIRED_ARGS.get(module_name, {}))
         emitted = emit(module_name, args)
-        assert "invocation" in emitted.document, (
-            f"{module_name} emitted no `invocation` key; see _INJECT_INVOCATION_SUPPORTED"
-        )
+        assert "invocation" in emitted.document, f"{module_name} emitted no `invocation` key; see _INJECT_INVOCATION_SUPPORTED"
         module_args = emitted.document["invocation"]["module_args"]
         assert "password" in module_args
         assert module_args["password"] == "VALUE_SPECIFIED_IN_NO_LOG_PARAMETER"
