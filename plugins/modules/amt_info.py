@@ -18,24 +18,93 @@ description:
     failing the whole read.
   - This module never mutates anything and always reports C(changed=false).
   - >-
-    Round-trip cost. One invocation performs ten WS-Man HTTP requests: eight
-    C(Get) operations plus an C(Enumerate)/C(Pull) pair for
-    C(CIM_SoftwareIdentity). Three of the C(Get)s are new in this release --
-    C(AMT_EthernetPortSettings) instance 0, C(CIM_ComputerSystem) with selector
-    C(Name=ManagedSystem), and C(CIM_BIOSElement). The C(CIM_ComputerSystem)
-    read had previously been removed precisely to save a round trip, when it
-    existed only to source a C(UUID) property that class does not define; it is
-    back because it does define the three state fields under
-    RV(amt.system_state). C(CIM_BIOSElement) may cost one further
+    Hardware/asset inventory (system serial number, model, manufacturer,
+    baseboard, processors, DIMMs and disks) is available through O(gather_subset)
+    and is B(opt-in). Because AMT runs beneath the host operating system, these
+    are readable while the machine is B(powered off) -- which is frequently the
+    only way to get them. Where an agent is running, use M(ansible.builtin.setup)
+    instead; where one is not, AMT is the only source of truth.
+  - >-
+    Round-trip cost. The default O(gather_subset=config) performs ten WS-Man HTTP
+    requests: eight C(Get) operations plus an C(Enumerate)/C(Pull) pair for
+    C(CIM_SoftwareIdentity). C(CIM_BIOSElement) may cost one further
     C(Enumerate)/C(Pull) pair, but only on firmware where the bare C(Get)
-    faults.
+    faults. Each hardware subset adds its own cost on top, listed under
+    O(gather_subset). C(gather_subset=all) costs B(20) requests.
 version_added: 0.1.0
 author:
   - Jim Crowley (@james-crowley)
 extends_documentation_fragment:
   - james_crowley.intel_amt.connection
+options:
+  gather_subset:
+    description:
+      - Which fact subsets to gather, using the same C(!)-negation vocabulary as
+        M(ansible.builtin.setup)'s O(ansible.builtin.setup#module:gather_subset).
+      - >-
+        V(config) is everything this module returned before version 0.5.0 --
+        provisioning state, power state, capabilities, network and system state.
+        It is the default, and it B(cannot be excluded): C(!config) and C(!min)
+        are both inert, exactly as C(!min) is inert in M(ansible.builtin.setup).
+        That is deliberate, and it is what makes this option unable to break an
+        existing caller -- no value of O(gather_subset) can remove a key this
+        module returned before 0.5.0.
+      - >-
+        V(system) reads C(CIM_Chassis) and C(CIM_Card) -- the system serial
+        number, model and manufacturer, plus the baseboard's own serial. B(Two)
+        C(Get) requests, or up to six on firmware where those C(Get)s fault and
+        the C(Enumerate) fallback runs.
+      - >-
+        V(processor) reads C(CIM_Processor) and C(CIM_Chip). Both, always:
+        C(CIM_Processor) carries clocks, socket and stepping but identifies the
+        part only by a C(Family) integer this module does not decode, while
+        C(CIM_Chip.Version) carries the human-readable processor name. B(Four)
+        requests (two C(Enumerate)/C(Pull) pairs).
+      - V(memory) reads C(CIM_PhysicalMemory), one instance per DIMM. B(Two) requests.
+      - V(storage) reads C(CIM_MediaAccessDevice), one instance per disk. B(Two) requests.
+      - V(hardware) is an alias for V(system) + V(processor) + V(memory) + V(storage). B(Ten) requests.
+      - V(all) is V(config) + V(hardware). B(Twenty) requests.
+      - V(min) is V(config).
+      - >-
+        Resolution order matches M(ansible.builtin.setup) exactly. Exclusions are
+        applied B(last), so V(all) with C(!memory) resolves in favour of the
+        exclusion. If the list contains B(no) positive entry -- for example
+        C([!memory]) alone -- every subset is gathered and then the exclusions
+        applied, so C([!memory]) means "everything except memory" and costs
+        B(more) than the default, not less. That is the C(setup) contract and is
+        reproduced rather than second-guessed; pass V(config) explicitly if the
+        default cost is what you want.
+      - >-
+        B(This differs from) M(ansible.builtin.setup) B(in exactly one way): the
+        default. C(setup) defaults to gathering everything; this module defaults
+        to V(config) only. Gathering everything here means ten extra WS-Man round
+        trips against firmware, and no existing caller should start paying for
+        inventory they did not ask for.
+    type: list
+    elements: str
+    default:
+      - config
+    choices:
+      - all
+      - '!all'
+      - min
+      - '!min'
+      - config
+      - '!config'
+      - hardware
+      - '!hardware'
+      - system
+      - '!system'
+      - processor
+      - '!processor'
+      - memory
+      - '!memory'
+      - storage
+      - '!storage'
+    version_added: 0.5.0
 seealso:
   - module: james_crowley.intel_amt.amt_power
+  - module: ansible.builtin.setup
 attributes:
   check_mode:
     description: A full read runs identically in check mode, since this module never mutates firmware state.
@@ -86,6 +155,74 @@ EXAMPLES = r"""
       - amt.amt.network.mac_address == (amt_expected_mac | lower)
     fail_msg: Endpoint evidence disagrees with the reviewed inventory binding; refusing to proceed.
   when: amt_expected_uuid is defined and amt_expected_mac is defined
+
+# Asset inventory. The point of reading it over AMT is that none of this needs
+# the machine to be powered on, or to have an agent installed.
+- name: Read the asset inventory of a powered-off machine
+  james_crowley.intel_amt.amt_info:
+    host: "{{ amt_host }}"
+    username: "{{ amt_username }}"
+    password: "{{ amt_password }}"
+    tls_fingerprint: "{{ amt_tls_fingerprint }}"
+    gather_subset:
+      - hardware
+  delegate_to: localhost
+  no_log: true
+  register: inventory
+
+- name: Record the chassis serial number against this host
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory.amt.hardware.chassis.manufacturer }}
+      {{ inventory.amt.hardware.chassis.model }},
+      chassis serial {{ inventory.amt.hardware.chassis.serial_number }},
+      board serial {{ inventory.amt.hardware.baseboard.serial_number }}
+  when: inventory.amt.hardware.chassis is not none
+
+# Only what a CMDB row needs, at four WS-Man requests rather than twenty.
+- name: Gather just the identity plates and the disks
+  james_crowley.intel_amt.amt_info:
+    host: "{{ amt_host }}"
+    username: "{{ amt_username }}"
+    password: "{{ amt_password }}"
+    tls_fingerprint: "{{ amt_tls_fingerprint }}"
+    gather_subset:
+      - system
+      - storage
+  delegate_to: localhost
+  no_log: true
+  register: cmdb_row
+
+- name: Everything except the per-DIMM detail
+  james_crowley.intel_amt.amt_info:
+    host: "{{ amt_host }}"
+    username: "{{ amt_username }}"
+    password: "{{ amt_password }}"
+    tls_fingerprint: "{{ amt_tls_fingerprint }}"
+    gather_subset:
+      - all
+      - '!memory'
+  delegate_to: localhost
+  no_log: true
+  register: no_dimms
+
+- name: Report installed memory per DIMM slot
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.bank_label }}: {{ (item.capacity_bytes / 1073741824) | round(1) }} GiB
+      {{ item.memory_type_text }} at {{ item.configured_clock_speed_mhz }} MHz
+  loop: "{{ inventory.amt.hardware.memory | default([], true) }}"
+  loop_control:
+    label: "{{ item.bank_label }}"
+
+- name: Fail the play if any disk reports itself write-protected
+  ansible.builtin.assert:
+    that:
+      - "'read_only' not in (item.security_text | default(''))"
+    fail_msg: "{{ item.device_id }} reports Security {{ item.security }} ({{ item.security_text }})"
+  loop: "{{ inventory.amt.hardware.storage | default([], true) }}"
+  loop_control:
+    label: "{{ item.device_id }}"
 """
 
 RETURN = r"""
@@ -361,6 +498,445 @@ amt:
         sol_enabled:
           description: Whether Serial-over-LAN is currently enabled (not merely supported).
           type: bool
+    hardware:
+      description:
+        - >-
+          Hardware/asset inventory. V(null) unless a hardware O(gather_subset)
+          was requested -- which is not the default, so an existing caller sees
+          V(null) here and pays no extra WS-Man round trip.
+        - >-
+          Each key is present B(only) if its subset was requested. So
+          C('memory' in amt.hardware) answers "did I ask for it", while
+          C(amt.hardware.memory is none) answers "does this firmware implement
+          the class". Those are different questions and this shape keeps them
+          apart. A list-valued key that is V([]) is a third, distinct answer:
+          firmware returned B(zero) instances, which is a real reading of a
+          diskless or single-DIMM machine and not a gap.
+        - >-
+          B(Every enumerated property is reported as both a raw integer and a
+          decoded name), following RV(amt.power_state) and
+          RV(amt.system_state.enabled_state). A value outside the table this
+          collection holds renders as V(unknown(<raw>)) -- never a bare
+          V(unknown), because several of these tables define V(0) as
+          C(unknown) and the two findings must not print identically.
+        - >-
+          B(Three properties are reported raw and undecoded on purpose), because
+          no value table for them could be sourced from
+          C(go-wsman-messages) or the DMTF schema:
+          RV(amt.hardware.processors[].family),
+          RV(amt.hardware.memory[].form_factor), and C(requested_state) on both
+          processors and storage. Shipping a raw integer is honest; a guessed
+          label is what this collection spent 0.3.1 undoing. See
+          C(docs/amt_info.md) for the full accounting.
+      type: dict
+      returned: when a hardware gather_subset was requested
+      contains:
+        chassis:
+          description:
+            - >-
+              C(CIM_Chassis) -- the enclosure, and where the B(system serial
+              number) lives. Present when O(gather_subset) includes V(system);
+              V(null) when the firmware does not implement the class.
+            - >-
+              There is B(no asset-tag property) on this class. C(Tag) is
+              reported as RV(amt.hardware.chassis.tag), but on the only recorded
+              real-firmware response it holds the literal string
+              C(CIM_Chassis) -- the class name -- so it is deliberately not
+              named C(asset_tag).
+          type: dict
+          contains:
+            serial_number:
+              description: C(SerialNumber) -- the system serial, readable with the machine powered off.
+              type: str
+            model:
+              description: C(Model).
+              type: str
+            manufacturer:
+              description: C(Manufacturer).
+              type: str
+            version:
+              description: C(Version) -- the chassis part revision, not a software version.
+              type: str
+            tag:
+              description: C(Tag), the DMTF key property. Not an asset tag -- see above.
+              type: str
+            element_name:
+              description: C(ElementName).
+              type: str
+            chassis_package_type:
+              description: Raw C(ChassisPackageType) integer -- the chassis form factor.
+              type: int
+            chassis_package_type_text:
+              description: >-
+                C(ChassisPackageType) decoded, e.g. V(desktop) (3), V(mini_tower) (6),
+                V(notebook) (10), V(all_in_one) (13), V(mini_pc) (35). Thirty-seven
+                values are defined; anything else renders V(unknown(<raw>)).
+              type: str
+            package_type:
+              description: >-
+                Raw C(PackageType) integer. A B(different) enumeration from
+                RV(amt.hardware.chassis.chassis_package_type), which this class carries
+                at the same time.
+              type: int
+            package_type_text:
+              description: C(PackageType) decoded, e.g. V(chassis_frame) (3), V(module_card) (9).
+              type: str
+            operational_status:
+              description: Raw DMTF C(OperationalStatus) values. Always a list.
+              type: list
+              elements: int
+            operational_status_text:
+              description: C(OperationalStatus) decoded element-wise, as RV(amt.system_state.operational_status_text) is.
+              type: list
+              elements: str
+        baseboard:
+          description: >-
+            C(CIM_Card) -- the motherboard and its own serial number, which is
+            distinct from the chassis serial: recording only one cannot tell a
+            board swap from a re-rack. Present when O(gather_subset) includes
+            V(system). Same C(Tag) caveat as RV(amt.hardware.chassis).
+          type: dict
+          contains:
+            serial_number:
+              description: C(SerialNumber) -- the baseboard serial.
+              type: str
+            model:
+              description: C(Model).
+              type: str
+            manufacturer:
+              description: C(Manufacturer).
+              type: str
+            version:
+              description: C(Version).
+              type: str
+            tag:
+              description: C(Tag). Not an asset tag.
+              type: str
+            element_name:
+              description: C(ElementName).
+              type: str
+            can_be_frued:
+              description: C(CanBeFRUed) -- whether this is a field-replaceable unit.
+              type: bool
+            package_type:
+              description: Raw C(PackageType) integer.
+              type: int
+            package_type_text:
+              description: C(PackageType) decoded.
+              type: str
+            operational_status:
+              description: Raw DMTF C(OperationalStatus) values.
+              type: list
+              elements: int
+            operational_status_text:
+              description: C(OperationalStatus) decoded element-wise.
+              type: list
+              elements: str
+        processors:
+          description:
+            - >-
+              C(CIM_Processor), one entry per physical package -- B(not) per
+              core. Present when O(gather_subset) includes V(processor).
+            - >-
+              B(This class carries no core or thread count), on any firmware:
+              AMT's implementation does not expose one, so this module reports
+              none. Nothing here is a substitute for it.
+          type: list
+          elements: dict
+          contains:
+            device_id:
+              description: C(DeviceID), e.g. V(CPU 0). What distinguishes one package from another.
+              type: str
+            element_name:
+              description: C(ElementName).
+              type: str
+            role:
+              description: C(Role) -- a free-form string, e.g. V(Central).
+              type: str
+            family:
+              description: >-
+                Raw C(Family) integer, B(undecoded). C(go-wsman-messages) defines no
+                value map for this property and the DMTF C(Family) ValueMap runs to
+                several hundred entries, so nothing could be sourced. Use
+                RV(amt.hardware.chips[].version) for the processor's actual name.
+              type: int
+            other_family_description:
+              description: C(OtherFamilyDescription) -- set only when C(Family) is V(1) (Other).
+              type: str
+            max_clock_speed_mhz:
+              description: C(MaxClockSpeed), in MHz per the class definition.
+              type: int
+            current_clock_speed_mhz:
+              description: C(CurrentClockSpeed), in MHz.
+              type: int
+            external_bus_clock_speed_mhz:
+              description: C(ExternalBusClockSpeed) -- front-side bus, in MHz.
+              type: int
+            stepping:
+              description: >-
+                C(Stepping) -- a B(free-form string) per the class definition, not an
+                integer. Firmware may report V(13) or V(B0) and both are valid.
+              type: str
+            cpu_status:
+              description: Raw C(CPUStatus) integer.
+              type: int
+            cpu_status_text:
+              description: >-
+                C(CPUStatus) decoded -- V(unknown) (0), V(cpu_enabled) (1),
+                V(cpu_disabled_by_user) (2), V(cpu_disabled_by_bios) (3),
+                V(cpu_is_idle) (4), V(other) (5).
+              type: str
+            upgrade_method:
+              description: Raw C(UpgradeMethod) integer -- the CPU socket.
+              type: int
+            upgrade_method_text:
+              description: >-
+                C(UpgradeMethod) decoded -- 85 defined values, which is what says
+                whether a processor is socketed or soldered. Note V(0) is V(other)
+                and V(1) is V(unknown), the opposite way round from most tables here.
+              type: str
+            health_state:
+              description: Raw C(HealthState) integer.
+              type: int
+            health_state_text:
+              description: >-
+                C(HealthState) decoded -- V(unknown) (0), V(ok) (5),
+                V(degraded_warning) (10), V(minor_failure) (15), V(major_failure) (20),
+                V(critical_failure) (25), V(non_recoverable_error) (30). Sparse by
+                design; values in between are genuinely undefined.
+              type: str
+            enabled_state:
+              description: Raw DMTF C(EnabledState) integer.
+              type: int
+            enabled_state_text:
+              description: >-
+                C(EnabledState) decoded per DMTF, using the same full 0-10 table as
+                RV(amt.system_state.enabled_state_text).
+              type: str
+            requested_state:
+              description: >-
+                Raw C(RequestedState) integer, reported B(undecoded) -- matching how
+                this module already reports RV(amt.system_state.requested_state).
+              type: int
+            operational_status:
+              description: Raw DMTF C(OperationalStatus) values.
+              type: list
+              elements: int
+            operational_status_text:
+              description: C(OperationalStatus) decoded element-wise.
+              type: list
+              elements: str
+        chips:
+          description:
+            - >-
+              C(CIM_Chip). Present when O(gather_subset) includes V(processor),
+              and read for one reason: RV(amt.hardware.chips[].version) is the
+              B(human-readable processor name), which C(CIM_Processor) cannot
+              supply.
+            - >-
+              C(CIM_PhysicalMemory) is a subclass of C(CIM_Chip), so firmware may
+              legitimately return memory chips here alongside processor chips.
+              Instances are reported B(unfiltered) -- filtering would mean
+              asserting which C(ElementName) values firmware uses, which no
+              available evidence establishes. Use
+              RV(amt.hardware.chips[].element_name) to tell them apart.
+          type: list
+          elements: dict
+          contains:
+            version:
+              description: >-
+                C(Version) -- the processor's marketing name, e.g. an
+                V(Intel(R) Core(TM) ...) string. The field this class is read for.
+              type: str
+            tag:
+              description: C(Tag), e.g. V(CPU 0).
+              type: str
+            element_name:
+              description: >-
+                C(ElementName) -- what distinguishes a processor chip from a memory
+                chip in this list.
+              type: str
+            manufacturer:
+              description: C(Manufacturer).
+              type: str
+            can_be_frued:
+              description: C(CanBeFRUed).
+              type: bool
+            operational_status:
+              description: Raw DMTF C(OperationalStatus) values.
+              type: list
+              elements: int
+            operational_status_text:
+              description: C(OperationalStatus) decoded element-wise.
+              type: list
+              elements: str
+        memory:
+          description:
+            - >-
+              C(CIM_PhysicalMemory), one entry per DIMM, in the order firmware
+              returned them. Present when O(gather_subset) includes V(memory).
+              V([]) is a legitimate reading, not a gap.
+            - >-
+              B(Read the speed fields carefully.) C(IsSpeedInMhz) selects which
+              property actually holds the speed, and the two are in B(different
+              units): when it is V(true) the speed is
+              RV(amt.hardware.memory[].max_memory_speed_mhz) in MHz, and when it
+              is V(false) it is RV(amt.hardware.memory[].speed_ns) in
+              nanoseconds. Real firmware has been recorded reporting C(Speed) as
+              V(0) with C(IsSpeedInMhz) V(true), so anything reading C(Speed)
+              naively would report every DIMM as zero. No single derived speed
+              field is offered, because there is no honest value for it in the
+              V(false) branch.
+          type: list
+          elements: dict
+          contains:
+            bank_label:
+              description: C(BankLabel) -- the physically labelled slot, e.g. V(BANK 0).
+              type: str
+            capacity_bytes:
+              description: C(Capacity), in B(bytes) per the class definition.
+              type: int
+            memory_type:
+              description: Raw C(MemoryType) integer.
+              type: int
+            memory_type_text:
+              description: >-
+                C(MemoryType) decoded -- 37 defined values including V(ddr3) (24),
+                V(ddr4) (26), V(ddr5) (34), V(lpddr5) (35).
+              type: str
+            form_factor:
+              description: >-
+                Raw C(FormFactor) integer, B(undecoded). C(go-wsman-messages) defines
+                no map for it, and the two published tables that might apply B(disagree
+                about the value real firmware reports): V(13) is C(SODIMM) under the
+                SMBIOS type-17 enumeration but C(SRIMM) under the DMTF
+                C(CIM_PhysicalMemory.FormFactor) ValueMap. Nothing available settles
+                which, so no name is claimed.
+              type: int
+            speed_ns:
+              description: >-
+                C(Speed), in B(nanoseconds). Meaningful only when
+                RV(amt.hardware.memory[].is_speed_in_mhz) is V(false).
+              type: int
+            max_memory_speed_mhz:
+              description: >-
+                C(MaxMemorySpeed), in B(MHz). The DIMM's rated speed, and the
+                speed field to read when RV(amt.hardware.memory[].is_speed_in_mhz)
+                is V(true).
+              type: int
+            configured_clock_speed_mhz:
+              description: >-
+                C(ConfiguredMemoryClockSpeed), in MHz -- what the DIMM is actually
+                clocked at, which may be below its rated speed.
+              type: int
+            is_speed_in_mhz:
+              description: C(IsSpeedInMhz) -- which of the two speed properties is the real one.
+              type: bool
+            manufacturer:
+              description: >-
+                C(Manufacturer). Firmware has been recorded reporting a JEDEC
+                manufacturer B(ID) here rather than a name; it is passed through
+                verbatim, because no JEDEC ID table could be sourced.
+              type: str
+            part_number:
+              description: C(PartNumber) -- the module part number.
+              type: str
+            serial_number:
+              description: C(SerialNumber) -- this DIMM's own serial.
+              type: str
+            tag:
+              description: C(Tag), the DMTF key property.
+              type: str
+            element_name:
+              description: C(ElementName).
+              type: str
+            operational_status:
+              description: Raw DMTF C(OperationalStatus) values.
+              type: list
+              elements: int
+            operational_status_text:
+              description: C(OperationalStatus) decoded element-wise.
+              type: list
+              elements: str
+        storage:
+          description:
+            - >-
+              C(CIM_MediaAccessDevice), one entry per disk. Present when
+              O(gather_subset) includes V(storage).
+            - >-
+              B(This class carries no model, vendor or serial number), and its
+              C(ElementName) is a constant string on every instance. What
+              distinguishes one disk from another is
+              RV(amt.hardware.storage[].device_id) and
+              RV(amt.hardware.storage[].max_media_size_kb). A disk model number
+              is not obtainable from AMT through this class, and this module does
+              not pretend otherwise.
+          type: list
+          elements: dict
+          contains:
+            device_id:
+              description: C(DeviceID), e.g. V(MEDIA DEV 0). The only per-instance identifier here.
+              type: str
+            element_name:
+              description: C(ElementName) -- a constant string, identifying nothing.
+              type: str
+            max_media_size_kb:
+              description: >-
+                C(MaxMediaSize), in B(KBytes) per the class definition and
+                deliberately B(not) converted: nothing establishes whether firmware
+                means 1000 or 1024 bytes, and a C(_bytes) field would bake that guess
+                in at a 2.4%% error.
+              type: int
+            capabilities:
+              description: Raw C(Capabilities) values. A CIM array, so always a list.
+              type: list
+              elements: int
+            capabilities_text:
+              description: >-
+                C(Capabilities) decoded element-wise -- 13 defined values including
+                V(random_access) (3), V(supports_writing) (4),
+                V(supports_removable_media) (7).
+              type: list
+              elements: str
+            security:
+              description: Raw C(Security) integer.
+              type: int
+            security_text:
+              description: >-
+                C(Security) decoded. B(Note the order): V(other) is V(1) and
+                V(unknown) is V(2), the reverse of most tables here, then V(none) (3),
+                V(read_only) (4), V(locked_out) (5), V(boot_bypass) (6),
+                V(boot_bypass_and_read_only) (7). There is no value V(0).
+              type: str
+            enabled_state:
+              description: Raw DMTF C(EnabledState) integer.
+              type: int
+            enabled_state_text:
+              description: C(EnabledState) decoded per DMTF, same table as elsewhere in this module.
+              type: str
+            enabled_default:
+              description: >-
+                Raw C(EnabledDefault) integer -- the configured startup state, distinct
+                from the live C(EnabledState).
+              type: int
+            enabled_default_text:
+              description: >-
+                C(EnabledDefault) decoded -- V(enabled) (2), V(disabled) (3),
+                V(not_applicable) (5), V(enabled_but_offline) (6), V(no_default) (7),
+                V(quiesce) (9). Sparse: 0, 1, 4 and 8 are undefined and render
+                V(unknown(<raw>)).
+              type: str
+            requested_state:
+              description: Raw C(RequestedState) integer, reported B(undecoded).
+              type: int
+            operational_status:
+              description: Raw DMTF C(OperationalStatus) values.
+              type: list
+              elements: int
+            operational_status_text:
+              description: C(OperationalStatus) decoded element-wise.
+              type: list
+              elements: str
 operation:
   description: >-
     The non-secret C(intel-amt-operation/v1) receipt for this read, in the same nested shape
@@ -400,6 +976,25 @@ operation:
     error_class:
       description: A stable machine-readable failure class. V(null) on success.
       type: str
+    gather_subset:
+      description: >-
+        The O(gather_subset) actually resolved for this read, sorted. Worth
+        checking when C(!)-negation is in play: C([!memory]) resolves to
+        everything but memory, which is more than the default, and this is where
+        that is visible.
+      type: list
+      elements: str
+      version_added: 0.5.0
+      sample: ["config", "memory", "processor", "storage", "system"]
+    wsman_requests_estimated:
+      description: >-
+        Best-case WS-Man HTTP request count for the resolved subsets. B(Best
+        case) is load-bearing -- a C(CIM_BIOSElement) or V(system) C(Get) that
+        faults costs one further C(Enumerate)/C(Pull) pair on top, and an
+        enumeration returning more than 64 instances costs an extra C(Pull) each.
+      type: int
+      version_added: 0.5.0
+      sample: 10
 """
 
 import dataclasses
@@ -408,6 +1003,12 @@ from ansible.module_utils.basic import AnsibleModule, missing_required_lib
 
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.client import AmtClient
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import AmtError
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.hardware import (
+    GATHER_SUBSET_CHOICES,
+    SUBSET_CONFIG,
+    resolve_gather_subset,
+    round_trip_estimate,
+)
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.models import OperationReceipt
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.wsman import HAS_REQUESTS, REQUESTS_IMPORT_ERROR, WsmanClient
 
@@ -425,6 +1026,18 @@ def _connection_argument_spec() -> dict[str, dict]:
         "tls_fingerprint": {"type": "str"},
         "timeout": {"type": "int", "default": 30},
         "connect_timeout": {"type": "int", "default": 10},
+        # Validated by `choices` rather than in module code, so a typo is refused
+        # before a single byte goes on the wire and `ansible-doc` lists the whole
+        # vocabulary. Same treatment as `state` on amt_power/amt_boot. The default
+        # is deliberately NOT `all` -- see the option documentation: gathering
+        # everything costs ten extra WS-Man round trips, and no existing caller
+        # should start paying for inventory they never asked for.
+        "gather_subset": {
+            "type": "list",
+            "elements": "str",
+            "default": [SUBSET_CONFIG],
+            "choices": list(GATHER_SUBSET_CHOICES),
+        },
     }
 
 
@@ -445,9 +1058,14 @@ def build_wsman_client(params: dict) -> WsmanClient:
     )
 
 
-def facts_to_result(client: AmtClient) -> dict:
-    """Gather facts via ``client`` and shape them into this module's C(amt) return key."""
-    facts = client.get_facts()
+def facts_to_result(client: AmtClient, subsets: frozenset[str] | None = None) -> dict:
+    """Gather facts via ``client`` and shape them into this module's C(amt) return key.
+
+    ``subsets`` is a resolved subset set from
+    ``hardware.resolve_gather_subset()``. ``None`` means the default -- exactly
+    the pre-0.5.0 fact set, at exactly the pre-0.5.0 round-trip cost.
+    """
+    facts = client.get_facts(subsets)
 
     power_state = None
     if facts.power_state is not None:
@@ -480,6 +1098,11 @@ def facts_to_result(client: AmtClient) -> dict:
         "network": dataclasses.asdict(facts.network) if facts.network is not None else None,
         "system_state": dataclasses.asdict(facts.system_state) if facts.system_state is not None else None,
         "bios_version": facts.bios_version,
+        # HardwareFacts.to_dict(), not dataclasses.asdict(): the rendered dict
+        # omits keys for subsets that were not requested, which is what keeps
+        # "I did not ask" distinguishable from "firmware has no such class".
+        # asdict() would flatten both to null and lose that.
+        "hardware": facts.hardware.to_dict() if facts.hardware is not None else None,
     }
 
 
@@ -489,10 +1112,14 @@ def main() -> None:
     if not HAS_REQUESTS:
         module.fail_json(msg=missing_required_lib("requests"), exception=REQUESTS_IMPORT_ERROR)
 
+    # Resolved before the client is built, so a subset spec is interpreted with
+    # no connection open. `choices` has already refused anything unrecognised.
+    subsets = resolve_gather_subset(module.params["gather_subset"])
+
     try:
         wsman = build_wsman_client(module.params)
         client = AmtClient(wsman)
-        amt = facts_to_result(client)
+        amt = facts_to_result(client, subsets)
     except AmtError as err:
         module.fail_json(**err.to_result())
         return
@@ -503,6 +1130,14 @@ def main() -> None:
         endpoint=wsman.endpoint,
         changed=False,
         tls_peer_fingerprint=peer_cert.sha256_fingerprint if peer_cert else None,
+        # What this read actually resolved to and what it cost. Belongs on the
+        # receipt rather than under `amt`, which is documented as
+        # firmware-observed evidence -- a request count is neither observed nor
+        # firmware's.
+        extra={
+            "gather_subset": sorted(subsets),
+            "wsman_requests_estimated": round_trip_estimate(subsets),
+        },
     )
     module.exit_json(changed=False, amt=amt, operation=receipt.to_dict())
 

@@ -30,7 +30,15 @@ capability: an event log is emptied by `ClearLog`, so a server that starts empty
 only way to read an empty log *without* first destroying the records another assertion
 in the same target needs. `--amt10-no-enumerate` is the same kind of thing one level up:
 it selects a firmware *generation* rather than one class's behaviour, making `Enumerate`
-HTTP 400 on `AMT_`-prefixed classes the way AMT 10.0.56 does. All are start-up flags
+HTTP 400 on `AMT_`-prefixed classes the way AMT 10.0.56 does. The hardware-inventory
+flags (`--no-hardware-inventory`, `--no-storage-class`, `--hardware-get-faults`,
+`--memory-dimm-count`, `--storage-device-count`) are the same kind of thing: which
+`CIM_` asset classes a firmware implements, how many DIMMs and disks are physically
+fitted, and whether a bare `Get` answers for the two singletons are all properties of
+the endpoint. `--no-storage-class` exists specifically to prove the fact groups degrade
+*independently* -- a firmware AMT cannot enumerate disks on must still report its DIMMs
+and its serial number, and a single all-or-nothing flag could not tell that apart from
+a client that gives up on the first fault. All are start-up flags
 rather than a control channel -- a
 target that needs them starts a second mock process configured that way, which keeps
 every running server's behaviour fixed for its whole lifetime and therefore keeps a
@@ -91,6 +99,45 @@ def _parse_args() -> argparse.Namespace:
             "AMT_MessageLog is exempt -- its Enumerate is directly evidenced."
         ),
     )
+    parser.add_argument(
+        "--no-hardware-inventory",
+        action="store_true",
+        help=(
+            "Fault Get and Enumerate for all six hardware inventory classes (CIM_Chassis, "
+            "CIM_Card, CIM_Processor, CIM_Chip, CIM_PhysicalMemory, CIM_MediaAccessDevice), "
+            "standing in for firmware that implements none of them"
+        ),
+    )
+    parser.add_argument(
+        "--no-storage-class",
+        action="store_true",
+        help=(
+            "Fault only CIM_MediaAccessDevice, leaving the other five. Proves each fact group "
+            "degrades independently -- a machine AMT cannot enumerate disks on must still report "
+            "its DIMMs and its serial number"
+        ),
+    )
+    parser.add_argument(
+        "--hardware-get-faults",
+        action="store_true",
+        help=(
+            "Fault a bare Get of CIM_Chassis and CIM_Card, leaving only the Enumerate path. Both "
+            "verbs are evidenced by the vendor fixture set, so the client's fallback has to be "
+            "exercised over a real socket"
+        ),
+    )
+    parser.add_argument(
+        "--memory-dimm-count",
+        type=int,
+        default=2,
+        help="How many CIM_PhysicalMemory instances to serve. 0 is a legitimate reading, not a fault",
+    )
+    parser.add_argument(
+        "--storage-device-count",
+        type=int,
+        default=2,
+        help="How many CIM_MediaAccessDevice instances to serve",
+    )
     return parser.parse_args()
 
 
@@ -114,6 +161,22 @@ def main() -> None:
     # lifetime: a server that changed verbs under a running client would make a failure
     # unattributable.
     server.faults.enumerate_faults_for_amt_classes = args.amt10_no_enumerate
+    # Also endpoint properties rather than client-visible state: which hardware
+    # classes a firmware implements, how many DIMMs and disks are physically
+    # fitted, and whether a bare Get answers for the two singletons. None of these
+    # changes under a running client, so all are start-up flags.
+    if args.no_hardware_inventory:
+        server.state.chassis_present = False
+        server.state.card_present = False
+        server.state.processor_present = False
+        server.state.chip_present = False
+        server.state.physical_memory_present = False
+        server.state.media_access_present = False
+    if args.no_storage_class:
+        server.state.media_access_present = False
+    server.faults.hardware_get_faults = args.hardware_get_faults
+    server.state.memory_dimm_count = args.memory_dimm_count
+    server.state.storage_device_count = args.storage_device_count
     if args.empty_message_log:
         # An event log that exists but is empty. Distinct from --no-message-log:
         # "the class is absent" is an unsupported_capability, while "the log holds

@@ -37,6 +37,21 @@ from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors imp
     ProtocolError,
     UnsupportedCapabilityError,
 )
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.hardware import (
+    MINIMAL_SUBSET,
+    SUBSET_MEMORY,
+    SUBSET_PROCESSOR,
+    SUBSET_STORAGE,
+    SUBSET_SYSTEM,
+    BaseboardInfo,
+    ChassisInfo,
+    ChipInfo,
+    HardwareFacts,
+    MemoryInfo,
+    ProcessorInfo,
+    StorageInfo,
+    requested_fact_groups,
+)
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.models import (
     AmtCapabilities,
     AmtFacts,
@@ -210,15 +225,26 @@ class AmtClient:
 
     # -- Facts ----------------------------------------------------------------
 
-    def get_facts(self) -> AmtFacts:
+    def get_facts(self, subsets: frozenset[str] | None = None) -> AmtFacts:
         """Gather firmware-observed facts and capabilities.
+
+        ``subsets`` is a **resolved** subset set from
+        ``hardware.resolve_gather_subset()``. It defaults to
+        ``hardware.MINIMAL_SUBSET`` -- i.e. exactly the pre-0.5.0 fact set and
+        exactly the pre-0.5.0 round-trip count -- so an existing caller that has
+        never heard of ``gather_subset`` pays nothing for the inventory feature.
+        ``config`` is un-excludable by construction (see ``MINIMAL_SUBSET``), so
+        everything below the hardware section always runs.
 
         Each source class is read independently and tolerated if absent, per
         the module docstring: a firmware that does not implement e.g.
         ``AMT_BootCapabilities`` yields ``capabilities`` with every flag
         ``False`` rather than failing the whole read. A genuine transport
         failure (connection/auth/TLS/timeout) is not tolerated here and
-        propagates to the caller unchanged.
+        propagates to the caller unchanged. That rule extends unchanged to the
+        hardware classes: each of the six degrades to ``None`` on its own,
+        independently, so a firmware missing ``CIM_MediaAccessDevice`` still
+        reports its DIMMs.
 
         **Round-trip cost.** Eight WS-Man operations, ten HTTP requests
         (``Enumerate CIM_SoftwareIdentity`` costs an Enumerate plus one Pull):
@@ -237,6 +263,22 @@ class AmtClient:
         ``CIM_ComputerSystem`` (``Name=ManagedSystem``)      Get    **new**
         ``CIM_BIOSElement``                                  Get    **new**
         ===================================================  =====  =========
+
+        Those ten are the ``config`` subset and are **always** performed. Each
+        hardware subset adds its own, and only when asked for:
+
+        =================  ===========================================  =====  =====
+        Subset             Classes                                      Verb   Cost
+        =================  ===========================================  =====  =====
+        ``system``         ``CIM_Chassis``, ``CIM_Card``                 Get    2
+        ``processor``      ``CIM_Processor``, ``CIM_Chip``               Enum   4
+        ``memory``         ``CIM_PhysicalMemory``                        Enum   2
+        ``storage``        ``CIM_MediaAccessDevice``                     Enum   2
+        =================  ===========================================  =====  =====
+
+        So ``gather_subset: ['all']`` costs **20** requests against the default's
+        10. ``system``'s two ``Get``s fall back to ``Enumerate`` when they fault,
+        so that subset can reach 6 on firmware that refuses ``Get`` for both.
 
         The ``CIM_ComputerSystem`` read is deliberately *reintroduced*: it was
         removed in 0.1.0 because it existed only to source a ``UUID`` property
@@ -290,7 +332,104 @@ class AmtClient:
             network=self._get_ethernet_settings(),
             system_state=self._get_system_state(),
             bios_version=self._get_bios_version(),
+            hardware=self._get_hardware_facts(subsets if subsets is not None else MINIMAL_SUBSET),
         )
+
+    # -- Hardware / asset inventory ---------------------------------------------
+
+    def _get_hardware_facts(self, subsets: frozenset[str]) -> HardwareFacts | None:
+        """Read the requested inventory classes, degrading each one independently.
+
+        Returns ``None`` when no hardware subset was requested at all, which is
+        the default: no request is issued, and ``amt.hardware`` is ``null``. That
+        is a third state distinct from both "requested and absent" and "requested
+        and empty", and :class:`hardware.HardwareFacts` documents all three.
+
+        ``CIM_`` classes only, so ``docs/protocol-notes.md`` s2.7's
+        ``Enumerate``-is-HTTP-400 finding does not apply -- that section states
+        outright that it does not affect ``CIM_``-prefixed classes, and the vendor
+        fixture set ships ``enumerate.xml`` + ``pull.xml`` for every multi-instance
+        class read here. So ``Enumerate`` is the right verb for the multi-instance
+        ones and needs no ``Get`` fallback.
+        """
+        groups = requested_fact_groups(subsets)
+        if not groups:
+            return None
+
+        chassis = baseboard = None
+        processors = chips = memory = storage = None
+
+        if SUBSET_SYSTEM in subsets:
+            # Get with an Enumerate fallback, following CIM_BIOSElement's
+            # precedent in this file: neither class has a singleton selector, and
+            # the vendor fixture set evidences *both* verbs for both classes
+            # (chassis/{get,enumerate,pull}.xml, card/{get,enumerate,pull}.xml).
+            # MeshCentral fetches both with Get -- its BatchEnum '*' prefix means
+            # "Get instead of Enumerate, to reduce round trips" -- so Get is the
+            # cheap path and Enumerate the insurance.
+            chassis_instance = self._get_or_enumerate_first("CIM_Chassis")
+            chassis = ChassisInfo.from_instance(chassis_instance) if chassis_instance else None
+            card_instance = self._get_or_enumerate_first("CIM_Card")
+            baseboard = BaseboardInfo.from_instance(card_instance) if card_instance else None
+
+        if SUBSET_PROCESSOR in subsets:
+            processors = self._enumerate_into(ProcessorInfo, "CIM_Processor")
+            chips = self._enumerate_into(ChipInfo, "CIM_Chip")
+
+        if SUBSET_MEMORY in subsets:
+            memory = self._enumerate_into(MemoryInfo, "CIM_PhysicalMemory")
+
+        if SUBSET_STORAGE in subsets:
+            storage = self._enumerate_into(StorageInfo, "CIM_MediaAccessDevice")
+
+        return HardwareFacts(
+            chassis=chassis,
+            baseboard=baseboard,
+            processors=processors,
+            chips=chips,
+            memory=memory,
+            storage=storage,
+            requested=groups,
+        )
+
+    def _get_or_enumerate_first(self, resource_class: str) -> dict[str, Any] | None:
+        """``Get`` one instance, falling back to the first ``Enumerate`` result.
+
+        Generalises what :meth:`_get_bios_version` does inline. Returns ``None``
+        when neither verb yields an instance -- a firmware that does not
+        implement the class degrades one fact group rather than failing the read.
+        """
+        instance = self._get_optional(resource_class)
+        if instance:
+            return instance
+        try:
+            instances = self._wsman.enumerate(resource_class)
+        except _DEGRADABLE_ERRORS:
+            return None
+        for candidate in instances or ():
+            if isinstance(candidate, dict) and candidate:
+                return candidate
+        return None
+
+    def _enumerate_into(self, factory: Any, resource_class: str) -> list[Any] | None:
+        """``Enumerate`` a multi-instance class into a list of typed records.
+
+        Three outcomes, all of which a caller acts on differently:
+
+        * ``None`` -- the class faulted or is not implemented here.
+        * ``[]`` -- the class answered with **zero** instances. A real answer:
+          a machine can genuinely have no ``CIM_MediaAccessDevice``. Collapsing
+          this to ``None`` would report a diskless machine as a firmware gap.
+        * a populated list -- one record per instance, in the order firmware
+          returned them. Order is preserved rather than sorted: firmware's order
+          is the only ordering that carries any meaning (DIMM slot sequence), and
+          re-sorting would invent a bookkeeping it does not promise.
+        """
+        try:
+            instances = self._wsman.enumerate(resource_class)
+        except _DEGRADABLE_ERRORS:
+            return None
+        return [factory.from_instance(instance) for instance in instances or () if isinstance(instance, dict)]
 
     def _get_optional(self, resource_class: str, *, selectors: dict[str, str] | None = None) -> dict[str, Any] | None:
         """``Get`` a class that a firmware may legitimately not implement.

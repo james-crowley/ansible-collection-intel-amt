@@ -19,6 +19,7 @@ from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors imp
     TimeoutError_,
     UnsupportedCapabilityError,
 )
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.hardware import resolve_gather_subset
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.tls import PeerCertificateEvidence
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.wsman import WsmanClient
 
@@ -765,3 +766,255 @@ class TestCanonicalUuidFormatting:
         wsman = _fake_wsman()
         wsman.get.side_effect = lambda rc, **kw: {"PlatformGUID": self.REAL_PLATFORM_GUID} if rc == "CIM_ComputerSystemPackage" else {}
         assert _client(wsman).get_facts().uuid == self.EXPECTED
+
+
+class TestGetFactsHardwareInventory:
+    """The inventory reads: opt-in, and each class degrading on its own.
+
+    ``docs/capability-matrix.md`` records that facts-gathering degrading *per
+    class* is the property that lets this collection read a real fleet of mixed
+    firmware generations at all. These tests hold that line for the six new
+    classes, and hold the round-trip promise: a caller who does not opt in must
+    issue exactly the requests they issued before 0.5.0.
+    """
+
+    CHASSIS = {"SerialNumber": "MOCKCHASSIS0001", "Model": "MOCK-CHASSIS-0000", "ChassisPackageType": "3"}
+    CARD = {"SerialNumber": "MOCKBOARD0001", "Model": "MOCK-BOARD-0000", "PackageType": "9"}
+    PROCESSOR = {"DeviceID": "CPU 0", "Family": "198", "UpgradeMethod": "52", "MaxClockSpeed": "8300"}
+    CHIP = {"Tag": "CPU 0", "Version": "Mock(R) Example(TM) CPU E0000 @ 2.40GHz"}
+    DIMM = {"BankLabel": "BANK 0", "Capacity": "17179869184", "MemoryType": "26", "FormFactor": "13"}
+    DISK = {"DeviceID": "MEDIA DEV 0", "MaxMediaSize": "960197124", "Capabilities": "4", "Security": "2"}
+
+    def _inventory_wsman(self, **overrides) -> Mock:
+        """A fake serving all six inventory classes, plus per-class overrides."""
+        gets = {"CIM_Chassis": self.CHASSIS, "CIM_Card": self.CARD}
+        enums = {
+            "CIM_Processor": [self.PROCESSOR],
+            "CIM_Chip": [self.CHIP],
+            "CIM_PhysicalMemory": [self.DIMM],
+            "CIM_MediaAccessDevice": [self.DISK],
+        }
+        gets.update({k: v for k, v in overrides.items() if k in gets})
+        enums.update({k: v for k, v in overrides.items() if k in enums})
+
+        wsman = _fake_wsman()
+
+        def _get(resource_class, **_kwargs):
+            value = gets.get(resource_class, {})
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        def _enumerate(resource_class, **_kwargs):
+            value = enums.get(resource_class, [])
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        wsman.get.side_effect = _get
+        wsman.enumerate.side_effect = _enumerate
+        return wsman
+
+    def test_no_hardware_subset_reads_none_of_the_inventory_classes(self):
+        # The backward-compatibility promise, asserted rather than assumed: an
+        # existing caller pays nothing for a feature they never asked for.
+        wsman = self._inventory_wsman()
+        facts = _client(wsman).get_facts()
+
+        assert facts.hardware is None
+        touched = {call.args[0] for call in wsman.get.call_args_list} | {call.args[0] for call in wsman.enumerate.call_args_list}
+        assert touched.isdisjoint({"CIM_Chassis", "CIM_Card", "CIM_Processor", "CIM_Chip", "CIM_PhysicalMemory", "CIM_MediaAccessDevice"})
+
+    def test_default_argument_matches_an_explicit_config_only_subset(self):
+        wsman = self._inventory_wsman()
+        assert _client(wsman).get_facts(resolve_gather_subset(["config"])).hardware is None
+
+    def test_all_subsets_reads_every_class_and_populates_every_group(self):
+        wsman = self._inventory_wsman()
+        facts = _client(wsman).get_facts(resolve_gather_subset(["all"]))
+
+        assert facts.hardware is not None
+        assert facts.hardware.chassis.serial_number == "MOCKCHASSIS0001"
+        assert facts.hardware.baseboard.serial_number == "MOCKBOARD0001"
+        assert facts.hardware.processors[0].upgrade_method_text == "socket_bga1515"
+        assert facts.hardware.chips[0].version == "Mock(R) Example(TM) CPU E0000 @ 2.40GHz"
+        assert facts.hardware.memory[0].memory_type_text == "ddr4"
+        assert facts.hardware.storage[0].max_media_size_kb == 960197124
+
+    @pytest.mark.parametrize(
+        "subset,expected_gets,expected_enumerates",
+        [
+            ("system", {"CIM_Chassis", "CIM_Card"}, set()),
+            ("processor", set(), {"CIM_Processor", "CIM_Chip"}),
+            ("memory", set(), {"CIM_PhysicalMemory"}),
+            ("storage", set(), {"CIM_MediaAccessDevice"}),
+        ],
+    )
+    def test_each_subset_reads_only_its_own_classes(self, subset, expected_gets, expected_enumerates):
+        # A subset that quietly fetched a neighbour's class would make the
+        # documented per-subset round-trip costs wrong.
+        inventory = {"CIM_Chassis", "CIM_Card", "CIM_Processor", "CIM_Chip", "CIM_PhysicalMemory", "CIM_MediaAccessDevice"}
+        wsman = self._inventory_wsman()
+        _client(wsman).get_facts(resolve_gather_subset([subset]))
+
+        assert {call.args[0] for call in wsman.get.call_args_list} & inventory == expected_gets
+        assert {call.args[0] for call in wsman.enumerate.call_args_list} & inventory == expected_enumerates
+
+    @pytest.mark.parametrize(
+        "resource_class,group",
+        [
+            ("CIM_Chassis", "chassis"),
+            ("CIM_Card", "baseboard"),
+            ("CIM_Processor", "processors"),
+            ("CIM_Chip", "chips"),
+            ("CIM_PhysicalMemory", "memory"),
+            ("CIM_MediaAccessDevice", "storage"),
+        ],
+    )
+    def test_one_absent_class_degrades_only_its_own_group(self, resource_class, group):
+        # The rule from client.py's module docstring, applied per class: a
+        # firmware that lacks one class must yield null for that fact group and
+        # keep every other one populated. Never a module failure.
+        fault = ProtocolError(f"{resource_class} is not implemented", endpoint="10.0.0.5:16993")
+        wsman = self._inventory_wsman(**{resource_class: fault})
+        facts = _client(wsman).get_facts(resolve_gather_subset(["all"]))
+
+        rendered = facts.hardware.to_dict()
+        assert rendered[group] is None, f"{group} should degrade to null when {resource_class} faults"
+        for other, value in rendered.items():
+            if other != group:
+                assert value is not None, f"{other} was blanked by an unrelated {resource_class} fault"
+
+    def test_an_unsupported_capability_error_degrades_the_same_way_as_a_protocol_fault(self):
+        wsman = self._inventory_wsman(CIM_PhysicalMemory=UnsupportedCapabilityError("no such class"))
+        facts = _client(wsman).get_facts(resolve_gather_subset(["memory"]))
+        assert facts.hardware.to_dict()["memory"] is None
+
+    def test_every_class_absent_still_succeeds_with_the_config_facts_intact(self):
+        faults = {
+            name: ProtocolError("absent", endpoint="10.0.0.5:16993")
+            for name in ("CIM_Chassis", "CIM_Card", "CIM_Processor", "CIM_Chip", "CIM_PhysicalMemory", "CIM_MediaAccessDevice")
+        }
+        wsman = self._inventory_wsman(**faults)
+        facts = _client(wsman).get_facts(resolve_gather_subset(["all"]))
+
+        assert facts.hardware.to_dict() == {
+            "chassis": None,
+            "baseboard": None,
+            "processors": None,
+            "chips": None,
+            "memory": None,
+            "storage": None,
+        }
+
+    def test_a_transport_failure_is_not_swallowed_as_a_missing_class(self):
+        # Only ProtocolError/UnsupportedCapabilityError mean "this class does not
+        # exist here". A timeout is a real failure and must reach the caller, or
+        # an unreachable endpoint would be reported as a machine with no hardware.
+        wsman = self._inventory_wsman(CIM_PhysicalMemory=TimeoutError_("read timed out", endpoint="10.0.0.5:16993"))
+        with pytest.raises(TimeoutError_):
+            _client(wsman).get_facts(resolve_gather_subset(["memory"]))
+
+    @pytest.mark.parametrize("count", [0, 1, 2, 4])
+    def test_multi_instance_parsing_across_zero_one_and_several_dimms(self, count):
+        dimms = [{**self.DIMM, "BankLabel": f"BANK {index * 2}"} for index in range(count)]
+        wsman = self._inventory_wsman(CIM_PhysicalMemory=dimms)
+        facts = _client(wsman).get_facts(resolve_gather_subset(["memory"]))
+
+        assert len(facts.hardware.memory) == count
+        assert [dimm.bank_label for dimm in facts.hardware.memory] == [f"BANK {index * 2}" for index in range(count)]
+
+    def test_zero_instances_is_an_empty_list_not_a_degraded_null(self):
+        # A diskless machine is a real reading. Reporting it as null would say
+        # "this firmware has no such class", which is a different and wrong claim.
+        wsman = self._inventory_wsman(CIM_MediaAccessDevice=[])
+        facts = _client(wsman).get_facts(resolve_gather_subset(["storage"]))
+        assert facts.hardware.storage == []
+        assert facts.hardware.storage is not None
+
+    def test_firmware_instance_order_is_preserved_rather_than_sorted(self):
+        # DIMM slot sequence is the only ordering that carries meaning here, and
+        # re-sorting would invent a bookkeeping firmware does not promise.
+        dimms = [{**self.DIMM, "BankLabel": label} for label in ("BANK 2", "BANK 0", "BANK 3")]
+        wsman = self._inventory_wsman(CIM_PhysicalMemory=dimms)
+        facts = _client(wsman).get_facts(resolve_gather_subset(["memory"]))
+        assert [dimm.bank_label for dimm in facts.hardware.memory] == ["BANK 2", "BANK 0", "BANK 3"]
+
+    def test_non_dict_enumeration_members_are_skipped_rather_than_crashing(self):
+        wsman = self._inventory_wsman(CIM_PhysicalMemory=[None, "junk", self.DIMM])
+        facts = _client(wsman).get_facts(resolve_gather_subset(["memory"]))
+        assert len(facts.hardware.memory) == 1
+
+    def test_multiple_processor_packages_are_all_reported(self):
+        # One instance per physical package, so a two-socket machine returns two.
+        processors = [{**self.PROCESSOR, "DeviceID": f"CPU {index}"} for index in range(2)]
+        wsman = self._inventory_wsman(CIM_Processor=processors)
+        facts = _client(wsman).get_facts(resolve_gather_subset(["processor"]))
+        assert [cpu.device_id for cpu in facts.hardware.processors] == ["CPU 0", "CPU 1"]
+
+
+class TestHardwareSingletonVerbFallback:
+    """``CIM_Chassis``/``CIM_Card``: ``Get`` first, ``Enumerate`` as insurance.
+
+    The vendor fixture set ships ``get.xml`` *and* ``enumerate.xml``+``pull.xml``
+    for both classes, so which verb a given firmware accepts is not settled by
+    the evidence. This follows ``CIM_BIOSElement``'s existing precedent in this
+    file for exactly that reason.
+    """
+
+    CHASSIS = {"SerialNumber": "MOCKCHASSIS0001"}
+
+    def test_the_bare_get_is_preferred_and_costs_no_enumerate(self):
+        # MeshCentral fetches both with Get (its BatchEnum '*' prefix means
+        # "Get instead of Enumerate, to reduce round trips"), so the cheap path
+        # must be the one taken when it works.
+        wsman = _fake_wsman()
+        wsman.get.side_effect = lambda rc, **_kw: self.CHASSIS if rc == "CIM_Chassis" else {}
+        facts = _client(wsman).get_facts(resolve_gather_subset(["system"]))
+
+        assert facts.hardware.chassis.serial_number == "MOCKCHASSIS0001"
+        assert "CIM_Chassis" not in [call.args[0] for call in wsman.enumerate.call_args_list]
+
+    def test_enumerate_fallback_runs_when_the_bare_get_faults(self):
+        wsman = _fake_wsman()
+        wsman.get.side_effect = ProtocolError("no bare Get here", endpoint="10.0.0.5:16993")
+        wsman.enumerate.side_effect = lambda rc, **_kw: [self.CHASSIS] if rc == "CIM_Chassis" else []
+
+        facts = _client(wsman).get_facts(resolve_gather_subset(["system"]))
+        assert facts.hardware.chassis.serial_number == "MOCKCHASSIS0001"
+
+    def test_enumerate_fallback_runs_when_the_get_returns_an_empty_body(self):
+        wsman = _fake_wsman()
+        wsman.get.return_value = {}
+        wsman.enumerate.side_effect = lambda rc, **_kw: [self.CHASSIS] if rc == "CIM_Chassis" else []
+
+        facts = _client(wsman).get_facts(resolve_gather_subset(["system"]))
+        assert facts.hardware.chassis.serial_number == "MOCKCHASSIS0001"
+
+    def test_both_verbs_failing_degrades_to_null(self):
+        wsman = _fake_wsman()
+        wsman.get.side_effect = ProtocolError("no", endpoint="10.0.0.5:16993")
+        wsman.enumerate.side_effect = ProtocolError("nor this", endpoint="10.0.0.5:16993")
+
+        facts = _client(wsman).get_facts(resolve_gather_subset(["system"]))
+        assert facts.hardware.chassis is None
+        assert facts.hardware.baseboard is None
+
+    def test_junk_enumeration_members_are_skipped_when_falling_back(self):
+        wsman = _fake_wsman()
+        wsman.get.return_value = {}
+        wsman.enumerate.side_effect = lambda rc, **_kw: [None, "junk", {}, self.CHASSIS] if rc == "CIM_Chassis" else []
+
+        facts = _client(wsman).get_facts(resolve_gather_subset(["system"]))
+        assert facts.hardware.chassis.serial_number == "MOCKCHASSIS0001"
+
+    def test_no_selector_set_is_sent_for_either_singleton(self):
+        # Neither class has a documented singleton selector, and inventing one
+        # would risk a fault on firmware that has an instance under another key.
+        wsman = _fake_wsman()
+        wsman.get.side_effect = lambda rc, **_kw: self.CHASSIS if rc in ("CIM_Chassis", "CIM_Card") else {}
+        _client(wsman).get_facts(resolve_gather_subset(["system"]))
+
+        for call in wsman.get.call_args_list:
+            if call.args[0] in ("CIM_Chassis", "CIM_Card"):
+                assert call.kwargs.get("selectors") is None

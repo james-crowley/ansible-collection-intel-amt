@@ -144,7 +144,7 @@ the two wrong tables noted above.
 
 This is the bulk of the collection's verification effort:
 
-- **1066 unit tests** (measured via `pytest` against the staged collection tree; the
+- **1687 unit tests** (measured via `pytest` against the staged collection tree; the
   number drifts as tests are added, so treat it as a point measurement, not a
   promise) across `tests/unit/plugins/module_utils/`, `tests/unit/plugins/modules/`
   and `tests/unit/mock_servers/`, covering error classification/redaction, TLS trust
@@ -158,9 +158,9 @@ This is the bulk of the collection's verification effort:
   were the two highest-consequence ones. `media_session.py` (the detached daemon that
   holds credentials across a fork) was **50%** and is now **81%**; `ider.py` (the SCSI
   state machine) was **75%** and is now **92%**.
-- **8/8 integration targets** (`amt_baremetal_install_role`, `amt_boot`,
-  `amt_event_log`, `amt_info`, `amt_log_clear`, `amt_media`, `amt_power`,
-  `amt_redirection` under `tests/integration/targets/`) run end-to-end against local,
+- **9/9 integration targets** (`amt_baremetal_install_role`, `amt_boot`,
+  `amt_event_log`, `amt_info`, `amt_info_hardware`, `amt_log_clear`, `amt_media`,
+  `amt_power`, `amt_redirection` under `tests/integration/targets/`) run end-to-end against local,
   deterministic fixture servers: a mock WS-Man server (HTTP Digest, TLS with a
   generated self-signed certificate, canned per-resource-URI responses, fault
   injection for AMT error codes/malformed SOAP/401/timeouts) and a mock IDE-R server
@@ -225,6 +225,76 @@ checked against a live endpoint should not be the only thing a caller can see. S
 [`docs/amt_event_log.md`](amt_event_log.md) and
 [`docs/amt_log_clear.md`](amt_log_clear.md), whose own opening notes say the same
 thing.
+
+### `amt_info`'s hardware/asset inventory — Tier 2 only, and **not** hardware-verified
+
+New in 0.5.0: `amt_info`'s `gather_subset` inventory subsets (`system`, `processor`,
+`memory`, `storage`) and everything under `amt.hardware`, backed by
+`plugins/module_utils/hardware.py`. Six WS-Man classes — `CIM_Chassis`, `CIM_Card`,
+`CIM_Processor`, `CIM_Chip`, `CIM_PhysicalMemory`, `CIM_MediaAccessDevice`.
+
+**Be explicit about what this is and is not.** It is **mock-tested and
+fixture-derived**. It is **not hardware-verified**: no qualification stage has run it,
+no lab machine has ever been asked for any of these classes by this collection, and not
+one of the values it decodes has been read back from a live endpoint here. It does not
+appear in Tier 3 and it is listed again in Tier 4. Every generation, including the two
+lab machines, is untested for it.
+
+What Tier 2 does buy, specifically:
+
+- **609 unit tests**, of which the bulk are per-value assertions over the nine value
+  tables — every defined value plus an out-of-table value for each — written against the
+  *cited source* rather than against the implementation. Plus multi-instance parsing at
+  zero, one, several and paged instance counts; the CIM single-element-array shape; the
+  three-state contract per fact group; `gather_subset` resolution across every
+  `setup`-compatible case including `!` negation, contradictions and the empty list; and
+  per-class graceful degradation.
+- **A ninth integration target**, `amt_info_hardware`, driving the real module against
+  three separately-configured mock WS-Man endpoints over a real socket: fully populated,
+  no inventory classes at all, and one whose singleton `Get`s fault so the `Enumerate`
+  fallback is exercised for real.
+
+**Where the protocol claims come from — and this row is stronger than most Tier 2
+entries.** Unusually, it does not rest on a third party's prose or a single machine's
+dump. `device-management-toolkit/go-wsman-messages` (Intel's own toolkit, Apache-2.0,
+read at tag `v2.48.3`) ships **captured real-firmware responses** for all six classes
+under `pkg/wsman/wsmantesting/responses/`, and those fixtures are where every property
+set came from. The mock server's handlers are derived from those same fixtures, with each
+handler citing its fixture path and naming which individual enumeration values were
+carried across — a distinction that matters, because a mock fed from this project's own
+understanding of a table is exactly how the `LinkPolicy` inversion survived two releases.
+
+**The value tables are the Tier 1 part of this row.** All nine come from
+`go-wsman-messages`' `decoder.go` const/map pairs, extracted mechanically rather than
+retyped, or from the DMTF CIM schema (`EnabledState`, `OperationalStatus` — the same
+single tables this collection already held, imported rather than redeclared). **None
+comes from a hardware dump.** Three notes worth recording:
+
+- `go-wsman-messages`' own `cim/processor` `enabledStateMap` **omits values 0, 1 and 2**,
+  so its decoder answers "Value not found in map" for its own captured firmware response.
+  The full DMTF table is used instead. Its `cim/mediaaccess` copy of the same enumeration
+  is complete and agrees with DMTF, which is what identifies the processor one as an
+  omission rather than a disagreement.
+- Two properties **ship raw and undecoded** because no table could be sourced:
+  `CIM_Processor.Family` (no map exists in the library; the DMTF ValueMap has hundreds of
+  entries and no offline schema copy was available) and
+  `CIM_PhysicalMemory.FormFactor` (no map, **and** two published tables disagree about
+  the value real firmware reports — `13` is `SODIMM` under SMBIOS type 17 and `SRIMM`
+  under the DMTF ValueMap). `RequestedState` is likewise raw, matching how this module
+  already reports it on `CIM_ComputerSystem`. Shipping a raw integer is honest; a guessed
+  label is what 0.3.1 was spent undoing.
+- Three properties an operator would expect **do not exist** on these classes and are
+  therefore not reported: no asset tag anywhere (`AssetTag` does not occur in
+  `go-wsman-messages` at all — `Tag` exists, and real firmware populates it with the
+  *class name*), no processor core or thread count, and no disk model, vendor or serial.
+  See `docs/amt_info.md` and `docs/protocol-notes.md` §2.9.
+
+**What would move this to Tier 3** is one read-only hardware stage: an `amt_info` call
+with `gather_subset: all` against a lab machine, with the resulting fact groups recorded.
+That is the cheap half of closing this, and it is genuinely cheap — the capability is
+read-only, so it needs none of the approval treatment stages 4-7 do. Until it runs, the
+strongest honest claim is that this collection's implementation matches Intel's own
+captured firmware responses.
 
 ### `amt_info`'s network and system-state facts — mock coverage, with hardware now in Tier 3
 

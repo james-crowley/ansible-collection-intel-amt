@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from unittest.mock import Mock
 
@@ -12,6 +13,15 @@ from ansible.module_utils import basic
 from ansible.module_utils.common.text.converters import to_bytes
 
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import AuthenticationError
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.hardware import (
+    BaseboardInfo,
+    ChassisInfo,
+    ChipInfo,
+    HardwareFacts,
+    MemoryInfo,
+    ProcessorInfo,
+    StorageInfo,
+)
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.models import (
     AmtCapabilities,
     AmtFacts,
@@ -359,3 +369,171 @@ class TestMainReadOnly:
         assert operation["observed"] is None
         assert operation["tls_peer_fingerprint"] == "bb" * 32
         assert operation["error_class"] is None
+
+
+def _hardware_facts() -> HardwareFacts:
+    """A fully-populated inventory, shaped like the real firmware fixtures.
+
+    Every identity-shaped value is obviously fake. The vendor fixtures these
+    property sets come from do carry what look like a real machine's serials and
+    model numbers; none of those is reproduced anywhere in this repository.
+    """
+    return HardwareFacts(
+        chassis=ChassisInfo.from_instance(
+            {
+                "SerialNumber": "MOCKCHASSIS0001",
+                "Model": "MOCK-CHASSIS-0000",
+                "Manufacturer": "Mock Systems (example.invalid)",
+                "ChassisPackageType": "3",
+                "PackageType": "3",
+                "Tag": "CIM_Chassis",
+                "OperationalStatus": "2",
+            }
+        ),
+        baseboard=BaseboardInfo.from_instance({"SerialNumber": "MOCKBOARD0001", "Model": "MOCK-BOARD-0000", "PackageType": "9", "CanBeFRUed": "true"}),
+        processors=[ProcessorInfo.from_instance({"DeviceID": "CPU 0", "Family": "198", "UpgradeMethod": "52", "MaxClockSpeed": "8300"})],
+        chips=[ChipInfo.from_instance({"Tag": "CPU 0", "Version": "Mock(R) Example(TM) CPU E0000 @ 2.40GHz"})],
+        memory=[
+            MemoryInfo.from_instance({"BankLabel": "BANK 0", "Capacity": "17179869184", "MemoryType": "26", "FormFactor": "13"}),
+            MemoryInfo.from_instance({"BankLabel": "BANK 2", "Capacity": "17179869184", "MemoryType": "26", "FormFactor": "13"}),
+        ],
+        storage=[StorageInfo.from_instance({"DeviceID": "MEDIA DEV 0", "MaxMediaSize": "960197124", "Capabilities": "4", "Security": "2"})],
+        requested=frozenset({"chassis", "baseboard", "processors", "chips", "memory", "storage"}),
+    )
+
+
+class TestGatherSubsetArgumentSpec:
+    def test_gather_subset_defaults_to_config_only(self):
+        # The one deliberate divergence from ansible.builtin.setup, which defaults
+        # to gathering everything. Everything here means ten extra WS-Man round
+        # trips against firmware, and no existing caller should start paying for
+        # inventory they never asked for.
+        assert amt_info._connection_argument_spec()["gather_subset"]["default"] == ["config"]
+
+    def test_gather_subset_is_a_list_of_strings(self):
+        spec = amt_info._connection_argument_spec()["gather_subset"]
+        assert spec["type"] == "list"
+        assert spec["elements"] == "str"
+
+    def test_every_subset_and_alias_is_offered_in_both_polarities(self):
+        choices = set(amt_info._connection_argument_spec()["gather_subset"]["choices"])
+        names = {"all", "min", "config", "hardware", "system", "processor", "memory", "storage"}
+        assert choices == names | {f"!{name}" for name in names}
+
+    def test_an_unrecognised_subset_is_refused_by_argument_validation(self, monkeypatch):
+        # Validated by `choices` rather than in module code, so the refusal happens
+        # before any connection is attempted -- and a typo never has to be squeezed
+        # into one of errors.py's nine operation-failure classes, none of which
+        # describes "you made a typo".
+        _set_module_args({**BASE_ARGS, "gather_subset": ["hardwear"]})
+        built = []
+        monkeypatch.setattr(amt_info, "build_wsman_client", lambda params: built.append(params) or _fake_wsman())
+
+        with pytest.raises(AnsibleFailJson):
+            amt_info.main()
+        assert built == [], "argument validation must reject the subset before a client is built"
+
+
+class TestMainGatherSubsetPlumbing:
+    def _run(self, monkeypatch, args, facts=None, hardware=None):
+        _set_module_args(args)
+        fake_client = Mock()
+        base = _full_facts()
+        fake_client.get_facts.return_value = facts if facts is not None else dataclasses.replace(base, hardware=hardware)
+        monkeypatch.setattr(amt_info, "build_wsman_client", lambda params: _fake_wsman())
+        monkeypatch.setattr(amt_info, "AmtClient", lambda wsman: fake_client)
+        with pytest.raises(AnsibleExitJson) as excinfo:
+            amt_info.main()
+        return excinfo.value.args[0], fake_client
+
+    def test_the_default_passes_only_config_through_to_the_client(self, monkeypatch):
+        _result, client = self._run(monkeypatch, dict(BASE_ARGS))
+        assert client.get_facts.call_args.args[0] == frozenset({"config"})
+
+    def test_all_resolves_to_every_subset_before_reaching_the_client(self, monkeypatch):
+        _result, client = self._run(monkeypatch, {**BASE_ARGS, "gather_subset": ["all"]})
+        assert client.get_facts.call_args.args[0] == frozenset({"config", "system", "processor", "memory", "storage"})
+
+    def test_negation_is_resolved_before_reaching_the_client(self, monkeypatch):
+        _result, client = self._run(monkeypatch, {**BASE_ARGS, "gather_subset": ["all", "!memory"]})
+        assert client.get_facts.call_args.args[0] == frozenset({"config", "system", "processor", "storage"})
+
+    def test_hardware_is_null_when_no_hardware_subset_was_requested(self, monkeypatch):
+        result, _client = self._run(monkeypatch, dict(BASE_ARGS))
+        assert result["amt"]["hardware"] is None
+
+    def test_the_legacy_amt_keys_are_unchanged_by_the_new_option(self, monkeypatch):
+        # The backward-compatibility promise, asserted at the module boundary:
+        # roles/amt_baremetal_install, the integration targets and tests/hardware
+        # all read these keys and must not have to change.
+        result, _client = self._run(monkeypatch, dict(BASE_ARGS))
+        for key in LEGACY_AMT_KEYS:
+            assert key in result["amt"], key
+
+    def test_hardware_is_rendered_when_a_subset_was_requested(self, monkeypatch):
+        result, _client = self._run(monkeypatch, {**BASE_ARGS, "gather_subset": ["all"]}, hardware=_hardware_facts())
+        hardware = result["amt"]["hardware"]
+        assert hardware["chassis"]["serial_number"] == "MOCKCHASSIS0001"
+        assert hardware["baseboard"]["serial_number"] == "MOCKBOARD0001"
+        assert hardware["chips"][0]["version"] == "Mock(R) Example(TM) CPU E0000 @ 2.40GHz"
+        assert [dimm["bank_label"] for dimm in hardware["memory"]] == ["BANK 0", "BANK 2"]
+        assert hardware["storage"][0]["max_media_size_kb"] == 960197124
+
+    def test_a_group_that_was_not_requested_is_absent_rather_than_null(self, monkeypatch):
+        # 'memory' in amt.hardware answers "did I ask for it"; is none answers
+        # "does this firmware have it". Rendering via HardwareFacts.to_dict()
+        # rather than dataclasses.asdict() is what keeps those apart.
+        hardware = HardwareFacts(memory=[], requested=frozenset({"memory"}))
+        result, _client = self._run(monkeypatch, {**BASE_ARGS, "gather_subset": ["memory"]}, hardware=hardware)
+        assert "memory" in result["amt"]["hardware"]
+        assert "storage" not in result["amt"]["hardware"]
+
+    def test_the_receipt_records_the_resolved_subset_and_the_request_estimate(self, monkeypatch):
+        result, _client = self._run(monkeypatch, {**BASE_ARGS, "gather_subset": ["all"]}, hardware=_hardware_facts())
+        assert result["operation"]["gather_subset"] == ["config", "memory", "processor", "storage", "system"]
+        assert result["operation"]["wsman_requests_estimated"] == 20
+
+    def test_the_default_receipt_reports_the_pre_0_5_0_request_count(self, monkeypatch):
+        result, _client = self._run(monkeypatch, dict(BASE_ARGS))
+        assert result["operation"]["gather_subset"] == ["config"]
+        assert result["operation"]["wsman_requests_estimated"] == 10
+
+    def test_the_receipt_still_reports_changed_false_and_no_error(self, monkeypatch):
+        result, _client = self._run(monkeypatch, {**BASE_ARGS, "gather_subset": ["all"]}, hardware=_hardware_facts())
+        assert result["changed"] is False
+        assert result["operation"]["schema"] == "intel-amt-operation/v1"
+        assert result["operation"]["action"] == "get_facts"
+        assert result["operation"]["changed"] is False
+        assert result["operation"]["error_class"] is None
+
+    def test_check_mode_gathers_inventory_identically(self, monkeypatch):
+        # Read-only module: there is nothing for check mode to skip, and an
+        # inventory read that silently returned nothing under --check would make
+        # a dry run useless for exactly the audience this feature exists for.
+        result, client = self._run(
+            monkeypatch,
+            {**BASE_ARGS, "gather_subset": ["all"], "_ansible_check_mode": True},
+            hardware=_hardware_facts(),
+        )
+        assert result["changed"] is False
+        assert result["amt"]["hardware"]["chassis"]["serial_number"] == "MOCKCHASSIS0001"
+        assert client.get_facts.call_args.args[0] == frozenset({"config", "system", "processor", "memory", "storage"})
+
+    def test_a_fully_degraded_inventory_is_still_a_success(self, monkeypatch):
+        hardware = HardwareFacts(requested=frozenset({"chassis", "baseboard", "processors", "chips", "memory", "storage"}))
+        result, _client = self._run(monkeypatch, {**BASE_ARGS, "gather_subset": ["all"]}, hardware=hardware)
+        assert result["changed"] is False
+        assert all(value is None for value in result["amt"]["hardware"].values())
+
+    def test_the_whole_result_is_json_serializable_with_inventory_present(self, monkeypatch):
+        # Ansible serializes module results to JSON. A frozenset or a dataclass
+        # leaking through to_dict() would fail at exit_json, not in a parse test.
+        result, _client = self._run(monkeypatch, {**BASE_ARGS, "gather_subset": ["all"]}, hardware=_hardware_facts())
+        assert json.loads(json.dumps(result))["amt"]["hardware"]["memory"][0]["memory_type_text"] == "ddr4"
+
+    def test_the_password_never_appears_in_a_result_carrying_inventory(self, monkeypatch):
+        # The collection's most security-critical invariant, re-checked on the new
+        # code path: hardware facts pass through OperationReceipt's redaction
+        # backstop and a serialized result must not contain the credential.
+        result, _client = self._run(monkeypatch, {**BASE_ARGS, "gather_subset": ["all"]}, hardware=_hardware_facts())
+        assert PASSWORD not in json.dumps(result)
