@@ -1,0 +1,17 @@
+---
+bugfixes:
+  - "docs/capability-matrix.md - correct the integration target count from 7 to 8 and the unit count from 902 to 1066,
+    and stop claiming unit tests cover the media-session daemon lifecycle. That claim was false when written: the daemon
+    body and fork path were at 0% coverage, which the file's own test docstring admitted. It is now 81%."
+  - "docs/capability-matrix.md - mark the two Tier 1 rows whose backing is weaker than the tier implies. The CIM
+    power-state table rests on a third party's constants array, the same category of evidence that produced the
+    LinkPolicy inversion; the boot delete-list is a behavioural claim no Get fixture can establish, corroborated at the
+    integration tier instead."
+  - "docs/capability-matrix.md - record that no Tier 3 row cites a specific run, and that stage 5 emits no evidence file
+    at all, so the flagship IDE-R hardware claim rests on an operator's visual confirmation. Added to Tier 4."
+
+minor_changes:
+  - "docs/capability-matrix.md - record what mutation testing found, including that the credential invariant was asserted
+    by seven tests that could not fail and that flipping no_log off was caught by no tier. Also records the two
+    structural limits it exposed: the LinkPolicy inversion was invisible to both the mock and hardware tiers, and an
+    integration target sharing a name with a role silently runs the role instead of itself."
