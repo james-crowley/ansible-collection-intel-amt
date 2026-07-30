@@ -144,16 +144,16 @@ the two wrong tables noted above.
 
 This is the bulk of the collection's verification effort:
 
-- **1687 unit tests** (measured via `pytest` against the staged collection tree; the
-  number drifts as tests are added, so treat it as a point measurement, not a
-  promise) across `tests/unit/plugins/module_utils/`, `tests/unit/plugins/modules/`
+- **1744 unit tests** (collected via `pytest` against the staged collection tree on
+  2026-07-30; the number drifts as tests are added, so treat it as a point
+  measurement, not a promise) across `tests/unit/plugins/module_utils/`, `tests/unit/plugins/modules/`
   and `tests/unit/mock_servers/`, covering error classification/redaction, TLS trust
   policy, the WS-Man envelope/SOAP layer, the boot five-step sequence, the redirection
   handshake, the IDE-R SCSI state machine, the media-session daemon, and every
   module's argument handling, check-mode behaviour, and idempotence logic — all
   against fakes/mocks, never a socket or a real AMT endpoint.
 
-  Branch coverage over `plugins/` is **92%**. The distribution matters more than the
+  Branch coverage over `plugins/` is **93%**. The distribution matters more than the
   total, and it used to be inverted against consequence: the two least-covered files
   were the two highest-consequence ones. `media_session.py` (the detached daemon that
   holds credentials across a fork) was **50%** and is now **81%**; `ider.py` (the SCSI
@@ -262,7 +262,21 @@ applies here exactly as it does elsewhere.
 What Tier 2 still buys — and it is what makes the *labels*, rather than the plumbing,
 trustworthy:
 
-- **609 unit tests**, of which the bulk are per-value assertions over the nine value
+- **666 unit tests**, and the basis of that number is stated here because the figure it
+  replaces did not state its own. **609** was the *whole-suite delta* of the 0.5.0
+  feature commit — 1078 tests before it, 1687 after, which is the arithmetic that
+  commit's own message records. Read as "609 tests covering the inventory" it claims
+  something narrower than it measured, so the measure is named rather than the number
+  quietly substituted: the growth of the four test files that work touched
+  (`module_utils/test_hardware.py`, `module_utils/test_client.py`,
+  `modules/test_amt_info.py`, `mock_servers/test_wsman_server.py`), **217 before 0.5.0
+  to 883 now**. The 57 between 609 and 666 are the follow-up that added
+  `operation.hardware_reads`, described at the end of this subsection. Two narrower
+  counts, for anyone who wants a figure that needs no reconstruction at all:
+  `test_hardware.py` — the file dedicated to the decoders and the value tables —
+  collects **514** on its own, and the whole unit suite collects 1744.
+
+  Of these the bulk are per-value assertions over the nine value
   tables — every defined value plus an out-of-table value for each — written against the
   *cited source* rather than against the implementation. Plus multi-instance parsing at
   zero, one, several and paged instance counts; the CIM single-element-array shape; the
