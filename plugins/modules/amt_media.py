@@ -182,9 +182,20 @@ options:
     description:
       - >-
         Bounded number of seconds O(state=attached) waits for the background process to report
-        V(attached) or an early failure before returning. A slow-but-eventually-successful attach
-        that exceeds this is not a failure -- RV(session_state) may still show V(starting); poll the
-        state again with a repeated O(state=attached) call for the same O(session_id).
+        V(attached) or an early failure before returning.
+      - >-
+        Expiring without a V(attached) report is a B(failure), with RV(ignore:error_class)
+        V(timeout) and RV(ignore:indeterminate) V(true) -- it is not established that media is
+        being served, and this module will not report success for an attach it has not confirmed.
+        The failure still carries RV(session_id) and RV(pid), and the background session is
+        B(not) detached, because it may simply be slow and about to succeed.
+      - >-
+        RV(ignore:indeterminate) V(true) means B(re-probe, do not retry): call this module again
+        with O(state=attached) and the same O(session_id), which is idempotent and reports
+        whatever the session has since become. Retrying the attach instead would collide with
+        the still-running session, since IDE-R is single-session. Use O(state=detached) with that
+        O(session_id) if you do not intend to wait, and raise this timeout if slow attaches are
+        normal for the endpoint.
     type: int
     default: 10
   detach_timeout:
@@ -365,7 +376,13 @@ operation:
 from ansible.module_utils.basic import AnsibleModule
 
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils import ider, media_session
-from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import AmtError, ErrorClass, InvalidStateError, TlsValidationError
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import (
+    AmtError,
+    ErrorClass,
+    InvalidStateError,
+    TimeoutError_,
+    TlsValidationError,
+)
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.models import OperationReceipt
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.redirection import (
     REDIRECTION_PORT_PLAIN,
@@ -607,8 +624,9 @@ def _attach(module: AnsibleModule, params: dict, *, endpoint: str, port: int) ->
             **fields,
         )
 
-    # Anything short of ATTACHED is decided by whether the daemon is still alive,
-    # not by which of two events happened first.
+    # Nothing short of ATTACHED is a success. Which *kind* of failure it is depends on
+    # whether the daemon is still alive, but the module never falls through to a success
+    # receipt on an unconfirmed attach -- see the two branches below.
     #
     # Previously only an explicit ERROR state failed the module. A daemon that died
     # without writing one -- or that had not written it yet when attach_timeout
@@ -644,6 +662,92 @@ def _attach(module: AnsibleModule, params: dict, *, endpoint: str, port: int) ->
                 session_id=session_id,
                 **final_fields,
             )
+
+        # The daemon is alive and never said ATTACHED. Fixing #44 by liveness alone left
+        # exactly this hole open: the check above only fires when the pid is *dead*, so a
+        # live daemon stuck at 'starting'/'connecting' when attach_timeout expired fell
+        # through to a success receipt carrying changed=true, a session_id, and
+        # operation.error_class=null. Nothing had confirmed that media was being served.
+        #
+        # That receipt is acted on, not read. The caller's next moves are amt_boot arming a
+        # one-time IDE-R boot and amt_power resetting the machine -- see
+        # roles/amt_baremetal_install/tasks/main.yml, where attach_media, arm_boot and reset
+        # are consecutive steps of one block. So the cost of the false success is a machine
+        # power-cycled into media that may not be there, which is precisely the failure #69
+        # closed one level down (reporting 'attached' for a session whose IDE-R feature
+        # toggle firmware had refused). A hard failure here costs a re-probe.
+        #
+        # Two shapes, distinguished because they call for different things from a caller.
+        if fields["session_state"] in media_session.TERMINAL_STATES:
+            # The daemon has published a final verdict that is not 'attached' and is merely
+            # still winding down (closing images; a TLS session.close() does a shutdown round
+            # trip, so 'state file terminal, pid still alive' is a real window rather than a
+            # theoretical one). STATE_ERROR cannot reach here -- it was handled above -- so in
+            # practice this is STATE_DETACHED: the session ended without ever attaching,
+            # typically because the peer closed the connection.
+            #
+            # Settled, therefore NOT indeterminate. There is no attach still in flight to
+            # re-probe, and telling a caller to poll a session that is already over would be
+            # the same species of false claim as the success receipt this branch replaces. The
+            # daemon's own error text and classification are reported, falling back to the
+            # generic class exactly as the dead-daemon branch does.
+            reported = fields.get("error")
+            module.fail_json(
+                msg=(
+                    f"amt_media attach failed: the session reached terminal state "
+                    f"{fields['session_state']!r} without ever reporting 'attached'" + (f": {reported}" if reported else "")
+                ),
+                error_class=_error_class_of(observed),
+                session_id=session_id,
+                **fields,
+            )
+
+        # No verdict at all: still 'starting'/'connecting' (or no readable record) with the
+        # daemon running. Classified deliberately, following the rule #69 established one
+        # level down in media_session._run_daemon -- unsupported_capability for a definite
+        # refusal, timeout for no verdict. A module-level wait that expires with no verdict is
+        # the same "no verdict" case, so: timeout.
+        #
+        # And indeterminate, which in this collection means one specific thing (see
+        # errors.TimeoutError_ and AmtError.to_result): the operation may have taken effect,
+        # so the caller must RE-PROBE rather than retry. That is not a hedge here, it is the
+        # operationally load-bearing part. IDE-R is single-session -- firmware has one
+        # connection to give -- so a blind retry collides with a daemon that may still hold a
+        # live session, while a re-probe is free and already implemented: a repeated
+        # state=attached call for this same session_id takes the idempotency branch at the top
+        # of this function and reports whatever the daemon has since become.
+        #
+        # The session is deliberately NOT torn down. Auto-detaching would be defensible on
+        # the grounds that an orphaned daemon holds the one IDE-R session, but three things
+        # weigh against it. It contradicts the indeterminate contract, which promises the
+        # caller something left to re-probe. media_session.remove_state deletes the session
+        # *log* alongside the state file, so the teardown would destroy the only record of how
+        # far the attach got -- the diagnosis deleted by the code reporting the problem. And
+        # attach_timeout and connect_timeout both default to 10s, so the ordinary way to reach
+        # this branch is an attach that is merely slow and about to succeed; killing it at
+        # t=10s converts that into a guaranteed failure. Cleanup stays with the caller, which
+        # can sequence it against everything else it knows (roles/amt_baremetal_install
+        # detaches from an `always:` block). Hence the session_id and pid below: a failure
+        # that stranded a session the caller could not name would be worse than the receipt
+        # it replaces.
+        err = TimeoutError_(
+            f"amt_media attach did not confirm within attach_timeout={params['attach_timeout']}s: the session "
+            f"process (pid {fields['pid']}) is still running but its last reported state is "
+            f"{fields['session_state']!r}, not 'attached', so it is not established that media is being "
+            f"served. The session was not detached and is still running as session_id "
+            f"{session_id!r}. Re-probe it with another state=attached call for that same session_id "
+            "rather than retrying the attach -- IDE-R is single-session, so a second attach would "
+            "collide with this one. Detach that session_id if you do not intend to wait, and raise "
+            "attach_timeout if slow attaches are normal for this endpoint.",
+            endpoint=endpoint,
+            indeterminate=True,
+        )
+        # to_result() supplies msg/error_class/endpoint and the indeterminate flag from the one
+        # place that owns that contract. `operation` is deliberately left out of it (it is not
+        # passed to the constructor): this module's RETURN documents `operation` as the nested
+        # receipt dict, and both sibling failure paths above omit it rather than emit a string
+        # under that name.
+        module.fail_json(**err.to_result(), session_id=session_id, **fields)
 
     receipt = OperationReceipt(
         action="amt_media.attach",

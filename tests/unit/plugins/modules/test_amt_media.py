@@ -485,18 +485,15 @@ class TestTrustPolicyIsScopedToAttach:
         assert "ca_path" in excinfo.value.kwargs["msg"]
 
 
-class TestAttachFailureIsDecidedByDaemonLiveness:
-    """A dead daemon that never reported 'attached' must fail the module.
+class _DrivesAnAttach:
+    """Shared harness for the two classes below, both of which drive one attach and
+    inspect what the post-wait decision made of it.
 
-    Regression test for issue #44. Only an explicit ERROR state used to fail the
-    attach, so a daemon that died without writing one -- or had not written it yet
-    when attach_timeout expired -- fell through to a success receipt. Bad
-    credentials kill the daemon during the digest handshake, so whether the module
-    noticed was a race, and the wrong-password integration assertion flaked green
-    roughly one run in three.
-
-    Liveness is the unambiguous signal, so these tests pin it rather than the
-    timing.
+    Extracted rather than duplicated because the two classes test the two axes of
+    the *same* decision -- issue #44's "is the daemon still alive" and this
+    change's "did it ever actually confirm" -- and a harness that drifted between
+    them would let one axis be tested against a setup the other never reaches,
+    which is precisely how the original #44 tests went vacuous (see PR #72).
     """
 
     SESSION_ID = "sess-liveness"
@@ -540,6 +537,22 @@ class TestAttachFailureIsDecidedByDaemonLiveness:
         with pytest.raises(AnsibleExitJson) as excinfo:
             main()
         return excinfo.value.kwargs
+
+
+class TestAttachFailureIsDecidedByDaemonLiveness(_DrivesAnAttach):
+    """A dead daemon that never reported 'attached' must fail the module.
+
+    Regression test for issue #44. Only an explicit ERROR state used to fail the
+    attach, so a daemon that died without writing one -- or had not written it yet
+    when attach_timeout expired -- fell through to a success receipt. Bad
+    credentials kill the daemon during the digest handshake, so whether the module
+    noticed was a race, and the wrong-password integration assertion flaked green
+    roughly one run in three.
+
+    Liveness is the unambiguous signal, so these tests pin it rather than the
+    timing. What liveness alone does *not* settle is the live-daemon-never-confirmed
+    case; that is TestUnconfirmedAttachIsNotReportedAsSuccess below.
+    """
 
     def test_dead_daemon_with_no_error_state_fails(self, monkeypatch, runtime_dir, floppy_image):
         # The exact shape that used to slip through: an intermediate state, no
@@ -591,19 +604,22 @@ class TestAttachFailureIsDecidedByDaemonLiveness:
         assert result["session_state"] == "unknown"
         assert result["error_class"] == "protocol"
 
-    def test_live_daemon_still_starting_is_not_failed(self, monkeypatch, runtime_dir, floppy_image):
-        # The liveness axis, held against the *same* intermediate state that fails above: the
-        # only difference is that the daemon is still running, so this is the legitimate
-        # slow-attach case and failing it would make the #44 fix a different bug.
-        result = self._succeed(
+    def test_live_daemon_that_never_confirmed_is_classified_by_liveness_not_by_error(self, monkeypatch, runtime_dir, floppy_image):
+        # The liveness axis, held against the *same* intermediate state as
+        # test_dead_daemon_with_no_error_state_fails above. Both fail -- what liveness decides
+        # is *which* failure. A daemon that is gone can never confirm, so that is a settled
+        # V(protocol) failure; a daemon still running may yet confirm, so this one is V(timeout)
+        # and indeterminate. Collapsing the two would lose the distinction a caller branches on.
+        result = self._fail(
             monkeypatch,
             runtime_dir,
             floppy_image,
             polled_state={"session_id": self.SESSION_ID, "state": media_session.STATE_CONNECTING, "pid": 4242, "devices": {}},
             pid_alive=True,
         )
+        assert result["error_class"] == "timeout"
+        assert result["indeterminate"] is True
         assert result["session_state"] == media_session.STATE_CONNECTING
-        assert result["changed"] is True
 
     def test_live_daemon_that_reported_attached_succeeds(self, monkeypatch, runtime_dir, floppy_image):
         result = self._succeed(
@@ -622,3 +638,194 @@ class TestAttachFailureIsDecidedByDaemonLiveness:
         )
         assert result["session_state"] == media_session.STATE_ATTACHED
         assert result["operation"]["error_class"] is None
+
+
+class TestUnconfirmedAttachIsNotReportedAsSuccess(_DrivesAnAttach):
+    """An attach that never confirmed V(attached) must not return a success receipt,
+    even when the daemon is still alive.
+
+    The second hole on the path issue #44 half-closed. #44's fix decides failure by
+    daemon *liveness*, which only fires when the recorded pid is B(dead). A daemon
+    that is still alive when ``attach_timeout`` expires without ever having reported
+    V(attached) skipped both the ERROR branch and the liveness branch and fell
+    through to ``OperationReceipt(changed=True, ...)`` -- ``changed: true``, a
+    ``session_id``, ``operation.error_class: null``, and ``session_state:
+    'connecting'`` sitting there unread.
+
+    That receipt is acted on, not inspected. ``roles/amt_baremetal_install`` goes
+    straight from this task to ``arm_boot.yml`` and then ``reset.yml``, so a machine
+    gets power-cycled into media that was never confirmed to be served. It is the
+    same family as the defect fixed in #69, where the daemon reported V(attached) for
+    a session whose IDE-R feature toggle firmware had refused: in both cases the
+    module asserted a fact it had not established, and the cost is a machine rather
+    than a retry.
+
+    The classification follows #69's own rule, one level up. #69 taught the daemon to
+    distinguish a definite refusal (V(unsupported_capability)) from a verdict that
+    never arrived (V(timeout)); a module-level wait that expires with no verdict is
+    the same "no verdict" case and is V(timeout) too. It is additionally
+    ``indeterminate``, which in this collection means precisely "the operation may
+    have taken effect, so re-probe rather than retry" -- and re-probing is exactly
+    what a repeated ``state=attached`` call for the same ``session_id`` does. Blind
+    retry is the one thing a caller must not do here, because IDE-R is
+    single-session: a second attach collides with a daemon that may still hold the
+    one connection firmware has to give.
+    """
+
+    def test_live_daemon_still_connecting_at_timeout_fails_as_an_indeterminate_timeout(self, monkeypatch, runtime_dir, floppy_image):
+        result = self._fail(
+            monkeypatch,
+            runtime_dir,
+            floppy_image,
+            polled_state={"session_id": self.SESSION_ID, "state": media_session.STATE_CONNECTING, "pid": 4242, "devices": {}},
+            pid_alive=True,
+        )
+        # Asserting the class and the indeterminate flag, not merely that it failed: the whole
+        # value of this failure to a caller is that it says "re-probe, do not retry", and a
+        # generic failure would say neither.
+        assert result["error_class"] == "timeout"
+        assert result["indeterminate"] is True
+        # ...and emphatically not the success receipt this used to return. `changed` must not be
+        # claimed, and no `operation` key at all rather than a degraded one: RETURN documents
+        # `operation` as the nested receipt dict, so emitting anything else under that name would
+        # be a second false claim on the way out. Both sibling failure paths agree.
+        assert result.get("changed") is not True
+        assert "operation" not in result
+
+    def test_live_daemon_still_starting_at_timeout_fails_the_same_way(self, monkeypatch, runtime_dir, floppy_image):
+        # STATE_STARTING reaches the same gate as STATE_CONNECTING. Both mean "no verdict yet",
+        # and the module has no basis for treating one as more attached than the other; the
+        # documented "session_state may still show starting" case is this one.
+        result = self._fail(
+            monkeypatch,
+            runtime_dir,
+            floppy_image,
+            polled_state={"session_id": self.SESSION_ID, "state": media_session.STATE_STARTING, "pid": 4242, "devices": {}},
+            pid_alive=True,
+        )
+        assert result["error_class"] == "timeout"
+        assert result["indeterminate"] is True
+        assert result["session_state"] == media_session.STATE_STARTING
+
+    def test_the_failure_still_carries_the_session_id_and_pid_so_the_session_can_be_cleaned_up(self, monkeypatch, runtime_dir, floppy_image):
+        # The load-bearing property of this failure. The daemon is still alive and still holds
+        # the single IDE-R session, so a failure that did not name the session would strand it:
+        # the caller could neither detach it nor re-probe it, and every later attach against
+        # that endpoint would collide with it. Worse than the success receipt it replaces.
+        result = self._fail(
+            monkeypatch,
+            runtime_dir,
+            floppy_image,
+            polled_state={"session_id": self.SESSION_ID, "state": media_session.STATE_CONNECTING, "pid": 4242, "devices": {}},
+            pid_alive=True,
+        )
+        assert result["session_id"] == self.SESSION_ID
+        assert result["pid"] == 4242
+
+    def test_the_unconfirmed_session_is_left_running_not_torn_down(self, monkeypatch, runtime_dir, floppy_image):
+        # Deliberately *not* auto-detached, and this pins that choice so it cannot be quietly
+        # reversed. Three reasons. (1) An indeterminate result promises the caller something to
+        # re-probe; detaching destroys it and makes the promise false. (2) media_session's own
+        # teardown path (`remove_state`) deletes the session log file alongside the state file,
+        # and that log is the only record of how far the attach got -- the diagnosis would be
+        # deleted by the code reporting the problem. (3) attach_timeout defaults to 10s and
+        # connect_timeout also defaults to 10s, so the ordinary way to reach this gate is an
+        # attach that is merely slow and about to succeed; killing it would convert that into a
+        # guaranteed failure. Cleanup belongs to the caller, which can do it on its own terms
+        # (roles/amt_baremetal_install already detaches from an `always:` block).
+        with patch("ansible_collections.james_crowley.intel_amt.plugins.module_utils.media_session.request_stop") as request_stop:
+            self._fail(
+                monkeypatch,
+                runtime_dir,
+                floppy_image,
+                polled_state={"session_id": self.SESSION_ID, "state": media_session.STATE_CONNECTING, "pid": 4242, "devices": {}},
+                pid_alive=True,
+                written_after_poll={"session_id": self.SESSION_ID, "state": media_session.STATE_CONNECTING, "pid": 4242, "devices": {}},
+            )
+        request_stop.assert_not_called()
+        # The state file survives, so the session id the failure reported is still resolvable by
+        # a later state=detached or a re-probing state=attached call.
+        assert media_session.read_state(runtime_dir, self.SESSION_ID) is not None
+
+    def test_the_message_names_the_session_and_says_re_probe_rather_than_retry(self, monkeypatch, runtime_dir, floppy_image):
+        result = self._fail(
+            monkeypatch,
+            runtime_dir,
+            floppy_image,
+            polled_state={"session_id": self.SESSION_ID, "state": media_session.STATE_CONNECTING, "pid": 4242, "devices": {}},
+            pid_alive=True,
+        )
+        msg = result["msg"]
+        # An operator reading only the failure line has to learn three things from it: what was
+        # not established, that the session is still running and still theirs to deal with, and
+        # which of re-probe/retry to reach for. Pinning the substance, not the phrasing -- hence
+        # case-insensitive matching on the phrases and an exact match only on the session id,
+        # which is the one token a caller has to copy verbatim into a follow-up task.
+        lowered = msg.lower()
+        assert "attach_timeout" in lowered
+        assert self.SESSION_ID in msg
+        assert "still running" in lowered
+        assert "re-probe" in lowered
+        assert "was not detached" in lowered
+
+    def test_absent_state_with_a_live_daemon_fails_as_an_indeterminate_timeout(self, monkeypatch, runtime_dir, floppy_image):
+        # No readable state record at all (never written, or a torn/corrupt read degraded to
+        # None by read_state) while the daemon is still alive. Nothing was confirmed, so this
+        # cannot be a success either -- and the corresponding dead-daemon case
+        # (test_absent_state_with_dead_daemon_fails) has failed since #44.
+        result = self._fail(monkeypatch, runtime_dir, floppy_image, polled_state=None, pid_alive=True)
+        assert result["error_class"] == "timeout"
+        assert result["indeterminate"] is True
+        assert result["session_state"] == "unknown"
+
+    def test_a_daemon_that_reported_detached_is_a_settled_failure_not_an_indeterminate_one(self, monkeypatch, runtime_dir, floppy_image):
+        # A live daemon whose last report is a *terminal* state is a different case, and must
+        # not be swept into the timeout bucket. STATE_DETACHED means the daemon has published
+        # its verdict -- the session ended without ever attaching, typically because the peer
+        # closed the connection -- and is merely still winding down (closing images, and a TLS
+        # `session.close()` does a shutdown round trip, so the window where the state file says
+        # `detached` while the pid is still alive is real, not theoretical). wait_for_state's
+        # `until` matches STATE_DETACHED, so it returns on sight rather than timing out.
+        #
+        # Nothing about that is indeterminate: there is no attach still in flight to re-probe.
+        # Marking it indeterminate would tell the caller to poll a session that is already
+        # over, which is the same species of false claim as the success receipt this change
+        # removes.
+        result = self._fail(
+            monkeypatch,
+            runtime_dir,
+            floppy_image,
+            polled_state={
+                "session_id": self.SESSION_ID,
+                "state": media_session.STATE_DETACHED,
+                "pid": 4242,
+                "error": "connection closed by peer",
+                "devices": {},
+            },
+            pid_alive=True,
+        )
+        assert result["error_class"] == "protocol"
+        assert result.get("indeterminate") is not True
+        assert "connection closed by peer" in result["msg"]
+
+    def test_an_attached_session_is_still_a_success(self, monkeypatch, runtime_dir, floppy_image):
+        # Positive control. The gate above rejects everything that is not V(attached), so
+        # without this a fix that failed *every* attach would satisfy the whole class.
+        result = self._succeed(
+            monkeypatch,
+            runtime_dir,
+            floppy_image,
+            polled_state={
+                "session_id": self.SESSION_ID,
+                "state": media_session.STATE_ATTACHED,
+                "pid": 4242,
+                "devices": {},
+                "error": None,
+                "tls_peer_fingerprint": None,
+            },
+            pid_alive=True,
+        )
+        assert result["changed"] is True
+        assert result["session_state"] == media_session.STATE_ATTACHED
+        assert result["operation"]["error_class"] is None
+        assert "indeterminate" not in result
