@@ -26,7 +26,10 @@ implying a higher tier than it earns:
    **both** generations, so this tier no longer has to state that particular
    claim per generation. A fourth run, 2026-07-30, read **both** machines with the
    0.5.0 hardware-inventory code and moved that inventory's classes and shapes into
-   this tier as well. All four runs are cited by workflow and job below.
+   this tier as well. A fifth run, 2026-07-31 (pipeline **208**), put stages 9-12 —
+   event log, log clear, sleep/hibernate, and wake-while-off — to real firmware for
+   the first time, on **machine 1 only**, and is the first run whose evidence carries
+   a per-file SHA-256 digest. All five runs are cited by workflow and job below.
 4. **Still unproven** — a short, specific list, kept honest.
 
 The collection is no longer "hardware-unverified". Hardware qualification found
@@ -212,24 +215,25 @@ a role in `roles/` is resolved by `ansible-test` as that role — so a target na
 `amt_baremetal_install` ran the role's `validate.yml` and none of its own tasks, a
 test that could not fail because it never executed.
 
-### `amt_event_log` and `amt_log_clear` — Tier 2 and *only* Tier 2
+### `amt_event_log` and `amt_log_clear` — now Tier 3 on machine 1
 
-Two of the collection's seven modules stop here. `amt_event_log` and `amt_log_clear`
-are unit-tested and mock-integration-tested like every other module — argument
-handling, check mode, the `AMT_MessageLog` iteration loop, record decoding, the
-`ClearLog` invocation and its confirmation guard — but **no hardware qualification
-stage exercises either of them**, so neither appears in Tier 3 and both are listed
-again in Tier 4.
+**This section used to say these two modules stop at Tier 2 — and only Tier 2 —
+because no hardware qualification stage exercised either of them. That is now false
+for machine 1.** Stage 9 (`qualify_event_log.yml`, read-only) and stage 10
+(`qualify_log_clear.yml`, irreversible) both ran for the first time against
+`amt-lab-01`, AMT 16.1.30, and both passed. `amt_event_log` and `amt_log_clear` are
+no longer listed again in Tier 4 in their entirety — see the dedicated Tier 3
+subsection below for the evidence and citation, and the note there about what is
+still missing: machine 2 has never run either stage.
 
-Their wire protocol and record layout come from a captured real-firmware response
-fixture set plus MeshCentral, recorded in `docs/protocol-notes.md` §2.8, which is a
-Tier 1 claim about the *protocol* and not a Tier 3 claim about this collection's
-implementation of it. That gap is why `amt_event_log` returns the **raw bytes** of
-every record alongside the decoded fields: a decode this collection has never
-checked against a live endpoint should not be the only thing a caller can see. See
+Their wire protocol and record layout still also rest on a captured real-firmware
+response fixture set plus MeshCentral, recorded in `docs/protocol-notes.md` §2.8 —
+a Tier 1 claim about the *protocol*, unaffected by and independent of this
+collection's own hardware run. That is still why `amt_event_log` returns the **raw
+bytes** of every record alongside the decoded fields: a decode is not automatically
+trustworthy merely because *some* real record decoded cleanly on one machine. See
 [`docs/amt_event_log.md`](amt_event_log.md) and
-[`docs/amt_log_clear.md`](amt_log_clear.md), whose own opening notes say the same
-thing.
+[`docs/amt_log_clear.md`](amt_log_clear.md).
 
 ### `amt_info`'s hardware/asset inventory — classes and shape now Tier 3, decoded labels still Tier 1-by-citation
 
@@ -437,18 +441,22 @@ about this.
 
 Two machines have now each completed **all eight** stages, on the lab's self-hosted
 CircleCI runner (`crowley/amt-runner`), with TLS pinned to each endpoint's own
-reviewed leaf certificate. **Four** runs contributed, on different dates and in
+reviewed leaf certificate. **Five** runs now contribute, on different dates and in
 different runner environments, and each is recorded as itself rather than averaged
 into one. Every one now carries the identifiers needed to go and look at it — see
 "Two limits on how far Tier 3 can be audited" below for what those identifiers do and
 do not let a reader check:
 
-> **"All eight stages" is a historical statement, not a current one.** These runs
-> predate stages 9-12, which were added 2026-07-31 and have never run. Eight was the
-> whole suite on those dates; it is now eight of twelve. The dated claims below are left
-> exactly as they were because they were true when measured — but "all stages" and "all
-> eight stages" are no longer the same sentence, and nothing here should be read as
-> covering event-log, log-clear, sleep/hibernate or wake-from-off.
+> **"All eight stages" is a historical statement, not a current one.** The first four
+> runs below predate stages 9-12, which were added 2026-07-31. Eight was the whole
+> suite on the dates those four runs measured; it is now eight of twelve. A fifth run,
+> the same day, put stages 9-12 to real firmware for the first time — but only on
+> machine 1. The dated claims below are left exactly as they were because they were
+> true when measured — but "all stages" and "all eight stages" still are not the same
+> sentence as "all twelve", and nothing in the first four runs should be read as
+> covering event-log, log-clear, sleep/hibernate or wake-from-off. The fifth run below,
+> and the dedicated subsections that follow the stage table, are what now covers those
+> four stages — on machine 1 only. Machine 2 has never run any of them.
 
 - **`amt-lab-01` (machine 1), AMT 16.1.30** — all eight stages *as they existed then*, 2026-07-28, on
   Python 3.10 (3.10.12) with ansible-core 2.17, against collection 0.1.0.
@@ -492,12 +500,27 @@ do not let a reader check:
   were cancelled hours later; the read-only job cited here succeeded, and no mutating
   job in it ever started. A reader checking the citation will see the cancelled
   workflow first, which is why it is stated here rather than left to surprise them.
+- **`amt-lab-01` (machine 1), AMT 16.1.30 — stages 9, 10, 11 and 12**, 2026-07-31, the
+  first time any of the four newest qualification stages ran against real firmware.
+  All four succeeded. Limited to machine 1 only, by virtue of every one of these four
+  jobs' own approval gate being exercised only once, against one endpoint; machine 2
+  has never been asked. CircleCI **pipeline 208**, workflow
+  `282b6692-94a2-481b-aacf-32c2cb1b2dfe`; jobs `hardware-tests` (job **2568**, stage 9),
+  `hardware-log-clear` (job **2574**, stage 10), `hardware-sleep-hibernate` (job
+  **2576**, stage 11), `hardware-wake-from-off` (job **2578**, stage 12), all
+  succeeded. **This is the first Tier 3 run whose evidence is digest-pinned**: every
+  one of these four jobs emits a `hardware-evidence/SHA256SUMS` manifest, so a reader
+  can re-hash the published artifact and check it against the run's own record. The
+  four runs above this one remain permanently digest-less — see "Two limits on how far
+  Tier 3 can be audited" below.
 
 So power control, IDE-R media, the writable-image path and native one-time PXE are
 verified on **two machines across two firmware generations**, not one — and
 `amt_info`'s network and system-state facts are now verified on both of those
 generations too, which is what the third run added. The fourth run added the
-hardware/asset inventory on both. See the subsections at the end of this tier.
+hardware/asset inventory on both. The fifth run added stages 9-12 — event log,
+log clear, sleep/hibernate, and wake-while-off — but on **machine 1 only**. See the
+subsections at the end of this tier.
 
 | Stage | Machines | What real firmware confirmed |
 |---|---|---|
@@ -510,6 +533,10 @@ hardware/asset inventory on both. See the subsections at the end of this tier.
 | 6 writable image | 1 and 2 | the device was presented **writable** — MODE_SENSE write-protect bit `0x00`, not `0x80`. On machine 2: `devices.floppy.writable = true`, `bytes_read = 0`, `bytes_written = 0`, `error_class = null` — same shape as machine 1, a writable device with no bytes transferred |
 | 7 native PXE | 1 and 2 | one-time PXE armed and read back as armed, reset issued and recovered, `AMT_BootSettingData` stable afterwards. On machine 2 the `before_arm` and `after_reset` snapshots agree, with `UseIDER=false`, `BIOSSetup=false`, `BootMediaIndex=0`. This also settled issue #13: the prefixed-namespace EPR form **is** accepted by real firmware, now on both generations |
 | 8 idempotent re-probe | 1 and 2 | repeated reads reported `changed: false` and agreed with each other; no session or state was left drifting behind the stages above |
+| 9 event log (read-only) | 1 only | a single `GetRecords` batch read the log to completion: `total_records: 205`, `records_read: 205`, `batches: 1`, `stop_reason: no_more_records`, `complete: true`, `truncated: false`, `filtered_out: 0`, every record decoding with `decode_error: null`. Log metadata decoded coherently alongside: `max_record_size: 21`, `current_number_of_records: 205`, `max_number_of_records: 390`, `overwrite_policy: 2`, `is_frozen: false`, `log_state: 4`. See the subsection below the table |
+| 10 log clear (irreversible) | 1 only | the same 205 records were archived to disk (`complete: true`) *before* the clear; `ClearLog` then reported `records_before: 205`, `records_after: 0`, `cleared: true`, `changed: true`, `return_value: 0`; a separate, independent re-read afterwards confirmed empty (`total_records: 0`, `records: []`, `stop_reason: "no_record_exists"`, `complete: true`). See the subsection below the table |
+| 11 sleep/hibernate | 1 only | all three actions — `sleep-light`, `sleep-deep`, `hibernate` — came back `outcome: "firmware_refused"`, `error_class: "remote_operation"`. AMT rejected every request itself, before it reached the platform; the machine was reported `on` throughout and was left `on`. See the dedicated subsection at the end of this tier — this is a **negative** result, and a consequential one |
+| 12 wake-while-off | 1 only | AMT answered WS-Man **3 for 3** while reporting itself powered off (`off_confirmed_by_amt`), accepted a wake request (`wake_request_accepted: true`), and the machine came back `on` (`restored_to`). `operator_attestation` is `null` — unattended CI has no way to supply it. See the dedicated subsection at the end of this tier for exactly what this does and does not establish |
 
 **What stage 2's match actually proves.** `amt_expected_uuid` is recorded from a
 value this collection itself observed on an earlier run, so a match detects **drift**
@@ -720,10 +747,128 @@ while off, on AC, which is exactly what that stage's behaviour implies. The awkw
 reading was an artefact of the wrong table.
 
 **What this still does not establish.** No deliberate power-off, independent
-confirmation, then WS-Man read has been run against either machine, so reachability while
-off is not *measured* — the evidence now points towards it instead of against it, which
-is a weaker claim than having tested it, and the difference is deliberately preserved
-here. See Tier 4.
+confirmation, then WS-Man read had been run against either machine as of the evidence
+above — that gap is what stage 12 (below) was built to close, on machine 1.
+
+### `amt_event_log` and `amt_log_clear` — Tier 3 on machine 1, stages 9 and 10
+
+**Evidence.** CircleCI pipeline **208**, workflow `282b6692-94a2-481b-aacf-32c2cb1b2dfe`,
+against `amt-lab-01`, AMT 16.1.30, 2026-07-31. Stage 9 (`qualify_event_log.yml`) ran as
+job **2568**; stage 10 (`qualify_log_clear.yml`) ran as job **2574**. Both are the first
+run of either module against real firmware — no earlier stage ever reached them, per the
+Tier 2 subsection above (now retitled to match).
+
+**Stage 9, read-only.** A single `GetRecords` batch read the log to completion:
+`total_records: 205`, `records_read: 205`, `batches: 1`, `stop_reason:
+"no_more_records"`, `complete: true`, `truncated: false`, `filtered_out: 0`, and every
+one of the 205 records decoded with `decode_error: null`. The log's own metadata decoded
+coherently alongside the records — `max_record_size: 21` (confirming the 21-byte record
+layout this collection has assumed since it was written), `current_number_of_records:
+205`, `max_number_of_records: 390`, `overwrite_policy: 2`, `is_frozen: false`,
+`log_state: 4` — and individual record content was itself coherent, e.g.
+`description: "Starting operating system boot process"`, `entity_text: "BIOS"`,
+`entity: 34`, `device_address: 255`. This is what settles the three things the Tier 2
+subsection listed as specifically unproven: that real firmware accepts this collection's
+`GetRecords` iteration as issued, that the 21-byte record layout decodes, and that the
+fields inside those records decode against records a real ME actually wrote.
+
+**Stage 10, irreversible.** Two artifacts. The archive
+(`amt-lab-01-qualify_log_clear-archive.json`) captured the same **205 records**,
+`complete: true`, *before* the clear ran — so the read that validates stage 9's decoder
+survived the clear that then destroyed those records on the endpoint. `ClearLog` itself
+then reported `records_before: 205`, `records_after: 0`, `cleared: true`, `changed:
+true`, `return_value: 0`. The stage does not stop at trusting that return value: a
+second, independent `amt_event_log` read afterwards returned
+`current_number_of_records: 0`, `records_read: 0`, `total_records: 0`, `records: []`,
+`stop_reason: "no_record_exists"`, `complete: true`. So `ClearLog` does what its name
+says on real firmware, confirmed by a separate read rather than by the method's own
+say-so.
+
+**What this settles, and what it does not.** Both stages prove this collection's
+*implementation* of the wire protocol against real firmware for the first time — the
+iteration loop, the 21-byte decode, the archive-before-clear sequencing, and the
+clear-then-reread confirmation. It does **not** independently verify what any individual
+event-code label *means*: stage 9 shows the layout decodes structurally and that the
+sampled records' fields are plausible, not that every event-code name this collection
+has ever assigned is correct. That claim stays exactly where it already was — Tier 1 by
+citation, `docs/protocol-notes.md` §2.8 — for the same existence-vs-meaning reason drawn
+throughout this document. And both stages ran on **one machine, one firmware version**:
+machine 2, AMT 19.0.5, has never run either. See Tier 4.
+
+### Sleep and hibernate: firmware refuses all three, on machine 1
+
+**Evidence.** Stage 11 (`qualify_sleep_hibernate.yml`), CircleCI pipeline **208**,
+workflow `282b6692-94a2-481b-aacf-32c2cb1b2dfe`, job `hardware-sleep-hibernate`
+(**2576**), against `amt-lab-01`, AMT 16.1.30, 2026-07-31. This is the first time any
+hardware stage issued `sleep-light`, `sleep-deep` or `hibernate` — stage 4 exercised
+only `on`/`off`.
+
+**The result is negative, and it is the most consequential one in this run.** All three
+requested actions came back `outcome: "firmware_refused"`, `error_class:
+"remote_operation"`:
+
+| requested `state` | `expected_normalized` | outcome |
+|---|---|---|
+| `sleep-light` | `sleep` | `firmware_refused` |
+| `sleep-deep` | `sleep` | `firmware_refused` |
+| `hibernate` | `hibernate` | `firmware_refused` |
+
+Every attempt: `before: {normalized: "on", raw: 2}`, `restored_to: {normalized: "on",
+raw: 2}`, `probe_final: null`. The machine was healthy throughout and was left exactly
+as it started. The stage's own evidence is explicit that AMT itself rejected the
+request, before it ever reached the platform — this is `firmware_refused`, not
+`os_did_not_transition`, so it is not "the target OS doesn't support S3"; AMT declined
+the request itself.
+
+**This settles the request-path half of what Tier 4 used to list as spanning a split.**
+Whether real firmware accepts CIM codes 3, 4 and 7 as this collection issues them is now
+answered, on this machine: no, it does not. The codes themselves are correct — per the
+DMTF/`go-wsman-messages` mapping already established in Tier 1 — and this result is
+about firmware's willingness to act on them, not about this collection's encoding of
+them. The second half of that old entry — whether the machine actually *enters* S3, S4
+or S5 — remains as out of reach as ever, and is now additionally moot on this specific
+machine: firmware never lets the request reach a platform that could honour it.
+
+**Scope, stated precisely.** This is one machine, one firmware version: AMT 16.1.30 on
+`amt-lab-01`. Machine 2 (AMT 19.0.5) has never been asked to sleep or hibernate. Nothing
+here should be read as "AMT does not support sleep" — only that this specific firmware,
+on the one machine that has ever been asked, refuses all three actions this module
+advertises. See `plugins/modules/amt_power.py` and
+[`docs/amt_power.md`](amt_power.md), both updated to carry this finding where an
+operator reading the option list will see it before trying one of these three states.
+
+### Wake-while-powered-off: reachable and wakeable on machine 1, per AMT's own report
+
+**Evidence.** Stage 12 (`qualify_wake_from_off.yml`), CircleCI pipeline **208**,
+workflow `282b6692-94a2-481b-aacf-32c2cb1b2dfe`, job `hardware-wake-from-off`
+(**2578**), against `amt-lab-01`, AMT 16.1.30, 2026-07-31 — the last stage in the chain,
+and the first time any stage powered a machine off and then tried to reach it.
+
+- `before: {normalized: "on", raw: 2}`
+- `off_confirmed_by_amt: {normalized: "off", raw: 8}`
+- `reachability_probes_while_off`: **3 probes**, `reachability_probe_failures`: **0**
+- `wake_request_accepted: true`
+- `restored_to: {normalized: "on", raw: 2}`
+- `operator_attestation: null`
+
+So AMT answered WS-Man **three times out of three** while reporting itself powered off,
+accepted a wake request, and the machine came back on. This is materially stronger than
+the position this document held before this run ("configuration says it should work,
+nothing has measured it") — the subsection above already established both machines
+report `wake_on_lan_capable: true` from `link_policy` `14` (Sx AC), and this stage is
+the first time that configuration was actually exercised by powering a machine off and
+trying to reach it.
+
+**It is not the full claim, and the gap is preserved deliberately.**
+`off_confirmed_by_amt` is AMT's own self-report of its own power state, not independent
+confirmation of genuine physical power-off — the same distinction stage 2's note draws
+for machine identity. `operator_attestation` is `null` on this run, and will be `null`
+on every unattended CI run, because nothing reachable from CI can supply it; only an
+attended run, with a human physically present or a switched outlet the runner can
+query, can. So what this stage measured is: WS-Man kept answering, and a wake request
+worked, while AMT itself reported the machine off. What it did not measure is whether
+the machine was genuinely, physically off at the time. The Tier 4 entry for this claim
+shrinks to exactly that remaining gap — see Tier 4 below.
 
 ### Two limits on how far Tier 3 can be audited
 
@@ -747,27 +892,30 @@ check. What is recorded now, and what still is not:
   machine 2" resolves to one job UUID. The rows are not repeated with their own
   citations because a stage row that named its own job would have to name two — one
   per machine — and the run list already distinguishes them by date.
-- **Pipeline numbers exist for two of the four runs**, #93 and 167. For machine 1's
-  2026-07-28 qualification and its 2026-07-29 read-only re-run, the workflow and job
+- **Pipeline numbers exist for three of the five runs**, #93, 167 and 208. For machine
+  1's 2026-07-28 qualification and its 2026-07-29 read-only re-run, the workflow and job
   UUIDs were recovered and are recorded above, but the pipeline number was not: the
   API surface used to recover them returns run, workflow and job UUIDs and does not
   expose the pipeline number, and no commit message recorded it at the time. Those two
   runs are therefore cited by UUID and date only. **No pipeline number has been
   inferred from ordering** — sequence would make one easy to guess and a guessed
   identifier is worse than an absent one in a document whose purpose is this.
-- **Runs from now on carry a digest; the four runs above do not, permanently.** This
-  used to read "no artifact digest is recorded anywhere" (issue #90). Every hardware job
-  now emits `hardware-evidence/SHA256SUMS` — a SHA-256 per published evidence file,
+- **Runs from now on carry a digest; the first four do not, permanently.** This used to
+  read "no artifact digest is recorded anywhere" (issue #90). Every hardware job now
+  emits `hardware-evidence/SHA256SUMS` — a SHA-256 per published evidence file,
   computed by the job itself immediately after `tests/hardware/redact-evidence.py` runs
   and before `store_artifacts` publishes, so the digest covers exactly the bytes a
   reader can fetch. A reader who downloads a future run's evidence can re-hash it and
   check the result against that run's cited manifest, which closes the original
-  complaint for every run from here on. **The four runs cited above cannot be given
-  one retroactively, and are explicitly digest-less rather than silently left without
-  one**: their artifacts can still be hashed *as served today*, but that would only
-  prove what CircleCI is serving now, not what this document's authors actually read
-  at the time — the one thing a digest is for. That gap is permanent for those four,
-  the same way the two limits above it are not fixable after the fact.
+  complaint for every run from here on. **Pipeline 208 (stages 9-12, machine 1,
+  2026-07-31) is the first run this applies to**, so it is also the first Tier 3 run
+  in this document whose citation includes a manifest a reader can actually check
+  against. **The four runs before it cannot be given one retroactively, and are
+  explicitly digest-less rather than silently left without one**: their artifacts can
+  still be hashed *as served today*, but that would only prove what CircleCI is
+  serving now, not what this document's authors actually read at the time — the one
+  thing a digest is for. That gap is permanent for those four, the same way the two
+  limits above it are not fixable after the fact.
 
 ## Tier 4: Still unproven
 
@@ -794,73 +942,36 @@ most an attended run or a small addition to the one that exists, said where it a
   alone. What is still unproven is narrower and unchanged — that bytes were *served* —
   because nothing at the other end issues a SCSI read during an unattended run. The
   artifact records what the engine did, not what a BIOS consumed.
-- **`amt_event_log` and `amt_log_clear`, in their entirety.** Neither module has ever
-  touched real Intel AMT firmware. **Stages now exist for both and neither has run**:
-  stage 9 (`qualify_event_log.yml`, read-only, at the read-only floor) and stage 10
-  (`qualify_log_clear.yml`, behind its own approval gate) were added 2026-07-31. Note
-  what that changes and what it does not — the *gap* is now a scheduled run rather than
-  unwritten work, but the *evidence* is exactly as absent as before. A stage that has
-  not run proves nothing.
-  What exists is Tier 2 (see the subsection in Tier 2 above) plus a Tier 1 protocol
-  claim from a captured firmware fixture and MeshCentral. Specifically unproven, and
-  precisely what stages 9 and 10 are built to settle: that real firmware accepts this
-  collection's `GetRecords` iteration as issued, that the 21-byte record layout and
-  little-endian timestamp decode correctly against records a real ME actually wrote,
-  and that `ClearLog` does what its name says on a live endpoint. Stage 10 archives the
-  log to disk and asserts records were captured *before* clearing, so the read that
-  validates the decoder cannot be destroyed by the clear that follows it.
-- **The sleep and hibernate power actions.** `amt_power` accepts `sleep-light`
-  (CIM code 3), `sleep-deep` (code 4) and `hibernate` (code 7), and the codes and
-  expected-state mappings are unit-tested, but no hardware stage has issued any of
-  them. Stage 4 exercised only `on`/`off`. **Stage 11 (`qualify_sleep_hibernate.yml`)
-  now exists and has not run** (added 2026-07-31). These three also depend on the target
-  operating system supporting the corresponding ACPI state, so a failure against
-  real hardware would not necessarily indicate a defect in this collection — which
-  is exactly why they are listed here rather than claimed. Stage 11 reports a three-way
-  outcome for that reason (`confirmed_transition` / `os_did_not_transition` /
-  `firmware_refused`), so an OS that does not support S3 cannot be mistaken for a defect
-  in this collection.
+- **`amt_event_log` and `amt_log_clear` on machine 2.** Both modules are now Tier 3 on
+  machine 1 (stages 9 and 10, pipeline 208, 2026-07-31 — see the dedicated Tier 3
+  subsection). Machine 2 (AMT 19.0.5) has never run either stage. Closeable the
+  ordinary way: run stages 9 and 10 against machine 2, the same repeatability step
+  every other mutating stage has already had. Until then this is one machine, one
+  firmware version, not the two-generation coverage the rest of Tier 3 has.
+- **Sleep and hibernate on machine 2.** Stage 11 has run once, against machine 1, and
+  the answer there was a clean, negative one — see the dedicated Tier 3 subsection.
+  Whether AMT 19.0.5 answers the same three requests the same way is unmeasured;
+  refusal on one firmware version is not evidence about another. Closeable by running
+  stage 11 against machine 2.
+- **Wake-from-off's independent confirmation step.** Stage 12 has run once, against
+  machine 1, and measured that WS-Man kept answering and a wake request was accepted
+  while AMT self-reported the machine off — see the dedicated Tier 3 subsection for the
+  full result. What remains unproven, and is now the *entire* content of this entry, is
+  narrower than it used to be: **independent** confirmation that the machine was
+  genuinely, physically off during those probes, not merely reported off by the same
+  firmware being asked to answer them. `operator_attestation` is `null` on this run and
+  will be `null` on every unattended CI run, because nothing reachable from CI can
+  supply it.
 
-  **This entry spans the split, and says which half is which.** What a stage can close
-  here is whether real firmware accepts codes 3, 4 and 7 as this collection issues them,
-  and what power state it reports afterwards — a stage away, and the reason the entry
-  sits in the backlog. What no stage in this lab can establish is that the machine
-  actually *entered* S3, S4 or S5, because that needs an operating system on the target
-  to honour the request, which is the same limit that keeps the IDE-R write below in the
-  accepted list. A green stage here would therefore prove the request path and not the
-  state transition, and would have to say so.
-- **Whether either endpoint answers WS-Man while powered off.** Still untested, and
-  this entry stays. **Stage 12 (`qualify_wake_from_off.yml`) now exists for exactly this
-  and has not run** (added 2026-07-31) — and note that even a green stage 12 would not
-  fully close this entry: it proves WS-Man answered while *AMT reported* the machine off,
-  which is not the same as independent confirmation of physical power-off. Nothing
-  reachable from CI supplies that. The evidence now points the *other* way than it did in
-  0.3.0.
-  Both machines carry `link_policy` value `14` (Sx AC) and so report
-  `wake_on_lan_capable = true`, and one of them has a MEBx sleep-state setting of
-  *"ON in S0, ME Wake in S3, S4-5"* to match (see the subsection at the end of
-  Tier 3). Configuration therefore says these endpoints should be reachable while off,
-  on AC. **Configuration is not a measurement.** No stage powers a machine off,
-  independently confirms it is off, and then tries to reach it. Machine 1's stage 4
-  `off`-and-restore is *consistent* with a reachable-while-off endpoint but does not
-  demonstrate one, because nothing in that stage confirmed the machine was actually off
-  between the two transitions. The specific missing test is unchanged: a deliberate
-  power-off, an independent confirmation that the machine is off, and then a WS-Man
-  read. Until that runs, this document claims neither that wake-from-off works here nor
-  that it is broken — only that what would have been the leading explanation for a
-  failure (an S0-only link policy) has been ruled out on these two machines, and that
-  the explanation was itself wrong for two releases.
-
-  **This entry spans the split too, at the confirmation step.** Powering a machine off
-  and then attempting a WS-Man read is an ordinary extension of stage 4. The
-  *independent* confirmation that it is off is not: independent means outside this
-  collection's own read path, and that is the same thing stage 2's note says CI cannot
-  reach for machine identity. Supplying it needs something the lab does not have yet — a
-  switched outlet the runner can query, or a human at the machine — so this closes with
-  an attended run or a small addition to the lab, not by adding a task to an existing
-  stage. That is a statement about the shape of the missing test and changes nothing
-  about the claim: reachability while off is still **not measured**, and configuration
-  is still not a measurement.
+  **This entry spans the split, at the confirmation step.** Running stage 12 again — on
+  machine 2, or attended on either machine — is an ordinary extension of what already
+  exists and belongs in this backlog. Supplying *independent* confirmation is not:
+  independent means outside this collection's own read path, the same thing stage 2's
+  note says CI cannot reach for machine identity. That needs something the lab does not
+  have yet — a switched outlet the runner can query, or a human at the machine typing
+  an attestation — so it closes with an attended run or a small addition to the lab, not
+  by adding a task to an existing stage. Nothing about the claim changes because of
+  that: physical power-off is still **not independently confirmed**, on either machine.
 
 ### Permanently unproven — documented as out of reach, and accepted
 
@@ -884,6 +995,15 @@ third firmware generation — the entry moves up to the backlog above and says s
   firmware generations, which strengthens that explanation rather than weakening
   it: the zero is a property of the unattended setup, not of one endpoint. Proving
   a real write needs an operating system on the target that writes.
+- **That a target operating system actually enters S1/S3/S4/S5.** Proving a real
+  transition needs an OS on the target to honour the ACPI request, which this lab does
+  not have — the same limit as the IDE-R write above. On machine 1, AMT 16.1.30, this
+  is now additionally moot rather than merely out of reach: stage 11 measured that
+  firmware refuses `sleep-light`, `sleep-deep` and `hibernate` itself, before any
+  request reaches a platform that could act on it, so there is currently nothing for an
+  OS on that machine to honour. That is a statement about this one firmware version;
+  it says nothing about machine 2 or any other generation, which is why the machine-2
+  repeatability question stays in the backlog above rather than moving here.
 - **That a PXE exchange actually happened.** Stage 7 proves the arming, the reset
   and the recovery. Whether the machine reached a DHCP/TFTP exchange depends on
   boot services this collection cannot observe.
@@ -1024,7 +1144,7 @@ generations in Tier 3 above.
 | 10.x, Enterprise/other modes | Yes | Present | Present | Present | **Inferred** — not tested |
 | 11.x+ Enterprise | Yes | Present | Present | Present | **Inferred** — not tested |
 | 12.x+ | Yes, enhanced | Present | Present | Present | **Inferred** — not tested |
-| **16.1.30** (machine 1) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages as they existed then** (2026-07-28). `amt_info`'s network/system-state facts came back fully populated on a read-only re-run (2026-07-29) |
+| **16.1.30** (machine 1) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages as they existed then** (2026-07-28). `amt_info`'s network/system-state facts came back fully populated on a read-only re-run (2026-07-29). Stages 9-12 then ran here for the first time (2026-07-31, pipeline 208): `amt_event_log`/`amt_log_clear` passed; `sleep-light`/`sleep-deep`/`hibernate` were all refused by firmware; wake-while-off answered WS-Man 3/3 and accepted a wake request |
 | **19.0.5** (machine 2) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages as they existed then** (2026-07-29). Capability flags were read live and all four came back `true`; the network/system-state facts came back fully populated here too |
 
 "Present" in the IDE-R/SOL/PXE columns means "AMT's published feature set for this
@@ -1055,9 +1175,14 @@ still lists is therefore neither "a second machine" nor "a re-run of the first" 
 the specific things no green run on either machine measures — a list now split by
 whether running something would close it:
 
-- **Backlog** — an evidence file for stage 5, `amt_event_log` and `amt_log_clear`
-  against real firmware, the sleep/hibernate request path, and a deliberate power-off
-  followed by a WS-Man read.
+- **Backlog** — that bytes were genuinely served during stage 5, `amt_event_log` and
+  `amt_log_clear` against real firmware on machine 2, the sleep/hibernate request path
+  on machine 2, and independent confirmation of physical power-off for stage 12.
+  Stages 9, 10, 11 and 12 have each now run once, against machine 1 only (pipeline
+  208, 2026-07-31) — see the dedicated Tier 3 subsections — so what is left in this
+  half of Tier 4 for those four stages is machine-2 repeatability and, for stage 12
+  specifically, the independent-confirmation step no CI run can supply.
 - **Accepted as out of reach** — a real SCSI write, a PXE exchange, the internal
-  one-shot role bit, and any third firmware generation. These are not waiting on
-  anyone; they are what an unattended lab with no OS on the target cannot see.
+  one-shot role bit, that a target OS genuinely enters S1/S3/S4/S5, and any third
+  firmware generation. These are not waiting on anyone; they are what an unattended
+  lab with no OS on the target cannot see.
