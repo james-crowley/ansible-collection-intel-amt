@@ -700,16 +700,34 @@ One reading is worth calling out precisely because it shows that boundary workin
 both, while `CIM_Chassis.SerialNumber` populates on both. Consistent across the two
 generations, so it is a property-level gap and not a class-level one.
 
-**This document cannot currently say which of two things is happening**, and the
-distinction matters:
+**This document cannot say which of four things is happening, and the next hardware run
+will.** The distinction matters, and the list is longer than it first looked:
 
-1. firmware omits the `SerialNumber` element from the response entirely; or
-2. firmware returns the element present but empty.
+1. firmware omits the `SerialNumber` element from the response entirely;
+2. firmware returns the element present but empty;
+3. firmware returns it carrying child elements; or
+4. firmware returns it more than once.
 
-`models.optional_str()` maps both to `None` by design (`text.strip() or None`), and the
-evidence artifacts are the module's already-parsed output, so neither artifact nor
-receipt can separate the two. Settling it needs a raw SOAP body from stage 1b, which no
-artifact currently carries. Tracked as **#84**.
+`models.optional_str()` maps all four to `None` by design (it refuses a mapping and a
+list, and `text.strip() or None` handles the rest), and the evidence artifacts are the
+module's already-parsed output — taken *after* that collapse. **1 and 2 are firmware
+limitations; 3 and 4 would be defects in this collection**, a value arriving and being
+dropped, which is why ruling them out is not academic.
+
+This section previously recorded that settling it needed a raw SOAP body from stage 1b.
+**That was wrong, and the correction is worth keeping rather than quietly editing out.**
+The distinction survives the parser intact — `wsman._element_to_value()` gives an omitted
+element no key at all and an empty one a key holding `""` — and is destroyed one call
+later by the coercion. 0.7.0 therefore censuses each property of `CIM_Chassis` and
+`CIM_Card` by *shape* before the coercion runs, publishing property names and one of five
+fixed labels and **no value whatsoever**, and stage 1b both prints and asserts it.
+
+So the next stage 1b run can state, per machine, which of the four applies —
+`operation.hardware_reads['CIM_Card'].property_shapes['SerialNumber']`, in an artifact
+that is redacted and digest-manifested like every other. Until that run happens this
+stays **#84** and stays a gap this document cannot close: the mechanism to answer it is
+Tier 1 (mock-exercised, both firmware shapes served over a real socket), the answer itself
+is not yet Tier 3.
 
 The practical consequence is worth stating rather than leaving implicit: `system` was
 documented as letting an operator tell a board swap from a re-rack, and that inference

@@ -55,6 +55,7 @@ from ansible_collections.james_crowley.intel_amt.plugins.module_utils.hardware i
     MemoryInfo,
     ProcessorInfo,
     StorageInfo,
+    property_shapes,
     requested_fact_groups,
 )
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.models import (
@@ -367,6 +368,12 @@ class AmtClient:
         firmware needed precisely that distinction. It reported four of the six
         groups as ``null`` when firmware had in fact returned all six, and nothing
         in the module's output could contradict the claim.
+
+        The two single-instance classes additionally carry a per-property **shape
+        census** (``ClassRead.property_shapes``). ``ClassRead`` alone diagnoses a
+        whole class; it says nothing about one ``null`` *field* on a class that
+        answered perfectly well, which is what issue #84 is. See
+        ``hardware.property_shapes()``.
         """
         reads: dict[str, ClassRead] = {}
         groups = requested_fact_groups(subsets)
@@ -435,22 +442,52 @@ class AmtClient:
         reported result, so a value of ``"Enumerate"`` is also the signal that the
         bare ``Get`` was refused and this subset cost two round trips more than
         ``hardware.round_trip_estimate()`` predicted.
+
+        A successful read also carries a per-property **shape census** of the
+        instance (``hardware.property_shapes()``). It is taken here, from the
+        parsed instance, because here is the last point at which it can be: the
+        very next thing that happens to this dict is a ``from_instance``, whose
+        ``optional_str`` calls collapse "element absent", "element present and
+        empty", "element carried children" and "element repeated" onto one
+        indistinguishable ``None``. Issue #84 turns on precisely that distinction
+        for ``CIM_Card.SerialNumber``, and no amount of reading the module's output
+        afterwards can recover it.
         """
         fact_group = FACT_GROUP_BY_CLASS[resource_class]
         instance, _get_error_class = self._get_with_error_class(resource_class)
         if instance:
-            return instance, ClassRead(fact_group=fact_group, outcome=READ_OUTCOME_READ, verb="Get", instances=1)
+            shapes, dropped = property_shapes(resource_class, instance)
+            return instance, ClassRead(
+                fact_group=fact_group,
+                outcome=READ_OUTCOME_READ,
+                verb="Get",
+                instances=1,
+                property_shapes=shapes,
+                property_names_dropped=dropped,
+            )
 
         instances, enumerate_error_class = self._enumerate_with_error_class(resource_class)
         if enumerate_error_class is not None:
             # Both verbs were refused. The Enumerate's error class is the one
             # reported: Enumerate is the fallback, so its refusal is what actually
-            # settled the outcome.
+            # settled the outcome. No census: there is no instance to census, which
+            # is a different reading from a census of all-absent properties.
             return None, ClassRead(fact_group=fact_group, outcome=READ_OUTCOME_ABSENT, verb="Enumerate", error_class=enumerate_error_class)
 
         candidates = [item for item in instances or () if isinstance(item, dict) and item]
         if candidates:
-            return candidates[0], ClassRead(fact_group=fact_group, outcome=READ_OUTCOME_READ, verb="Enumerate", instances=len(candidates))
+            # Censuses the instance actually reported, which is candidates[0] -- the
+            # same one BaseboardInfo/ChassisInfo will be built from. A census of a
+            # different instance than the facts came from would be worse than none.
+            shapes, dropped = property_shapes(resource_class, candidates[0])
+            return candidates[0], ClassRead(
+                fact_group=fact_group,
+                outcome=READ_OUTCOME_READ,
+                verb="Enumerate",
+                instances=len(candidates),
+                property_shapes=shapes,
+                property_names_dropped=dropped,
+            )
         return None, ClassRead(fact_group=fact_group, outcome=READ_OUTCOME_EMPTY, verb="Enumerate", instances=0)
 
     def _read_many(self, factory: Any, resource_class: str) -> tuple[list[Any] | None, ClassRead]:

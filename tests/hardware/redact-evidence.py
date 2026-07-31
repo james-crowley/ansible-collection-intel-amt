@@ -35,7 +35,9 @@ artifacts is that a reviewer can tell what the firmware actually did. Firmware
 and BIOS versions, capability flags, power/enabled/operational states, byte
 counters, error classes, session ids, link policies, booleans, and every
 structural key survive untouched. So does the JSON shape: same keys, same
-nesting, same types.
+nesting, same types. And so does ``amt_info``'s per-property shape census, whose
+entries are keyed by property name and would otherwise be censored by the very
+table that catches serial numbers -- see :data:`_PROPERTY_SHAPES_KEY`.
 
 **Pseudonyms, not deletion.** Each distinct value maps to a stable token
 (``<redacted-ipv4-1>``) for the whole run, so two records describing the same
@@ -171,6 +173,49 @@ _IDENTIFYING_KEYS: dict[str, str] = {
 #: test is the condition on which this exemption is sound; do not delete one
 #: without the other.
 _EXEMPT_KEYS: frozenset[str] = frozenset({"raw_hex", "raw_base64", "action", "note"})
+
+#: The key whose value is ``amt_info``'s per-property shape census -- a mapping
+#: from a CIM property name to one of :data:`_PROPERTY_SHAPES`. Handled specially,
+#: and it is the third instance in this file of over-redaction being the failure to
+#: guard against rather than under-redaction.
+#:
+#: The census reports **names and shapes, no values**: whether firmware sent
+#: ``CIM_Card.SerialNumber`` at all, and if it did, whether it was empty. That is
+#: the whole point of it (issue #84), and the entries are therefore keyed by
+#: property name -- which puts the literal string ``SerialNumber`` in key position,
+#: and ``serialnumber`` is in :data:`_IDENTIFYING_KEYS`. Without this handling the
+#: script rewrites the *shape* ``"absent"`` to ``<redacted-serial-1>`` and the
+#: evidence stops saying the one thing it was added to say. Observed, not
+#: hypothesised: that is what the first draft of this pair of changes did, and
+#: ``tests/unit/hardware/test_redact_evidence.py`` now pins it.
+#:
+#: The exemption is scoped two ways so it cannot become a hole:
+#:
+#: * by **container** -- only strings found directly inside a mapping under this
+#:   key, not any string anywhere that happens to read ``absent``;
+#: * by **closed vocabulary** -- only the five shapes ``amt_info`` can actually
+#:   emit. A string in census position that is not one of them did not come from
+#:   the census generator, so it is redacted exactly as it would be anywhere else.
+#:
+#: What this does **not** do, stated plainly: the census *keys* are supplied by
+#: firmware, and this script never rewrites keys (see
+#: ``test_keys_are_never_rewritten`` -- renaming a key corrupts the structure the
+#: redaction is trying to keep readable). Safety there does not come from here, it
+#: comes from the generator: ``plugins/module_utils/hardware.py`` publishes a name
+#: only if it matches the CIM property-name grammar -- a letter then letters,
+#: digits and underscores, 64 max -- and counts anything else instead. Every
+#: identifying category this file knows about needs a character that grammar
+#: forbids (``.``, ``:``, ``-``, ``/``) or is longer than it allows.
+_PROPERTY_SHAPES_KEY = "property_shapes"
+
+#: The closed vocabulary of :data:`_PROPERTY_SHAPES_KEY` values, mirroring
+#: ``hardware.PROPERTY_SHAPES`` in the collection itself. Duplicated deliberately
+#: rather than imported: this script is stdlib-only and runs from system ``python3``
+#: at a point in CI where the collection may not be installed at all, so an import
+#: would make redaction depend on a successful install. Two unit tests keep the two
+#: copies from drifting -- one asserting each state survives here, one asserting
+#: this set equals the collection's.
+_PROPERTY_SHAPES: frozenset[str] = frozenset({"absent", "empty", "text", "nested", "repeated"})
 
 #: Public standards domains that appear inside WS-Man resource URIs and DMTF
 #: namespaces. These are protocol constants, not lab data, and redacting them
@@ -372,6 +417,24 @@ class Redactor:
             text = pattern.sub(replace, text)
         return text
 
+    def redact_property_shapes(self, census: dict[Any, Any]) -> dict[Any, Any]:
+        """Pass the shape labels in one census through untouched; redact anything else.
+
+        Scoped deliberately narrowly -- see :data:`_PROPERTY_SHAPES_KEY`. Only the
+        census mapping's own direct string values are exempt, and only when they are
+        one of the five shapes ``amt_info`` can emit. Anything else found in that
+        position -- a nested structure, a number, or a string that is not a shape --
+        goes through :meth:`redact_value` exactly as it would anywhere else, so the
+        exemption cannot become a general hole in the redaction.
+        """
+        redacted: dict[Any, Any] = {}
+        for name, shape in census.items():
+            if isinstance(shape, str) and shape in _PROPERTY_SHAPES:
+                redacted[name] = shape
+            else:
+                redacted[name] = self.redact_value(shape, key=name if isinstance(name, str) else None)
+        return redacted
+
     def redact_value(self, value: Any, key: str | None = None) -> Any:
         """Redact ``value`` in place-of-structure: same keys, nesting, and types.
 
@@ -380,7 +443,19 @@ class Redactor:
         rewritten.
         """
         if isinstance(value, dict):
-            return {k: self.redact_value(v, key=k if isinstance(k, str) else None) for k, v in value.items()}
+            redacted: dict[Any, Any] = {}
+            for child_key, child in value.items():
+                name = child_key if isinstance(child_key, str) else None
+                # The shape census is handled as a unit rather than value by value,
+                # because what makes its entries safe is *where they are* -- see
+                # _PROPERTY_SHAPES_KEY. Reached only for a mapping, so a
+                # `property_shapes: null` on a class with no instance to census
+                # takes the ordinary path and stays null.
+                if name == _PROPERTY_SHAPES_KEY and isinstance(child, dict):
+                    redacted[child_key] = self.redact_property_shapes(child)
+                else:
+                    redacted[child_key] = self.redact_value(child, key=name)
+            return redacted
         if isinstance(value, list):
             return [self.redact_value(item) for item in value]
         if isinstance(value, str):

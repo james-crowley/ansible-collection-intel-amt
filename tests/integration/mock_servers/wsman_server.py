@@ -502,7 +502,20 @@ class AmtState:
     # the vendor fixtures these handlers derive from do carry what look like real
     # ones, and none of those is reproduced anywhere in this repository.
     chassis_serial_number: str = "MOCKCHASSIS0001"
-    baseboard_serial_number: str = "MOCKBOARD0001"
+    #: ``None`` omits the ``SerialNumber`` element from the ``CIM_Card`` response
+    #: entirely; ``""`` emits it empty. Both exist because both are firmware
+    #: behaviours a client must be able to tell apart, and it cannot tell them apart
+    #: from the parsed facts: ``models.optional_str`` renders both as ``null``, which
+    #: is what left issue #84 -- board serial null on both lab machines while the
+    #: chassis serial populates -- unresolvable for three releases.
+    #:
+    #: ``_value_to_xml`` already implements the distinction (``None`` renders
+    #: nothing, ``""`` renders an empty element), so serving it needs no new
+    #: rendering path -- only the ability to ask for it. Which of the two a firmware
+    #: does is a property of that firmware, so it is a start-up flag on
+    #: ``run_wsman_mock.py`` rather than something a running server can be switched
+    #: between.
+    baseboard_serial_number: str | None = "MOCKBOARD0001"
     #: CIM_Chassis.ChassisPackageType. Defaults to the real fixture's 0, which is
     #: the *defined* value "Unknown" -- distinct from a value outside the table.
     #: Mutable so a test can serve a defined non-zero value and an undefined one.
@@ -1159,6 +1172,15 @@ def _get_card(state: AmtState) -> dict[str, object]:
     reported one for the other would otherwise pass.
 
     ``Tag`` is again the class name, verbatim from the fixture.
+
+    ``SerialNumber`` is the one field here whose *absence* is configurable, and it
+    is the only field in this mock for which that is true. Both lab machines return
+    this class populated with manufacturer, model and version and **no serial**
+    (issue #84), while the vendor fixture carries one -- so the fixture establishes
+    that the property exists and establishes nothing about whether a given firmware
+    fills it in. ``state.baseboard_serial_number`` of ``None`` omits the element and
+    ``""`` emits it empty, which are two different firmware behaviours that produce
+    the same ``null`` fact. See :class:`AmtState`.
     """
     return {
         "CanBeFRUed": True,

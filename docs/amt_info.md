@@ -117,6 +117,8 @@ Everything is nested under a single `amt` key (`type: dict`, `returned: success`
 | `operation.gather_subset` | `list[str]` | always | **New in 0.5.0.** What `gather_subset` actually resolved to, sorted. Worth checking when `!`-negation is in play: `['!memory']` resolves to everything but memory, which is *more* than the default. |
 | `operation.wsman_requests_estimated` | `int` | always | **New in 0.5.0.** Best-case WS-Man HTTP request count for the resolved subsets. "Best case" is load-bearing — a faulting `Get` costs a further `Enumerate`/`Pull` pair on top. |
 | `operation.hardware_reads` | `dict` | when a hardware subset was requested | **New in 0.6.0.** What happened when each inventory class was read, keyed by WS-Man class name. Each entry carries `fact_group` (which `amt.hardware` key the result was filed under), `outcome` (`read`/`empty`/`absent`), `verb` (`Get`/`Enumerate`), `instances`, and `error_class` when refused. Diagnostics **alongside** the facts, never instead of them — an unreadable class still yields `null`. See [Three distinguishable outcomes per fact group](#three-distinguishable-outcomes-per-fact-group). |
+| `operation.hardware_reads[<class>].property_shapes` | `dict` or `null` | `CIM_Chassis` and `CIM_Card` only | **New in 0.7.0.** Per-property census of the instance that was read: property name → one of `absent`, `empty`, `text`, `nested`, `repeated`. **Names and shapes only — no property value appears here, in any form.** `null` when there was no instance to census, which is not the same as a census in which everything is `absent`. See [Why one `null` field is not the same as a `null` class](#why-one-null-field-is-not-the-same-as-a-null-class). |
+| `operation.hardware_reads[<class>].property_names_dropped` | `int` | `CIM_Chassis` and `CIM_Card` only | **New in 0.7.0.** How many property names were withheld from `property_shapes` for not being CIM identifiers. Normally `0`; anything else means a firmware sent a shape nobody has seen. |
 
 `amt_info` previously had neither the nested-`operation` shape nor the spread shape —
 see [Capability matrix](capability-matrix.md). It now gets the same `operation` receipt
@@ -356,6 +358,40 @@ group populated.
 `operation.hardware_reads[<class>].fact_group` states the mapping for every class in
 every response.
 
+### Why one `null` field is not the same as a `null` class
+
+The table above is about a whole fact **group** being `null`. A different reading, which
+`outcome` cannot describe at all, is a single `null` **field** on a class that answered
+perfectly: `amt.hardware.baseboard.serial_number` is `null` on both lab machines while
+`model`, `manufacturer`, `version`, `can_be_frued` and `package_type` all populate and
+`outcome` is `read`.
+
+`null` there has four possible causes, and they are exactly the inputs this collection's
+string coercion refuses:
+
+| `property_shapes[<Property>]` | Firmware sent | Whose limitation |
+|---|---|---|
+| `absent` | no such element in the response | firmware's — `null` is the honest answer |
+| `empty` | the element, carrying no text | firmware's — a different answer, and a different fact about the firmware |
+| `text` | the element with text in it | **nobody's — if the fact is still `null`, this is a contradiction and one of the two is wrong** |
+| `nested` | the element, carrying child elements | **this collection's** — the coercion refuses a mapping, so a value that arrived was dropped |
+| `repeated` | the element more than once | **this collection's** for a scalar property; expected for a CIM array |
+
+Two consequences worth being explicit about:
+
+- **A one-element CIM array reads `text`, not `repeated`.** The parser collapses a lone
+  repeated element to a bare string, so that is genuinely what reached the coercion. The
+  census reports the shape the parser saw, not the shape the schema declares — reporting
+  the schema's would make it lie about which shape produced the `null`.
+- **The census is scoped to `CIM_Chassis` and `CIM_Card`.** A census is a statement about
+  one instance, so a multi-instance class would need one per DIMM and grow the receipt
+  with the machine rather than with the question. Those two are also the pair whose
+  asymmetry is the open question, so having both censuses in one receipt *is* the finding.
+
+Property names firmware sent that this collection does not read are included, deliberately:
+"the board serial arrives under a property we never look at" is a live hypothesis for #84,
+and the census is the only place it would be visible.
+
 ### Value tables: where every mapping came from
 
 This is the part of the feature most likely to be wrong, and this project has the scar
@@ -448,10 +484,21 @@ provide. Stated explicitly so nobody concludes it was overlooked:
   `can_be_frued` and `package_type` normally, and while `CIM_Chassis.SerialNumber`
   populates.
 
-  Nothing available distinguishes "firmware omitted the element" from "firmware returned
-  it empty": `optional_str()` maps both to `null` by design, and the evidence artifacts
-  are already-parsed module output. Settling it needs a raw SOAP body. Tracked as issue
-  **#84**.
+  Which of the two firmware is doing is **now visible, and was not before 0.7.0**.
+  `optional_str()` maps four different findings onto one `null` — element absent, element
+  present but empty, element carrying child elements, element repeated — and every
+  evidence artifact is already-parsed module output, taken after that collapse. This was
+  previously described here as needing a raw SOAP body to settle. It does not:
+  `operation.hardware_reads['CIM_Card'].property_shapes['SerialNumber']` reports which of
+  the four it was, because the parsed instance still carries the distinction (an omitted
+  element has no key; an empty one has a key holding `""`) and the census is taken before
+  the coercion runs. Tracked as issue **#84**, which stays open until a hardware run
+  reports that value.
+
+  Two of the four shapes would change who is at fault. `absent` or `empty` means firmware
+  is not supplying a board serial and `null` is the honest answer. `nested` or `repeated`
+  would mean firmware sent something and **this collection dropped it** — a defect here,
+  not a firmware limitation.
 
   **The consequence is worth stating plainly, because the `system` subset's own
   documentation claims otherwise above:** a chassis serial plus a board serial is what
@@ -502,7 +549,9 @@ name.
 Two observed limits on real firmware, both documented above rather than buried here:
 
 - **`baseboard.serial_number` is `null` on both machines** while `chassis.serial_number`
-  populates. `CIM_Card` is otherwise fully readable. Tracked as issue #84.
+  populates. `CIM_Card` is otherwise fully readable. Tracked as issue #84 — and as of
+  0.7.0 the next hardware run reports *why*, in
+  `operation.hardware_reads['CIM_Card'].property_shapes['SerialNumber']`.
 - **`operational_status` is `[0]` (`"unknown"`) wherever it appears**, and absent
   entirely on `CIM_PhysicalMemory`. Reported as received; infer no health from it.
 

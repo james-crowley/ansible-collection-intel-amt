@@ -226,13 +226,183 @@
     # above) explains for the live debug output, just not yet fixed for what
     # actually gets published. 0.6.0's hardware_reads diagnostic -- outcome,
     # error_class, and which of Get/Enumerate answered, per class -- had no
-    # durable artifact until this task carried it too.
+    # durable artifact until this task carried it too. 0.7.0's per-property shape
+    # census rides in on the same field, so the artifact now records which of the
+    # four ways a scalar fact can be null actually happened -- and it needs no
+    # change here to do so, because `operation` was already saved whole. Anything
+    # added to this directory is redacted and then SHA-256'd by
+    # .circleci/config.yml's redact-hardware-evidence command, in that order, so
+    # the census is covered by both without a new step.
     - name: Record hardware inventory evidence for this target
       ansible.builtin.copy:
         content: "{{ {'facts': amt_hw.amt, 'operation': amt_hw.operation} | to_nice_json }}\n"
         dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_hardware_inventory.json"
         mode: "0600"
       delegate_to: localhost
+
+    # Deliberately AFTER the evidence file is written, unlike the read-outcome
+    # cross-check above it. This stage exists to produce an artifact, and an
+    # assertion that fails before the artifact is written destroys the very
+    # evidence someone would need to understand the failure. Everything below
+    # only reads what has already been saved, so it can fail as loudly as it
+    # likes.
+    - name: "Issue #84: which firmware behaviour produced a null identity field"
+      # Shared by both tasks below rather than repeated in each, so the shape a
+      # message reports and the shape an assertion tests can never diverge.
+      #
+      # Every lookup here is render-safe on purpose, and the reason is a trap this
+      # stage just walked into: ansible.builtin.assert finalizes BOTH messages before
+      # it evaluates a single condition, so a success_msg that cannot be templated
+      # replaces the fail_msg with a template error and the failure stops saying what
+      # failed. That is the same "structurally incapable of reporting itself" defect
+      # the first run of this stage shipped. The strictness lives in the conditions,
+      # which use no defaults; the messages only have to survive.
+      vars:
+        # Defaulted to an empty mapping, not a plausible reading: this is the
+        # container the presence checks below run `.keys()` / membership tests
+        # against, and on an amt_info older than 0.7.0 (no hardware_reads key at
+        # all) an undefaulted lookup here fails the whole block before condition
+        # 1 -- the one written to name exactly that case -- ever gets to run.
+        # `reads == {}` makes "amt_info is older than 0.7.0" a normal, reported
+        # assertion failure instead of an unrelated Jinja traceback. It does not
+        # touch strictness: no property value is defaulted, only the container
+        # that says which properties exist.
+        reads: "{{ amt_hw.operation.hardware_reads | default({}, true) }}"
+        censused: "{{ ['CIM_Chassis', 'CIM_Card'] }}"
+        shapes: "{{ ['absent', 'empty', 'text', 'nested', 'repeated'] }}"
+        chassis_census: "{{ reads['CIM_Chassis'].property_shapes | default({}, true) }}"
+        board_census: "{{ reads['CIM_Card'].property_shapes | default({}, true) }}"
+        chassis_serial_shape: "{{ chassis_census['SerialNumber'] | default('not reported') }}"
+        board_serial_shape: "{{ board_census['SerialNumber'] | default('not reported') }}"
+      block:
+        # `hardware_reads.outcome` diagnoses a whole CLASS, and on both lab machines
+        # CIM_Card's outcome is `read`: manufacturer, model and version all come
+        # back. What is null is one FIELD, `baseboard.serial_number`, on AMT 16.1.30
+        # and 19.0.5 alike, while `chassis.serial_number` populates. Nothing
+        # published before now could say whether firmware omitted the SerialNumber
+        # element or sent it empty, because `optional_str()` renders both as null --
+        # so #84 could only be answered by guessing, which it explicitly refuses to
+        # do.
+        #
+        # The census is names and shapes, never values. A property value here would
+        # be a leak into a world-readable artifact that redact-evidence.py
+        # structurally cannot catch, because the entries are keyed by property name
+        # and that script never rewrites keys. Asserted below, not trusted.
+        - name: Report the per-property shape census for the two identity-plate classes
+          ansible.builtin.debug:
+            msg:
+              chassis_properties: "{{ reads['CIM_Chassis'].property_shapes | default('not reported -- amt_info is older than 0.7.0', true) }}"
+              baseboard_properties: "{{ reads['CIM_Card'].property_shapes | default('not reported -- amt_info is older than 0.7.0', true) }}"
+              # The two lines issue #84 has been waiting for. `absent` means firmware
+              # sent no such element, so the null is firmware's answer; `empty` means
+              # it sent the element carrying nothing, which is a different answer;
+              # `nested` or `repeated` would mean firmware sent something and THIS
+              # COLLECTION dropped it, which is our defect and not a limitation.
+              chassis_serial_shape: "{{ chassis_serial_shape }}"
+              board_serial_shape: "{{ board_serial_shape }}"
+
+        - name: Require the shape census to be present, safe, and to explain any null identity field
+          vars:
+            # Per-class dropped-name counters, built the same way
+            # chassis_census/board_census (above) are: a plain `reads['X'].y`
+            # lookup with `| default(...)` on the OUTSIDE. Deliberately NOT
+            # `censused | map('extract', reads, 'property_names_dropped')`:
+            # measured on ansible-core 2.19.11 and 2.21.2 (not 2.17.14, which
+            # is more lenient here), `extract()` raises out of the template
+            # engine -- not a graceful Undefined -- the instant a censused
+            # class name IS a key of `reads` but that class's own dict lacks
+            # `property_names_dropped` (an amt_info between 0.6.0 and 0.7.0,
+            # say, which has hardware_reads but not yet this field). A plain
+            # subscript chain survives that on every floor, which is why it
+            # is what chassis_census/board_census already use.
+            #
+            # The `default()` here deliberately omits the `true` "also
+            # replace falsy" flag that chassis_census/board_census use: 0 is
+            # the ordinary, expected value of this counter on every healthy
+            # read, and 0 is falsy in Jinja. `default('not reported', true)`
+            # was tried and measured to replace that legitimate 0 with the
+            # string 'not reported' on every single read, turning the
+            # `== 0` checks below into a permanent, silent failure -- the
+            # opposite of the render-safety this variable exists for. Plain
+            # `default(...)` only substitutes for genuinely Undefined (the
+            # key truly absent), which is exactly the one case being guarded
+            # against; `default(none)` is avoided regardless (see
+            # scripts/check-default-none-template.sh).
+            chassis_names_dropped: "{{ reads['CIM_Chassis'].property_names_dropped | default('not reported') }}"
+            board_names_dropped: "{{ reads['CIM_Card'].property_names_dropped | default('not reported') }}"
+            # The property NAMES whose shape is not one of the five, for the failure
+            # message. Names, not entries: one thing this task checks for is a
+            # firmware value reaching the census, and a message that dumped the
+            # census to prove it would print that value into the job log -- a leak
+            # guard that leaks. CircleCI masks context values in log output, and a
+            # serial number is not a context value; it comes from firmware.
+            #
+            # Built from chassis_census/board_census (already-safe, already
+            # computed above) rather than `censused | map('extract', reads,
+            # 'property_shapes')`, for the identical reason chassis_names_dropped
+            # is not built through extract(): that shape of lookup is the one
+            # this whole variable exists to survive, and it does not survive
+            # itself.
+            offenders: >-
+              {{ ((chassis_census | dict2items) + (board_census | dict2items))
+                 | rejectattr('value', 'in', shapes) | map(attribute='key') | list }}
+          ansible.builtin.assert:
+            that:
+              # Both classes answered on both machines, so both must carry a census.
+              # A missing one is not a firmware finding -- it means this stage is
+              # running against an amt_info that cannot answer #84 at all, and the
+              # debug output above is reporting a default string as if it were
+              # evidence. No defaults in this condition, deliberately: the whole
+              # lesson of #85 is that `| default(...)` on the thing being tested for
+              # converts an absence into a plausible-looking reading.
+              - censused | reject('in', reads.keys() | list) | list | length == 0
+              - reads['CIM_Chassis'].property_shapes is defined and reads['CIM_Chassis'].property_shapes is not none
+              - reads['CIM_Card'].property_shapes is defined and reads['CIM_Card'].property_shapes is not none
+              # Shapes only. If a value ever reaches this map it is published
+              # verbatim into hardware-evidence, and the redactor cannot protect it.
+              - offenders | length == 0
+              # Compared inline against the subscript expression, deliberately NOT
+              # against chassis_names_dropped/board_names_dropped (below): those two
+              # vars exist only so fail_msg has something safe to print, and on
+              # ansible-core <= 2.18 a `vars:` entry that is one bare `{{ ... }}`
+              # round-trips a real int through text and back -- the exact class of
+              # defect scripts/check-default-none-template.sh exists to catch, just
+              # for `0` rather than `none`. Measured: on 2.17.14 a class with a
+              # genuinely clean property_names_dropped of 0 came back through that
+              # var as the STRING "0", which is never `== 0`, so this condition
+              # would fail every healthy read on the collection's declared floor.
+              # Comparing the untouched subscript result inline keeps this a native
+              # Jinja boolean expression rather than a stored scalar, which does not
+              # round-trip and was confirmed correct on 2.17.14 through 2.21.2 alike.
+              - (reads['CIM_Chassis'].property_names_dropped | default(-1)) == 0
+              - (reads['CIM_Card'].property_names_dropped | default(-1)) == 0
+              # A null serial must be explained by its own census entry. This is what
+              # makes the evidence self-checking: a null fact whose census says
+              # `text` is a contradiction, and one of the two is wrong -- which is
+              # exactly the failure mode the first run of this stage shipped, a
+              # summary nothing in the output could contradict.
+              - amt_hw.amt.hardware.baseboard.serial_number is not none or board_serial_shape != 'text'
+              - amt_hw.amt.hardware.chassis.serial_number is not none or chassis_serial_shape != 'text'
+            fail_msg: >-
+              The per-property shape census is missing, malformed, or contradicts the facts for
+              {{ inventory_hostname }}. Do not read this as a firmware finding: it means either
+              amt_info is older than 0.7.0, or a property value has reached a field that is
+              published to a world-readable artifact and cannot be redacted, or a null identity
+              field is claiming a shape that says it should not be null.
+              Censused classes present: {{ censused | select('in', reads.keys() | list) | list }}.
+              Properties carrying something outside {{ shapes }}: {{ offenders }}.
+              Names withheld for not being CIM identifiers: CIM_Chassis={{ chassis_names_dropped }},
+              CIM_Card={{ board_names_dropped }}.
+              The offending values are deliberately NOT reproduced here -- one of the things
+              this check catches is a firmware value in the census, and printing it to prove
+              that would publish it to the job log. Read the redacted evidence artifact.
+            success_msg: >-
+              Shape census present for CIM_Chassis and CIM_Card on {{ inventory_hostname }}:
+              chassis SerialNumber is {{ chassis_serial_shape }}, board SerialNumber is
+              {{ board_serial_shape }}. That pair is the answer to issue #84 for this machine.
+              Record it before drawing any conclusion about firmware -- and note that `nested`
+              or `repeated` on either would make the null this collection's bug rather than a
+              firmware limitation.
 
     - name: Remind the operator what amt_expected_uuid is for, if it is still unset
       ansible.builtin.debug:

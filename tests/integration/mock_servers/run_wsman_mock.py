@@ -38,7 +38,11 @@ fitted, and whether a bare `Get` answers for the two singletons are all properti
 the endpoint. `--no-storage-class` exists specifically to prove the fact groups degrade
 *independently* -- a firmware AMT cannot enumerate disks on must still report its DIMMs
 and its serial number, and a single all-or-nothing flag could not tell that apart from
-a client that gives up on the first fault. All are start-up flags
+a client that gives up on the first fault. `--baseboard-serial` is one level narrower
+again -- not which classes a firmware implements but whether it fills in one property of
+one class, and if not, whether it omits the element or sends it empty. Those two are
+indistinguishable in the parsed facts and are what issue #84 turns on, so both are
+served here rather than reasoned about. All are start-up flags
 rather than a control channel -- a
 target that needs them starts a second mock process configured that way, which keeps
 every running server's behaviour fixed for its whole lifetime and therefore keeps a
@@ -138,6 +142,18 @@ def _parse_args() -> argparse.Namespace:
         default=2,
         help="How many CIM_MediaAccessDevice instances to serve",
     )
+    parser.add_argument(
+        "--baseboard-serial",
+        choices=("populated", "empty", "absent"),
+        default="populated",
+        help=(
+            "How CIM_Card reports SerialNumber: populated, present-but-empty, or the element "
+            "omitted entirely. The last two both render amt.hardware.baseboard.serial_number "
+            "null, which is exactly why issue #84 needed a per-property shape census to tell "
+            "them apart -- so both have to be servable over a real socket rather than only "
+            "asserted against a parser a unit test mocked away"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -177,6 +193,14 @@ def main() -> None:
     server.faults.hardware_get_faults = args.hardware_get_faults
     server.state.memory_dimm_count = args.memory_dimm_count
     server.state.storage_device_count = args.storage_device_count
+    # Whether this firmware fills in CIM_Card.SerialNumber, and if not, how it says
+    # so. `None` omits the element; `""` emits it empty. Both lab machines are one
+    # of these two and nothing published so far can say which -- see the flag's help
+    # and AmtState.baseboard_serial_number.
+    if args.baseboard_serial == "empty":
+        server.state.baseboard_serial_number = ""
+    elif args.baseboard_serial == "absent":
+        server.state.baseboard_serial_number = None
     if args.empty_message_log:
         # An event log that exists but is empty. Distinct from --no-message-log:
         # "the class is absent" is an unsupported_capability, while "the log holds
