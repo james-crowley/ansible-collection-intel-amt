@@ -267,12 +267,19 @@ applies here exactly as it does elsewhere.
 What Tier 2 still buys — and it is what makes the *labels*, rather than the plumbing,
 trustworthy:
 
-- **666 unit tests**, counted as the growth of the four test files this work touched —
-  `module_utils/test_hardware.py`, `module_utils/test_client.py`,
-  `modules/test_amt_info.py`, `mock_servers/test_wsman_server.py` — which held **217
-  before 0.5.0 and hold 883 now**. The basis is stated because the figure it replaces
-  did not state its own, and because reconstructing that figure is the only way to know
-  whether the replacement measures the same thing.
+- **666 unit tests.** **What that number measures**, written out so it cannot quietly
+  come to mean something else: `pytest --collect-only` over the four test files this work
+  touched — `module_utils/test_hardware.py`, `module_utils/test_client.py`,
+  `modules/test_amt_info.py`, `mock_servers/test_wsman_server.py` — **minus their
+  pre-0.5.0 baseline of 217**. Those four collect **883** today, and 883 − 217 = 666.
+
+  It is **not** a count of tests that exercise the inventory and nothing else: three of
+  those files predate the inventory and keep testing what they always did, and the fourth
+  is dedicated to it. It is **not** the whole suite. Anyone updating this figure has to
+  re-collect those same four files against the same 217 baseline, or replace the measure
+  and say so in the same edit — because the reason the previous number needed
+  reconstructing at all is that it stated no measure, which let it drift into meaning
+  something its arithmetic never claimed.
 
   **609**, the number here previously, turns out to have been defensible on either of
   the two readings available to it. It is the whole-suite delta of the 0.5.0 feature
