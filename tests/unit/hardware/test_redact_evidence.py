@@ -18,6 +18,7 @@ evidence nobody keeps, which is how a redaction step gets deleted a release late
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import json
 from pathlib import Path
@@ -43,6 +44,19 @@ def _load_module() -> Any:
 
 
 redact_evidence = _load_module()
+
+
+def _load_collection_hardware_module() -> Any:
+    """The collection's own ``hardware`` module, for the two drift guards below.
+
+    Imported lazily and only where it is needed. The script under test is
+    deliberately stdlib-only and is loaded by path above; making this whole test
+    file depend on an importable ``ansible_collections`` tree at module scope would
+    couple the redaction tests to a collection install they otherwise do not need.
+    """
+    from ansible_collections.james_crowley.intel_amt.plugins.module_utils import hardware
+
+    return hardware
 
 
 @pytest.fixture
@@ -708,3 +722,156 @@ def test_non_json_files_are_reported_rather_than_silently_skipped(tmp_path: Path
     out = capsys.readouterr().out
     assert "WARNING" in out
     assert "console.log" in out
+
+
+# --- the per-property shape census ------------------------------------------
+#
+# `operation.hardware_reads.<class>.property_shapes` is keyed by CIM property name
+# and its values are shape labels, not firmware values. That puts the literal
+# string "SerialNumber" in key position, and `serialnumber` is in
+# _IDENTIFYING_KEYS -- so without the container-scoped exemption this script
+# rewrites the shape "absent" to "<redacted-serial-1>" and the evidence stops
+# saying the one thing the census was added to say. Over-redaction, and the silent
+# kind: nobody downloading the artifact could tell it had happened.
+
+
+#: A census as amt_info emits it, in the position the evidence file carries it.
+def _census_evidence(card: dict[str, str], chassis: dict[str, str] | None = None) -> dict[str, Any]:
+    return {
+        "operation": {
+            "action": "get_facts",
+            "hardware_reads": {
+                "CIM_Chassis": {
+                    "fact_group": "chassis",
+                    "outcome": "read",
+                    "verb": "Get",
+                    "instances": 1,
+                    "error_class": None,
+                    "property_shapes": chassis if chassis is not None else {"SerialNumber": "text"},
+                    "property_names_dropped": 0,
+                },
+                "CIM_Card": {
+                    "fact_group": "baseboard",
+                    "outcome": "read",
+                    "verb": "Get",
+                    "instances": 1,
+                    "error_class": None,
+                    "property_shapes": card,
+                    "property_names_dropped": 0,
+                },
+            },
+        }
+    }
+
+
+@pytest.mark.parametrize("shape", ["absent", "empty", "text", "nested", "repeated"])
+def test_a_shape_under_an_identifying_property_name_survives(redactor: Any, shape: str) -> None:
+    """Every shape, under the one property name that collides with the key table.
+
+    Parameterised over all five rather than one, because only the states an
+    identifying key is asked about would show the bug -- and every state is asked
+    about `SerialNumber` on some machine.
+    """
+    result = redactor.redact_value(_census_evidence({"SerialNumber": shape}))
+    census = result["operation"]["hardware_reads"]["CIM_Card"]["property_shapes"]
+    assert census["SerialNumber"] == shape, "the shape census was censored; the artifact no longer answers issue #84"
+
+
+def test_the_asymmetry_the_census_exists_to_record_survives_redaction(redactor: Any) -> None:
+    """The whole finding, end to end: chassis has a serial, the board does not."""
+    result = redactor.redact_value(_census_evidence({"SerialNumber": "absent"}, chassis={"SerialNumber": "text"}))
+    reads = result["operation"]["hardware_reads"]
+    assert reads["CIM_Chassis"]["property_shapes"]["SerialNumber"] == "text"
+    assert reads["CIM_Card"]["property_shapes"]["SerialNumber"] == "absent"
+
+
+@pytest.mark.parametrize("name", ["SerialNumber", "AssetTag", "SKU", "Host", "User", "Path", "Tag", "Model"])
+def test_every_property_name_that_collides_with_the_key_table_is_safe(redactor: Any, name: str) -> None:
+    """Not only `SerialNumber`: firmware is entitled to send any of these, and each
+    lowercases onto an entry in _IDENTIFYING_KEYS (or, for Tag/Model, onto nothing --
+    included as the control that the exemption is not what makes those two work)."""
+    result = redactor.redact_value(_census_evidence({name: "absent"}))
+    assert result["operation"]["hardware_reads"]["CIM_Card"]["property_shapes"][name] == "absent"
+
+
+def test_a_value_in_census_position_that_is_not_a_shape_is_still_redacted(redactor: Any) -> None:
+    """The negative control, and the reason the exemption is scoped to a closed
+    vocabulary rather than to the container alone.
+
+    If amt_info ever put a real value in census position -- a bug, or a future
+    version widening the field -- the exemption must not wave it through. Without
+    this, "inside property_shapes" would be a blanket amnesty on a mapping whose
+    keys firmware supplies.
+    """
+    result = redactor.redact_value(_census_evidence({"SerialNumber": "PF3ABCDE", "Model": "text"}))
+    census = result["operation"]["hardware_reads"]["CIM_Card"]["property_shapes"]
+    assert census["SerialNumber"] == "<redacted-serial-1>"
+    assert "PF3ABCDE" not in str(census)
+    # And the entry either side of it is untouched, so the fall-through is per
+    # value rather than the whole census losing its exemption.
+    assert census["Model"] == "text"
+
+
+def test_an_address_in_census_position_is_still_redacted(redactor: Any) -> None:
+    """Same control, for a value a pattern rather than a key would catch."""
+    result = redactor.redact_value(_census_evidence({"SerialNumber": "192.0.2.10"}))
+    assert result["operation"]["hardware_reads"]["CIM_Card"]["property_shapes"]["SerialNumber"] == "<redacted-ipv4-1>"
+
+
+def test_the_census_exemption_does_not_disarm_redaction_around_it(redactor: Any) -> None:
+    """The positive control _EXEMPT_KEYS already has: a real serial elsewhere in the
+    same document, under the same property-ish key, still goes."""
+    document = _census_evidence({"SerialNumber": "absent"})
+    document["hardware"] = {"chassis": {"serial_number": "PF3ABCDE"}, "baseboard": {"serial_number": None}}
+    document["operation"]["endpoint"] = "192.0.2.10:16993"
+
+    result = redactor.redact_value(document)
+    assert result["operation"]["hardware_reads"]["CIM_Card"]["property_shapes"]["SerialNumber"] == "absent"
+    assert result["hardware"]["chassis"]["serial_number"] == "<redacted-serial-1>"
+    assert "192.0.2.10" not in str(result["operation"]["endpoint"])
+
+
+def test_a_census_only_counts_as_one_when_it_is_actually_a_mapping(redactor: Any) -> None:
+    """`property_shapes` is null for a class with no instance to census, and a
+    string there would be firmware data rather than a census."""
+    document = _census_evidence({"SerialNumber": "absent"})
+    document["operation"]["hardware_reads"]["CIM_Chassis"]["property_shapes"] = None
+    document["operation"]["hardware_reads"]["CIM_Processor"] = {"property_shapes": "192.0.2.10"}
+
+    result = redactor.redact_value(document)
+    assert result["operation"]["hardware_reads"]["CIM_Chassis"]["property_shapes"] is None
+    assert result["operation"]["hardware_reads"]["CIM_Processor"]["property_shapes"] == "<redacted-ipv4-1>"
+
+
+def test_the_exemption_is_scoped_to_the_census_key_and_not_to_shape_shaped_strings(redactor: Any) -> None:
+    """"absent" is also an ordinary English word. Outside the census, a key in
+    _IDENTIFYING_KEYS holding it is redacted like anything else -- the exemption is
+    positional, and a value-only rule would be a hole this script cannot audit."""
+    result = redactor.redact_value({"serial_number": "absent", "note": "absent"})
+    assert result["serial_number"] == "<redacted-serial-1>"
+    assert result["note"] == "absent"
+
+
+def test_redacting_a_census_twice_is_a_no_op(tmp_path: Path) -> None:
+    """The documented idempotence guarantee, for the new shape."""
+    path = tmp_path / "amt-fixture-1-qualify_hardware_inventory.json"
+    path.write_text(json.dumps(_census_evidence({"SerialNumber": "absent", "Model": "text"})), encoding="utf-8")
+
+    redact_evidence.redact_file(path, redact_evidence.Redactor())
+    once = path.read_text(encoding="utf-8")
+    redact_evidence.redact_file(path, redact_evidence.Redactor())
+    assert path.read_text(encoding="utf-8") == once
+
+
+def test_the_shape_vocabulary_matches_the_collection_that_emits_it() -> None:
+    """This script duplicates `hardware.PROPERTY_SHAPES` rather than importing it --
+    it is stdlib-only and runs from system python3 at a point in CI where the
+    collection may not be installed. A duplicate that drifts either censors a census
+    (a state the script has not been told about) or opens a hole (a state the
+    collection cannot emit), so the two copies are pinned to each other here.
+    """
+    hardware = _load_collection_hardware_module()
+    assert redact_evidence._PROPERTY_SHAPES == set(hardware.PROPERTY_SHAPES)
+    # And the key the exemption is scoped to is the field name the collection
+    # actually emits, not a name that only this script believes in.
+    assert redact_evidence._PROPERTY_SHAPES_KEY in {field.name for field in dataclasses.fields(hardware.ClassRead)}
