@@ -1074,9 +1074,70 @@ operation:
             as V(protocol).
           type: str
           sample: protocol
+        property_shapes:
+          description:
+            - >-
+              Per-property census of the instance that was read, keyed by the
+              property name firmware sent. B(Names and shapes only: no property
+              value is reported here, in any form.)
+            - >-
+              Reported for the two single-instance classes C(CIM_Chassis) and
+              C(CIM_Card) only, and V(null) whenever there was no instance to
+              census -- which is a different reading from a census where every
+              property is V(absent). The first means the class never answered; the
+              second means it answered with an instance carrying none of them.
+            - >-
+              This exists because RV(operation.hardware_reads.outcome) diagnoses a
+              whole B(class), and says nothing about one V(null) B(field) on a
+              class that answered perfectly. Issue #84 is exactly that shape:
+              RV(amt.hardware.baseboard.serial_number) is V(null) on both lab
+              machines while RV(amt.hardware.chassis.serial_number) populates,
+              across three major AMT versions, with the rest of C(CIM_Card)
+              returning normally.
+            - >-
+              The five states are exhaustive over the ways a scalar fact can arrive
+              V(null) from a class that answered, because they are exactly the
+              inputs this collection's string coercion refuses.
+            - V(absent) -- the element did not appear in the response at all.
+            - >-
+              V(empty) -- the element appeared, and its text was empty or
+              whitespace only.
+            - >-
+              V(text) -- the element appeared once with non-empty text. B(The text
+              is not reported.)
+            - >-
+              V(nested) -- the element appeared carrying child elements, so the
+              parser produced a mapping, which the coercion refuses. A V(null) fact
+              with this shape is B(this collection's) defect, not firmware's.
+            - >-
+              V(repeated) -- the element appeared more than once, so the parser
+              produced a list. Expected for a CIM array such as
+              C(OperationalStatus); on a property read as a scalar it is again a
+              V(null) that firmware did not cause.
+          type: dict
+          version_added: 0.7.0
+          sample: {SerialNumber: absent, Model: text, OperationalStatus: repeated}
+        property_names_dropped:
+          description: >-
+            How many property names were withheld from
+            RV(operation.hardware_reads.property_shapes) for not matching the CIM
+            property-name grammar (a letter followed by letters, digits and
+            underscores, per DSP0004). Normally V(0). A census key is the one place
+            firmware-supplied text becomes a key in this module's output, and the
+            hardware-evidence redactor deliberately never rewrites keys, so a name
+            that is not a CIM identifier is counted rather than published. A
+            non-zero value means a firmware sent something nobody has seen and it
+            should be looked at interactively.
+          type: int
+          version_added: 0.7.0
+          sample: 0
       sample:
-        CIM_Chassis: {fact_group: chassis, outcome: read, verb: Get, instances: 1, error_class: null}
-        CIM_PhysicalMemory: {fact_group: memory, outcome: read, verb: Enumerate, instances: 2, error_class: null}
+        CIM_Chassis:
+          {fact_group: chassis, outcome: read, verb: Get, instances: 1, error_class: null,
+           property_shapes: {SerialNumber: text, Model: text}, property_names_dropped: 0}
+        CIM_PhysicalMemory:
+          {fact_group: memory, outcome: read, verb: Enumerate, instances: 2, error_class: null,
+           property_shapes: null, property_names_dropped: 0}
 """
 
 import dataclasses

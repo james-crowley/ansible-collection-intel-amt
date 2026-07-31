@@ -33,6 +33,13 @@ from ansible_collections.james_crowley.intel_amt.plugins.module_utils.hardware i
     MEMORY_TYPE_TABLE,
     MINIMAL_SUBSET,
     PACKAGE_TYPE_TABLE,
+    PROPERTY_SHAPE_ABSENT,
+    PROPERTY_SHAPE_EMPTY,
+    PROPERTY_SHAPE_NESTED,
+    PROPERTY_SHAPE_REPEATED,
+    PROPERTY_SHAPE_TEXT,
+    PROPERTY_SHAPES,
+    READ_PROPERTIES_BY_CLASS,
     ROUND_TRIPS_BY_SUBSET,
     SUBSET_CONFIG,
     SUBSET_MEMORY,
@@ -45,10 +52,13 @@ from ansible_collections.james_crowley.intel_amt.plugins.module_utils.hardware i
     BaseboardInfo,
     ChassisInfo,
     ChipInfo,
+    ClassRead,
     HardwareFacts,
     MemoryInfo,
     ProcessorInfo,
     StorageInfo,
+    property_shapes,
+    render_class_reads,
     requested_fact_groups,
     resolve_gather_subset,
     round_trip_estimate,
@@ -1042,3 +1052,212 @@ class TestHardwareFactsRendering:
     def test_the_requested_marker_itself_never_reaches_the_output(self):
         rendered = HardwareFacts(requested=frozenset({"chassis"})).to_dict()
         assert "requested" not in rendered
+
+
+class TestPropertyShapeCensus:
+    """The census that makes issue #84 answerable without publishing a SOAP body.
+
+    ``optional_str`` maps four different findings onto one ``null``. These tests
+    hold the line that the census separates all four, that it publishes no value,
+    and that its name table cannot drift away from what the readers actually read.
+    """
+
+    #: The CIM_Card field set again, taken from TestBaseboardParsing so the two
+    #: cannot drift: a census asserted against a different instance than the parser
+    #: is tested against would prove nothing about the pair being compared.
+    CARD = TestBaseboardParsing.INSTANCE
+
+    def test_a_populated_property_is_text_and_its_value_is_not_published(self):
+        shapes, dropped = property_shapes("CIM_Card", self.CARD)
+
+        assert shapes["SerialNumber"] == PROPERTY_SHAPE_TEXT
+        assert dropped == 0
+        # The whole safety argument for publishing this rests on it carrying no
+        # value, so assert that directly rather than trusting the implementation.
+        assert "MOCKBOARD0001" not in shapes.values()
+        assert set(shapes.values()) <= PROPERTY_SHAPES
+
+    def test_an_element_firmware_omitted_reads_absent(self):
+        instance = {key: value for key, value in self.CARD.items() if key != "SerialNumber"}
+        shapes, _dropped = property_shapes("CIM_Card", instance)
+        assert shapes["SerialNumber"] == PROPERTY_SHAPE_ABSENT
+
+    def test_an_element_present_but_empty_reads_empty_not_absent(self):
+        # THE distinction issue #84 turns on. `<h:SerialNumber/>` parses to "" --
+        # `wsman._element_to_value` returns (element.text or "").strip() -- and
+        # `optional_str` then renders it null, identically to the absent case above.
+        # These two lines are the entire reason this census exists.
+        shapes, _dropped = property_shapes("CIM_Card", {**self.CARD, "SerialNumber": ""})
+        assert shapes["SerialNumber"] == PROPERTY_SHAPE_EMPTY
+
+    def test_whitespace_only_text_reads_empty(self):
+        shapes, _dropped = property_shapes("CIM_Card", {**self.CARD, "SerialNumber": "   "})
+        assert shapes["SerialNumber"] == PROPERTY_SHAPE_EMPTY
+
+    def test_a_property_carrying_child_elements_reads_nested(self):
+        # optional_str refuses a mapping, so this is a null that firmware did NOT
+        # cause -- it is this collection dropping a value it was sent. Reporting it
+        # as `absent` would blame the wrong side.
+        shapes, _dropped = property_shapes("CIM_Card", {**self.CARD, "SerialNumber": {"Value": "MOCKBOARD0001"}})
+        assert shapes["SerialNumber"] == PROPERTY_SHAPE_NESTED
+
+    def test_a_repeated_property_reads_repeated(self):
+        # Normal for a CIM array; on a scalar property it is the other way a
+        # populated response yields null, since optional_str refuses a list too.
+        shapes, _dropped = property_shapes("CIM_Card", {**self.CARD, "OperationalStatus": ["2", "3"]})
+        assert shapes["OperationalStatus"] == PROPERTY_SHAPE_REPEATED
+
+    def test_the_four_null_causes_are_four_distinct_labels(self):
+        # The claim the PR makes: a null scalar fact has four possible causes and
+        # the census tells them apart. If any two of these collapsed, a hardware run
+        # would still not settle #84.
+        variants = {
+            "absent": {key: value for key, value in self.CARD.items() if key != "SerialNumber"},
+            "empty": {**self.CARD, "SerialNumber": ""},
+            "nested": {**self.CARD, "SerialNumber": {"Value": "x"}},
+            "repeated": {**self.CARD, "SerialNumber": ["a", "b"]},
+        }
+        observed = {name: property_shapes("CIM_Card", instance)[0]["SerialNumber"] for name, instance in variants.items()}
+
+        assert len(set(observed.values())) == 4, observed
+        # And every one of them really does render null on the fact, which is what
+        # makes them indistinguishable without the census.
+        for instance in variants.values():
+            assert BaseboardInfo.from_instance(instance).serial_number is None
+
+    def test_a_property_firmware_sent_that_this_collection_never_reads_is_still_reported(self):
+        # "The board serial arrives under a property we do not look at" is a live
+        # hypothesis for #84, and this is the only place it would be visible.
+        shapes, _dropped = property_shapes("CIM_Card", {**self.CARD, "BoardSerialNumber": "MOCKBOARD0001"})
+        assert shapes["BoardSerialNumber"] == PROPERTY_SHAPE_TEXT
+
+    def test_the_census_is_alphabetically_ordered_so_two_runs_diff_cleanly(self):
+        shapes, _dropped = property_shapes("CIM_Card", self.CARD)
+        assert list(shapes) == sorted(shapes)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "192.0.2.10",
+            "00:00:5e:00:53:01",
+            "4c4c4544-0037-4a10-8055-b3c04f463433",
+            "mgmt.lab.example.invalid",
+            "/home/jane/lab/ipxe-test.iso",
+            "PF3-ABCDE",
+            "9SerialNumber",
+            "A" * 65,
+            "",
+        ],
+    )
+    def test_a_name_that_is_not_a_cim_identifier_is_counted_not_published(self, name):
+        # A census key is the one place firmware-supplied text becomes a key in
+        # this module's output, and redact-evidence.py never rewrites keys. So the
+        # safety has to come from here: every identifying shape the redactor knows
+        # about needs a character the CIM property-name grammar forbids, or is
+        # longer than it allows.
+        shapes, dropped = property_shapes("CIM_Card", {**self.CARD, name: "whatever"})
+
+        assert name not in shapes
+        assert dropped == 1
+        assert shapes["SerialNumber"] == PROPERTY_SHAPE_TEXT, "dropping one name must not disturb the rest of the census"
+
+    def test_the_name_table_matches_what_the_readers_actually_read(self):
+        """The anti-drift guard for READ_PROPERTIES_BY_CLASS.
+
+        A table that has drifted from its reader reports ``absent`` for a property
+        nobody asked for, or -- much worse -- silently omits the one under
+        investigation, so the census would answer a question about
+        ``CIM_Card.SerialNumber`` by not mentioning it. Rather than restating the
+        list by hand, drive each ``from_instance`` with a mapping that records every
+        lookup and compare.
+        """
+
+        class _RecordingInstance(dict):
+            def __init__(self, source):
+                super().__init__(source)
+                self.looked_up: set[str] = set()
+
+            def get(self, key, default=None):
+                self.looked_up.add(key)
+                return super().get(key, default)
+
+        for resource_class, factory, source in (
+            ("CIM_Chassis", ChassisInfo, TestChassisParsing.INSTANCE),
+            ("CIM_Card", BaseboardInfo, TestBaseboardParsing.INSTANCE),
+        ):
+            recording = _RecordingInstance(source)
+            factory.from_instance(recording)
+            assert recording.looked_up == set(READ_PROPERTIES_BY_CLASS[resource_class]), resource_class
+
+    def test_a_class_with_no_name_table_still_censuses_what_firmware_sent(self):
+        # The census is only taken for the two single-instance classes today. If a
+        # third is ever added to _read_single before its names are tabulated, the
+        # observed properties are still reported -- only the absent ones cannot be,
+        # which is a smaller failure than crashing the read.
+        shapes, dropped = property_shapes("CIM_Processor", {"DeviceID": "CPU 0"})
+        assert shapes == {"DeviceID": PROPERTY_SHAPE_TEXT}
+        assert dropped == 0
+
+    def test_every_declared_shape_is_reachable_from_a_real_parsed_value(self):
+        # PROPERTY_SHAPES is duplicated in tests/hardware/redact-evidence.py, where
+        # it is the closed vocabulary the redaction exemption is scoped to. A state
+        # declared here but never emitted would be an exemption for a value that
+        # cannot occur; one emitted but not declared would be a censored census.
+        reachable = {
+            property_shapes("CIM_Card", instance)[0]["SerialNumber"]
+            for instance in (
+                {},
+                {"SerialNumber": ""},
+                {"SerialNumber": "MOCKBOARD0001"},
+                {"SerialNumber": {"Value": "x"}},
+                {"SerialNumber": ["a", "b"]},
+            )
+        }
+        assert reachable == PROPERTY_SHAPES
+
+
+class TestClassReadCensusFields:
+    """``ClassRead`` carries the census, and ``null`` there means something."""
+
+    def test_no_census_is_none_rather_than_an_all_absent_map(self):
+        # "The class never answered" and "the class answered with an instance
+        # carrying none of these properties" are different findings, and an
+        # all-absent map would state the second when the first happened.
+        read = ClassRead(fact_group="baseboard", outcome="absent", verb="Enumerate", error_class="protocol")
+        assert read.property_shapes is None
+        assert read.property_names_dropped == 0
+
+    def test_the_census_reaches_the_receipt_for_the_single_instance_classes(self):
+        reads = {
+            "CIM_Chassis": ClassRead(
+                fact_group="chassis",
+                outcome="read",
+                verb="Get",
+                instances=1,
+                property_shapes={"SerialNumber": PROPERTY_SHAPE_TEXT},
+            ),
+            "CIM_Card": ClassRead(
+                fact_group="baseboard",
+                outcome="read",
+                verb="Get",
+                instances=1,
+                property_shapes={"SerialNumber": PROPERTY_SHAPE_ABSENT},
+            ),
+        }
+        rendered = render_class_reads(reads)
+
+        # The asymmetry issue #84 is about, side by side in one receipt.
+        assert rendered["CIM_Chassis"]["property_shapes"]["SerialNumber"] == PROPERTY_SHAPE_TEXT
+        assert rendered["CIM_Card"]["property_shapes"]["SerialNumber"] == PROPERTY_SHAPE_ABSENT
+        assert rendered["CIM_Card"]["property_names_dropped"] == 0
+
+    def test_the_census_never_reaches_the_published_fact_shape(self):
+        # amt.hardware's shape is a published interface. Diagnostics live on the
+        # operation receipt, exactly as ClassRead already does.
+        facts = HardwareFacts(
+            baseboard=BaseboardInfo(model="MOCK-BOARD-0000"),
+            requested=frozenset({"baseboard"}),
+            reads={"CIM_Card": ClassRead(fact_group="baseboard", outcome="read", verb="Get", instances=1, property_shapes={"SerialNumber": "absent"})},
+        )
+        assert "property_shapes" not in facts.to_dict()["baseboard"]
+        assert facts.reads_to_dict()["CIM_Card"]["property_shapes"] == {"SerialNumber": "absent"}

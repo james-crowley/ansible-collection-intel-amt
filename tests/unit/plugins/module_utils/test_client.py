@@ -1184,6 +1184,10 @@ class TestHardwareReadOutcomes(TestGetFactsHardwareInventory):
                 "verb": "Enumerate",
                 "instances": 1,
                 "error_class": None,
+                # A multi-instance class carries no per-property census: a census is
+                # a statement about one instance. See TestHardwarePropertyShapeCensus.
+                "property_shapes": None,
+                "property_names_dropped": 0,
             }
         }
 
@@ -1253,3 +1257,102 @@ class TestHardwareSingletonVerbFallback:
         for call in wsman.get.call_args_list:
             if call.args[0] in ("CIM_Chassis", "CIM_Card"):
                 assert call.kwargs.get("selectors") is None
+
+
+class TestHardwarePropertyShapeCensus(TestGetFactsHardwareInventory):
+    """The per-property census the two identity-plate reads carry (issue #84).
+
+    ``ClassRead`` diagnoses a whole *class*. It says nothing about one ``null``
+    *field* on a class that answered normally, which is what
+    ``baseboard.serial_number`` is on both lab machines while the rest of
+    ``CIM_Card`` populates. The census is taken from the parsed instance at the
+    only point it still exists -- the next thing that happens to that dict is a
+    ``from_instance`` whose ``optional_str`` calls collapse four different findings
+    into one ``null``.
+    """
+
+    def test_a_serial_firmware_omitted_is_reported_absent_while_the_other_is_text(self):
+        # The exact shape of issue #84, in one receipt: the chassis serial arrives,
+        # the board serial does not, and the receipt now says which of the two
+        # things "null" could have meant actually happened.
+        wsman = self._inventory_wsman(CIM_Card={"Model": "MOCK-BOARD-0000", "PackageType": "9"})
+        facts = _client(wsman).get_facts(resolve_gather_subset(["system"]))
+        reads = facts.hardware.reads_to_dict()
+
+        assert facts.hardware.baseboard.serial_number is None
+        assert reads["CIM_Card"]["property_shapes"]["SerialNumber"] == "absent"
+        assert reads["CIM_Chassis"]["property_shapes"]["SerialNumber"] == "text"
+
+    def test_a_serial_firmware_sent_empty_is_reported_empty_not_absent(self):
+        # Same null fact, different firmware behaviour. Nothing in amt.hardware can
+        # tell these two runs apart; the census is the only thing that can.
+        wsman = self._inventory_wsman(CIM_Card={**self.CARD, "SerialNumber": ""})
+        facts = _client(wsman).get_facts(resolve_gather_subset(["system"]))
+
+        assert facts.hardware.baseboard.serial_number is None
+        assert facts.hardware.reads_to_dict()["CIM_Card"]["property_shapes"]["SerialNumber"] == "empty"
+
+    def test_the_census_carries_no_property_value(self):
+        wsman = self._inventory_wsman()
+        facts = _client(wsman).get_facts(resolve_gather_subset(["system"]))
+        census = facts.hardware.reads_to_dict()["CIM_Card"]["property_shapes"]
+
+        # The entire safety argument for publishing this to a world-readable
+        # artifact is that it holds no value. Asserted against the serial the fake
+        # firmware actually served.
+        assert "MOCKBOARD0001" not in census.values()
+        assert set(census.values()) <= {"absent", "empty", "text", "nested", "repeated"}
+
+    def test_a_class_that_refused_both_verbs_carries_no_census_at_all(self):
+        # None, not an all-absent map: "the class never answered" and "the class
+        # answered with an instance carrying none of these properties" are
+        # different findings and must not render identically.
+        wsman = _fake_wsman()
+        wsman.get.side_effect = ProtocolError("no such class", endpoint="10.0.0.5:16993")
+        wsman.enumerate.side_effect = ProtocolError("nor by enumeration", endpoint="10.0.0.5:16993")
+        facts = _client(wsman).get_facts(resolve_gather_subset(["system"]))
+        card = facts.hardware.reads_to_dict()["CIM_Card"]
+
+        assert card["outcome"] == "absent"
+        assert card["property_shapes"] is None
+
+    def test_the_census_describes_the_instance_the_facts_were_built_from(self):
+        # When the bare Get is refused and Enumerate answers with several
+        # instances, the facts come from the first. A census of any other instance
+        # would be worse than none: it would look like evidence and describe a
+        # different board.
+        wsman = _fake_wsman()
+        wsman.get.side_effect = ProtocolError("no bare Get here", endpoint="10.0.0.5:16993")
+        wsman.enumerate.side_effect = lambda rc, **_kw: (
+            [{"Model": "MOCK-BOARD-0000"}, {"SerialNumber": "MOCKBOARD0002"}] if rc == "CIM_Card" else []
+        )
+
+        facts = _client(wsman).get_facts(resolve_gather_subset(["system"]))
+        card = facts.hardware.reads_to_dict()["CIM_Card"]
+
+        assert facts.hardware.baseboard.serial_number is None
+        assert card["verb"] == "Enumerate"
+        assert card["instances"] == 2
+        assert card["property_shapes"]["SerialNumber"] == "absent"
+        assert card["property_shapes"]["Model"] == "text"
+
+    def test_the_multi_instance_classes_carry_no_census(self):
+        # Deliberately scoped to the two single-instance classes: a census is a
+        # statement about one instance, so a per-DIMM census would grow the receipt
+        # with the machine rather than with the question. Asserted so the scope is
+        # a decision on record rather than an accident.
+        wsman = self._inventory_wsman()
+        facts = _client(wsman).get_facts(resolve_gather_subset(["all"]))
+        reads = facts.hardware.reads_to_dict()
+
+        assert {name for name, read in reads.items() if read["property_shapes"] is not None} == {"CIM_Chassis", "CIM_Card"}
+
+    def test_the_census_is_json_safe_and_flat(self):
+        # It reaches a published artifact through to_nice_json, and it is what the
+        # redactor's container-scoped exemption is written against -- a nested
+        # census would walk straight past that exemption.
+        wsman = self._inventory_wsman()
+        facts = _client(wsman).get_facts(resolve_gather_subset(["system"]))
+        census = json.loads(json.dumps(facts.hardware.reads_to_dict()))["CIM_Card"]["property_shapes"]
+
+        assert all(isinstance(name, str) and isinstance(shape, str) for name, shape in census.items())

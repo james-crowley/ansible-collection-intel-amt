@@ -50,6 +50,7 @@ every case.
 from __future__ import annotations
 
 import dataclasses
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -150,6 +151,179 @@ READ_OUTCOME_EMPTY = "empty"
 #: :attr:`ClassRead.outcome` -- every verb tried was refused, so this firmware does
 #: not expose the class. :attr:`ClassRead.error_class` names how it was refused.
 READ_OUTCOME_ABSENT = "absent"
+
+# --------------------------------------------------------------------------
+# Per-property shape census
+# --------------------------------------------------------------------------
+
+#: :func:`property_shapes` -- the element did not appear in the response at all.
+PROPERTY_SHAPE_ABSENT = "absent"
+#: :func:`property_shapes` -- the element appeared, and its text was empty or
+#: whitespace only (``<h:SerialNumber/>`` or ``<h:SerialNumber></h:SerialNumber>``).
+PROPERTY_SHAPE_EMPTY = "empty"
+#: :func:`property_shapes` -- the element appeared once, carrying non-empty text.
+#: **The text itself is deliberately not recorded** -- see :func:`property_shapes`.
+PROPERTY_SHAPE_TEXT = "text"
+#: :func:`property_shapes` -- the element appeared carrying child elements, so
+#: ``wsman.py``'s ``_element_to_value()`` produced a mapping. Every ``optional_*``
+#: coercer in ``models.py`` returns ``None`` for a mapping, so this is one of the
+#: ways a scalar fact goes ``null`` **without** firmware having withheld anything.
+PROPERTY_SHAPE_NESTED = "nested"
+#: :func:`property_shapes` -- the element appeared more than once, so the parser
+#: produced a list. Normal and expected for a CIM array (``OperationalStatus``);
+#: for a property this collection reads as a scalar it is the other way a
+#: populated response yields ``null``, since ``optional_str`` refuses a list too.
+PROPERTY_SHAPE_REPEATED = "repeated"
+
+#: Every value :func:`property_shapes` can emit. A **closed vocabulary**, and that
+#: is load-bearing rather than tidy: ``tests/hardware/redact-evidence.py`` exempts
+#: exactly these strings from identifying-key substitution when they appear inside
+#: a shape census, and redacts anything else it finds there. Adding a state here
+#: without adding it there would publish a censored census; adding one there that
+#: this module cannot emit would open a hole.
+PROPERTY_SHAPES: frozenset[str] = frozenset(
+    {
+        PROPERTY_SHAPE_ABSENT,
+        PROPERTY_SHAPE_EMPTY,
+        PROPERTY_SHAPE_TEXT,
+        PROPERTY_SHAPE_NESTED,
+        PROPERTY_SHAPE_REPEATED,
+    }
+)
+
+#: The CIM property-name grammar, which is an identifier: a letter followed by
+#: letters, digits and underscores (DSP0004 §5.1). Applied to every name before it
+#: is published as a census key, because a census key is the **one place in this
+#: collection's output where firmware-supplied text becomes a JSON key** -- and
+#: ``redact-evidence.py`` never rewrites keys, by a deliberate design decision that
+#: renaming a key corrupts the structure it is trying to keep readable.
+#:
+#: So the safety here cannot come from the redactor and has to come from the
+#: grammar. A conforming name cannot carry a serial, an address, a MAC or a path:
+#: those all need a character this pattern forbids, or exceed its length. A
+#: non-conforming name is not a CIM property name at all, is therefore not
+#: published, and is counted in :attr:`ClassRead.property_names_dropped` instead --
+#: an integer, which the redactor leaves alone and which cannot identify anything.
+#: A non-zero count means "go look at this interactively", which is the honest
+#: thing to say about a shape nobody has ever seen.
+_CIM_PROPERTY_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+
+#: The property names this collection reads off each single-instance identity-plate
+#: class, so :func:`property_shapes` can report a name firmware **omitted** --
+#: which is not derivable from the parsed instance, where an omitted element simply
+#: has no key.
+#:
+#: Kept as data, and kept honest by
+#: ``tests/unit/plugins/module_utils/test_hardware.py``, which drives each
+#: ``from_instance`` with a recording mapping and asserts the names it actually
+#: looked up are exactly these. A table that drifts from the reader would report
+#: ``absent`` for a property nobody asked for, or omit the one that matters.
+READ_PROPERTIES_BY_CLASS: dict[str, frozenset[str]] = {
+    "CIM_Chassis": frozenset(
+        {
+            "SerialNumber",
+            "Model",
+            "Manufacturer",
+            "Version",
+            "Tag",
+            "ElementName",
+            "ChassisPackageType",
+            "PackageType",
+            "OperationalStatus",
+        }
+    ),
+    "CIM_Card": frozenset(
+        {
+            "SerialNumber",
+            "Model",
+            "Manufacturer",
+            "Version",
+            "Tag",
+            "ElementName",
+            "CanBeFRUed",
+            "PackageType",
+            "OperationalStatus",
+        }
+    ),
+}
+
+
+def property_shapes(resource_class: str, instance: dict[str, Any]) -> tuple[dict[str, str], int]:
+    """Census one instance's properties by **shape**, publishing no value.
+
+    Returns ``({name: shape}, dropped_count)``.
+
+    Why this exists
+    ---------------
+
+    ``optional_str()`` maps four genuinely different findings onto one ``null``:
+    the element was **absent**; it was present and **empty**; it was present
+    carrying **child elements**; it was present **more than once**. Issue #84 --
+    ``baseboard.serial_number`` ``null`` on both lab machines while
+    ``chassis.serial_number`` populates, across three major AMT versions -- cannot
+    be settled without knowing which of those four happened, and the module's
+    already-parsed output is structurally incapable of saying. Nor is the fact
+    value alone: ``null`` is the correct rendering of all four.
+
+    The four are exhaustive against ``models.optional_str``: it returns ``None``
+    for ``None`` (absent), for a ``dict`` or ``list`` (nested/repeated), and for a
+    string that strips to empty -- and returns the text otherwise. ``optional_int``
+    and ``optional_bool`` reject the same shapes. So a census over these five
+    states cannot leave a null unexplained.
+
+    Why not the raw SOAP body
+    -------------------------
+
+    Because the body is not needed, and it is the highest-risk artifact this
+    project could publish: it carries every property of every instance, including
+    values ``redact-evidence.py`` has never been shown and therefore cannot be
+    trusted to catch. What issue #84 asks is a question about **presence and
+    shape**, and ``wsman.py``'s parser already preserves both -- an omitted element
+    has no key, and a present-but-empty one has a key whose value is ``""``. That
+    distinction survives all the way to here and is only destroyed by
+    ``optional_str``, one call later. The body would answer the question by
+    publishing everything; this answers it by publishing nothing.
+
+    What is published, exactly
+    --------------------------
+
+    Property **names**, and one of five fixed labels each. No value, no length, no
+    prefix, no hash -- a hash of a serial from a known vendor prefix is a
+    guessable oracle, which is the same reasoning ``redact-evidence.py``'s header
+    already applies to hashing an IPv4 address. Names are filtered to the CIM
+    identifier grammar (see :data:`_CIM_PROPERTY_NAME_RE`) and anything else is
+    counted rather than published.
+
+    Names firmware sent that this collection does **not** read are included, and
+    that is deliberate: "the board serial arrives under a property we never look
+    at" is a live hypothesis for #84 and this is the only place it would show up.
+    """
+    shapes: dict[str, str] = {}
+    dropped = 0
+    for name in set(READ_PROPERTIES_BY_CLASS.get(resource_class, frozenset())) | set(instance):
+        if not isinstance(name, str) or not _CIM_PROPERTY_NAME_RE.match(name):
+            dropped += 1
+            continue
+        shapes[name] = _shape_of(instance[name]) if name in instance else PROPERTY_SHAPE_ABSENT
+    # Sorted so two runs against the same firmware produce byte-identical censuses
+    # and a diff between two machines is a real difference rather than dict order.
+    # Every vendor response fixture orders an instance's properties alphabetically
+    # anyway, so this is also the order the wire used.
+    return {name: shapes[name] for name in sorted(shapes)}, dropped
+
+
+def _shape_of(value: Any) -> str:
+    """Classify one parsed property value. See :func:`property_shapes`."""
+    if isinstance(value, dict):
+        return PROPERTY_SHAPE_NESTED
+    if isinstance(value, list):
+        return PROPERTY_SHAPE_REPEATED
+    # Not `isinstance(value, str)`: `_element_to_value()` only ever yields str,
+    # dict or list, but a shape census that silently reported a hypothetical
+    # future type as `text` would be making a claim it had not checked. str() and
+    # strip() answer the only question being asked -- is there content -- for
+    # anything at all.
+    return PROPERTY_SHAPE_EMPTY if not str(value).strip() else PROPERTY_SHAPE_TEXT
 
 #: WS-Man **HTTP requests** each subset costs, for the module's documented
 #: round-trip table. An ``Enumerate`` costs two (Enumerate + one ``Pull``), and
@@ -1187,6 +1361,25 @@ class ClassRead:
     #: "this class is not present" (``amtmanager.js``' CIRA batch deletes
     #: 400-answering classes and carries on).
     error_class: str | None = None
+    #: Per-property shape census of the instance that was read -- see
+    #: :func:`property_shapes`. ``None`` when there was no instance to census, and
+    #: that is a distinct reading from a census in which every property is
+    #: ``absent``: the first means the class never answered, the second means it
+    #: answered with an instance carrying none of these properties.
+    #:
+    #: Recorded for the two **single-instance** classes only (``CIM_Chassis``,
+    #: ``CIM_Card``). Two reasons, and neither is "we ran out of time". A census is
+    #: a statement about one instance, so a multi-instance class would need one per
+    #: DIMM or disk, and the receipt would grow with the machine rather than with
+    #: the question. And these two are exactly the pair whose asymmetry is the open
+    #: question: issue #84 is ``CIM_Card.SerialNumber`` ``null`` while
+    #: ``CIM_Chassis.SerialNumber`` populates, so having both censuses side by side
+    #: in one receipt *is* the finding.
+    property_shapes: dict[str, str] | None = None
+    #: How many property names were withheld from :attr:`property_shapes` for not
+    #: matching the CIM property-name grammar. Normally ``0``. See
+    #: :data:`_CIM_PROPERTY_NAME_RE` for why a count rather than the names.
+    property_names_dropped: int = 0
 
 
 def render_class_reads(reads: dict[str, ClassRead]) -> dict[str, Any]:

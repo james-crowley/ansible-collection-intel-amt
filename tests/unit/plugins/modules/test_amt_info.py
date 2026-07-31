@@ -519,7 +519,19 @@ class TestMainGatherSubsetPlumbing:
         reads = result["operation"]["hardware_reads"]
 
         assert list(reads) == ["CIM_Chassis", "CIM_Card", "CIM_Processor", "CIM_Chip", "CIM_PhysicalMemory", "CIM_MediaAccessDevice"]
-        assert reads["CIM_Chassis"] == {"fact_group": "chassis", "outcome": "read", "verb": "Get", "instances": 1, "error_class": None}
+        assert reads["CIM_Chassis"] == {
+            "fact_group": "chassis",
+            "outcome": "read",
+            "verb": "Get",
+            "instances": 1,
+            "error_class": None,
+            # 0.7.0: the per-property shape census. `_hardware_facts()` builds its
+            # ClassReads directly rather than by reading a fake endpoint, so there
+            # is no instance behind this one to census -- which is exactly the
+            # "nothing answered, nothing to census" case rendering as null.
+            "property_shapes": None,
+            "property_names_dropped": 0,
+        }
         assert reads["CIM_PhysicalMemory"]["fact_group"] == "memory"
 
     def test_the_receipt_read_outcomes_map_onto_keys_that_actually_exist(self, monkeypatch):
