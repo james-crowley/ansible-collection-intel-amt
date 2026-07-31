@@ -146,7 +146,7 @@ the two wrong tables noted above.
 
 This is the bulk of the collection's verification effort:
 
-- **1744 unit tests** (collected via `pytest` against the staged collection tree on
+- **1774 unit tests** (collected via `pytest` against the staged collection tree on
   2026-07-30; the number drifts as tests are added, so treat it as a point
   measurement, not a promise) across `tests/unit/plugins/module_utils/`, `tests/unit/plugins/modules/`
   and `tests/unit/mock_servers/`, covering error classification/redaction, TLS trust
@@ -290,11 +290,11 @@ trustworthy:
   alone; the figure has simply drifted. The same holds for the 57 added since: all of
   them landed in these four files, in the follow-up that added
   `operation.hardware_reads` described at the end of this subsection, so 826 → 883 and
-  1687 → 1744 are the same 57 tests counted two ways.
+  1687 → 1774 are the same 57 tests counted two ways.
 
   Two narrower counts, for anyone who wants a figure that needs no reconstruction at
   all: `test_hardware.py` — the file dedicated to the decoders and the value tables —
-  collects **514** on its own, and the whole unit suite collects **1744**.
+  collects **514** on its own, and the whole unit suite collects **1774**.
 
   Of these the bulk are per-value assertions over the nine value
   tables — every defined value plus an out-of-table value for each — written against the
@@ -443,7 +443,14 @@ into one. Every one now carries the identifiers needed to go and look at it — 
 "Two limits on how far Tier 3 can be audited" below for what those identifiers do and
 do not let a reader check:
 
-- **`amt-lab-01` (machine 1), AMT 16.1.30** — all eight stages, 2026-07-28, on
+> **"All eight stages" is a historical statement, not a current one.** These runs
+> predate stages 9-12, which were added 2026-07-31 and have never run. Eight was the
+> whole suite on those dates; it is now eight of twelve. The dated claims below are left
+> exactly as they were because they were true when measured — but "all stages" and "all
+> eight stages" are no longer the same sentence, and nothing here should be read as
+> covering event-log, log-clear, sleep/hibernate or wake-from-off.
+
+- **`amt-lab-01` (machine 1), AMT 16.1.30** — all eight stages *as they existed then*, 2026-07-28, on
   Python 3.10 (3.10.12) with ansible-core 2.17, against collection 0.1.0.
   `hardware` workflow `6ced8630-58e3-44d0-bfdc-68f8d2f47a7a`; jobs
   `hardware-tests` `e01e14b5-e1ae-4003-919b-e3b99fea3c11` (stages 1, 2, 3, 8),
@@ -454,7 +461,7 @@ do not let a reader check:
   predates the `hardware-limit` parameter; it reached only machine 1 because the lab
   inventory held one endpoint at the time, which the job's own
   "Credentials present for 1 endpoint(s)" step records.
-- **`amt-lab-02` (machine 2), AMT 19.0.5** — all eight stages, 2026-07-29, on
+- **`amt-lab-02` (machine 2), AMT 19.0.5** — all eight stages *as they existed then*, 2026-07-29, on
   Python 3.12.13 with ansible-core 2.18.18. That run was deliberately limited to
   machine 2 (`hardware-limit=amt-lab-02`); machine 1 was not touched by it.
   CircleCI **pipeline #93**, `hardware` workflow
@@ -775,29 +782,38 @@ These are a backlog. Each names a specific test or artifact that does not exist 
 each would move a claim up a tier when it runs, and none needs a *different* lab — at
 most an attended run or a small addition to the one that exists, said where it applies.
 
-- **That stage 5 served media, in any form a third party can check.** The stage passes
-  and the engine is exercised, but it emits no evidence file — see the caveat above.
-  Until it does, this is the one Tier 3 claim resting on an operator's visual
-  confirmation rather than on a recorded artifact.
-- **`amt_event_log` and `amt_log_clear`, in their entirety.** No hardware
-  qualification stage reads or clears a real firmware event log. Neither module has
-  ever touched real Intel AMT firmware: the eight stages predate both of them and
-  none was extended to cover them, so there is no stage 1-8 evidence for either.
+- **That stage 5 served media, in any form a third party can check.** ~~The stage emits
+  no evidence file.~~ **Partly closed**: stage 5 now writes a durable evidence artifact
+  (added 2026-07-31), so the claim no longer rests on an operator's visual confirmation
+  alone. What is still unproven is narrower and unchanged — that bytes were *served* —
+  because nothing at the other end issues a SCSI read during an unattended run. The
+  artifact records what the engine did, not what a BIOS consumed.
+- **`amt_event_log` and `amt_log_clear`, in their entirety.** Neither module has ever
+  touched real Intel AMT firmware. **Stages now exist for both and neither has run**:
+  stage 9 (`qualify_event_log.yml`, read-only, at the read-only floor) and stage 10
+  (`qualify_log_clear.yml`, behind its own approval gate) were added 2026-07-31. Note
+  what that changes and what it does not — the *gap* is now a scheduled run rather than
+  unwritten work, but the *evidence* is exactly as absent as before. A stage that has
+  not run proves nothing.
   What exists is Tier 2 (see the subsection in Tier 2 above) plus a Tier 1 protocol
-  claim from a captured firmware fixture and MeshCentral. Specifically unproven: that
-  real firmware accepts this collection's `GetRecords` iteration as issued, that the
-  21-byte record layout and little-endian timestamp decode correctly against records
-  a real ME actually wrote, and that `ClearLog` does what its name says on a live
-  endpoint. Adding a read-only stage for `amt_event_log` is the cheap half of
-  closing this; `amt_log_clear` destroys evidence, so a stage for it needs the same
-  approval treatment as stages 4-7.
+  claim from a captured firmware fixture and MeshCentral. Specifically unproven, and
+  precisely what stages 9 and 10 are built to settle: that real firmware accepts this
+  collection's `GetRecords` iteration as issued, that the 21-byte record layout and
+  little-endian timestamp decode correctly against records a real ME actually wrote,
+  and that `ClearLog` does what its name says on a live endpoint. Stage 10 archives the
+  log to disk and asserts records were captured *before* clearing, so the read that
+  validates the decoder cannot be destroyed by the clear that follows it.
 - **The sleep and hibernate power actions.** `amt_power` accepts `sleep-light`
   (CIM code 3), `sleep-deep` (code 4) and `hibernate` (code 7), and the codes and
   expected-state mappings are unit-tested, but no hardware stage has issued any of
-  them. Stage 4 exercised only `on`/`off`. These three also depend on the target
+  them. Stage 4 exercised only `on`/`off`. **Stage 11 (`qualify_sleep_hibernate.yml`)
+  now exists and has not run** (added 2026-07-31). These three also depend on the target
   operating system supporting the corresponding ACPI state, so a failure against
   real hardware would not necessarily indicate a defect in this collection — which
-  is exactly why they are listed here rather than claimed.
+  is exactly why they are listed here rather than claimed. Stage 11 reports a three-way
+  outcome for that reason (`confirmed_transition` / `os_did_not_transition` /
+  `firmware_refused`), so an OS that does not support S3 cannot be mistaken for a defect
+  in this collection.
 
   **This entry spans the split, and says which half is which.** What a stage can close
   here is whether real firmware accepts codes 3, 4 and 7 as this collection issues them,
@@ -808,7 +824,12 @@ most an attended run or a small addition to the one that exists, said where it a
   accepted list. A green stage here would therefore prove the request path and not the
   state transition, and would have to say so.
 - **Whether either endpoint answers WS-Man while powered off.** Still untested, and
-  this entry stays — but the evidence now points the *other* way than it did in 0.3.0.
+  this entry stays. **Stage 12 (`qualify_wake_from_off.yml`) now exists for exactly this
+  and has not run** (added 2026-07-31) — and note that even a green stage 12 would not
+  fully close this entry: it proves WS-Man answered while *AMT reported* the machine off,
+  which is not the same as independent confirmation of physical power-off. Nothing
+  reachable from CI supplies that. The evidence now points the *other* way than it did in
+  0.3.0.
   Both machines carry `link_policy` value `14` (Sx AC) and so report
   `wake_on_lan_capable = true`, and one of them has a MEBx sleep-state setting of
   *"ON in S0, ME Wake in S3, S4-5"* to match (see the subsection at the end of
@@ -997,8 +1018,8 @@ generations in Tier 3 above.
 | 10.x, Enterprise/other modes | Yes | Present | Present | Present | **Inferred** — not tested |
 | 11.x+ Enterprise | Yes | Present | Present | Present | **Inferred** — not tested |
 | 12.x+ | Yes, enhanced | Present | Present | Present | **Inferred** — not tested |
-| **16.1.30** (machine 1) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages** (2026-07-28). `amt_info`'s network/system-state facts came back fully populated on a read-only re-run (2026-07-29) |
-| **19.0.5** (machine 2) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages** (2026-07-29). Capability flags were read live and all four came back `true`; the network/system-state facts came back fully populated here too |
+| **16.1.30** (machine 1) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages as they existed then** (2026-07-28). `amt_info`'s network/system-state facts came back fully populated on a read-only re-run (2026-07-29) |
+| **19.0.5** (machine 2) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages as they existed then** (2026-07-29). Capability flags were read live and all four came back `true`; the network/system-state facts came back fully populated here too |
 
 "Present" in the IDE-R/SOL/PXE columns means "AMT's published feature set for this
 generation includes it," per `docs/protocol-notes.md` §1.1 and Intel's own
