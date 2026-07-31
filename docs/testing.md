@@ -271,10 +271,21 @@ That document cites each run by workflow and job; this list is about interpreter
   mutated and none of the stage 4-7 approvals were requested. Its purpose was to read
   both machines with the 0.5.0 hardware-inventory code, which every earlier run
   predated, and it is the sole evidence for the inventory rows in Tier 3.
+- **Machine 1, stages 9-12, 2026-07-31** — the first real-firmware run of any of the
+  four newest qualification stages, all four against `amt-lab-01` only, all four
+  passed. CircleCI **pipeline 208**, workflow `282b6692-94a2-481b-aacf-32c2cb1b2dfe`;
+  jobs `hardware-tests` (2568, stage 9), `hardware-log-clear` (2574, stage 10),
+  `hardware-sleep-hibernate` (2576, stage 11), `hardware-wake-from-off` (2578, stage
+  12). Machine 2 was not touched by this run. This is also the first run whose
+  published evidence carries a per-file SHA-256 digest manifest
+  (`hardware-evidence/SHA256SUMS`) -- see `docs/capability-matrix.md`'s Tier 3 audit-
+  limits subsection for what that does and does not let a reader check for this run
+  versus the four before it.
 
-None of the runs above cover stages 9-12 (added afterwards) at all -- "all eight" in
-each bullet means all eight that existed on that date, not all twelve that exist now.
-See "Qualification order" below.
+None of the first four runs above cover stages 9-12 at all -- "all eight" in each of
+those bullets means all eight that existed on that date, not all twelve that exist
+now. The fifth run covers stages 9-12, but only on machine 1. See "Qualification
+order" below.
 
 Machine 2's run **clears GHSA-w8p5-mx5w-cpqj [HIGH] for the lab runner**: the 2.17
 line it previously used is EOL and permanently affected, and the runner is now
@@ -342,9 +353,13 @@ stage 1's playbook (`qualify_readonly.yml`).
     [`PREFLIGHT.md`](../tests/hardware/PREFLIGHT.md) for exactly what a run of this
     stage does and does not establish.
 
-**Stages 9-12 are authored and verified against the mock WS-Man server, but as of
-this writing have not yet run against real hardware** — see "What the recorded
-qualifications ran on" above, none of which cover them.
+**Stages 9-12 have now each run against real hardware once, on machine 1 only**
+(pipeline 208, 2026-07-31) — see "What the recorded qualifications ran on" above.
+All four passed: stage 9 read the log to completion with zero decode errors; stage
+10 archived, cleared and independently confirmed empty; stage 11 found firmware
+refused all three sleep/hibernate actions; stage 12 found AMT answering WS-Man and
+accepting a wake request while self-reporting off. None has yet run against
+machine 2 — see `docs/capability-matrix.md` Tier 4 for what that leaves open.
 
 **Qualify one machine through all twelve stages first.** A second machine proves
 repeatability. Never cut both over to a new stage at once — if a firmware quirk
@@ -374,28 +389,46 @@ Being explicit, because the gap matters:
   misunderstanding between implementation and mock passes both.
 - Real firmware differs across AMT generations and SKUs. Anything version
   dependent is unverified until step 1 runs on that generation.
-- **`amt_event_log` and `amt_log_clear` now have a hardware stage each (9 and 10),
-  but neither has actually run against real hardware yet.** Five of the
-  collection's seven modules are hardware-qualified; those two are not, on any
-  generation. Stages 9 and 10 are authored and verified against the mock WS-Man
-  server, so the gap that used to be "no stage reaches these modules at all" is
-  closed on paper -- but until stage 10 in particular actually runs (it is
-  irreversible; see [`PREFLIGHT.md`](../tests/hardware/PREFLIGHT.md)), their
-  `AMT_MessageLog` iteration, record decode and `ClearLog` invocation still rest
-  entirely on the unit and mock tiers plus a captured firmware fixture. See Tier 4
-  in [`capability-matrix.md`](capability-matrix.md).
+- **`amt_event_log` and `amt_log_clear` have now run against real hardware — once,
+  on one machine.** Stage 9 (read-only) and stage 10 (irreversible) both ran against
+  `amt-lab-01`, AMT 16.1.30, on 2026-07-31 (pipeline 208) and both passed: stage 9's
+  `AMT_MessageLog` iteration read all 205 records to completion with zero decode
+  errors, confirming the 21-byte layout against records a real ME actually wrote;
+  stage 10 archived those records, invoked `ClearLog`, and independently re-read the
+  log to confirm empty rather than trusting `ClearLog`'s own return value. `amt-lab-02`
+  (AMT 19.0.5) has never run either stage, so — unlike the other five modules — this
+  rests on one firmware generation, not two. See Tier 3 in
+  [`capability-matrix.md`](capability-matrix.md) for the full result and Tier 4 for
+  what machine-2 repeatability would still add.
+- **Stage 11 found that AMT 16.1.30 refuses `amt_power`'s sleep and hibernate actions
+  outright.** The same 2026-07-31 run issued `sleep-light`, `sleep-deep` and
+  `hibernate` against `amt-lab-01` for the first time any hardware stage had issued
+  any of them, and firmware answered `outcome: firmware_refused` /
+  `error_class: remote_operation` for all three, before any request reached the
+  platform. The machine was left `on` and healthy. That is a measured result on one
+  machine, one firmware version — not a general claim about AMT's sleep/hibernate
+  support. See [`docs/amt_power.md`](amt_power.md) and Tier 3 of
+  [`capability-matrix.md`](capability-matrix.md).
+- **Stage 12 found AMT answering WS-Man, and accepting a wake request, while
+  reporting itself powered off.** Also 2026-07-31, against `amt-lab-01`: 3
+  reachability probes while AMT self-reported off, 0 failures, a wake request
+  accepted, and the machine restored to `on`. `operator_attestation` is `null`, as it
+  will be on every unattended CI run — nothing reachable from CI independently
+  confirms genuine physical power-off. See Tier 4 in
+  [`capability-matrix.md`](capability-matrix.md) for exactly what remains open.
 
 This collection is protocol-complete, test-covered, and **hardware-qualified on two
-machines for five of its seven modules** — precisely: **all eight (of the stages
-that existed at the time) against AMT 16.1.30 (`amt-lab-01`, 2026-07-28) and all
-eight against AMT 19.0.5 (`amt-lab-02`, 2026-07-29)**, each run limited to the
-machine it qualified (`hardware-limit`), so neither touched the other. Stages 9-12
-did not exist yet and are not part of either run — see "Qualification order" above.
-A read-only re-run against machine 1 on 2026-07-29 then read that machine with
-v0.2.0's fact code, which closed the last coverage difference between the two:
-`amt_info`'s network and system-state facts are now confirmed populated on both
-generations rather than on 19.0.5 alone. Qualification found six defects the first
-two tiers could not have found, which is the concrete argument for this tier existing
+machines for five of its seven modules, and on one machine for the remaining two** —
+precisely: **all eight (of the stages that existed at the time) against AMT 16.1.30
+(`amt-lab-01`, 2026-07-28) and all eight against AMT 19.0.5 (`amt-lab-02`,
+2026-07-29)**, each run limited to the machine it qualified (`hardware-limit`), so
+neither touched the other, **plus stages 9-12 against `amt-lab-01` alone
+(2026-07-31, pipeline 208)**. A read-only re-run against machine 1 on 2026-07-29
+then read that machine with v0.2.0's fact code, which closed the last coverage
+difference between the two for the original eight stages: `amt_info`'s network and
+system-state facts are now confirmed populated on both generations rather than on
+19.0.5 alone. Qualification found six defects the first two tiers could not have
+found, which is the concrete argument for this tier existing
 rather than a theoretical one.
 
 What it still does not cover is listed as Tier 4 in

@@ -44,14 +44,26 @@ options:
         other depth". Reporting C(changed=false) for a transition that was never
         requested would be worse than always issuing it, so these two always send.
       - >-
-        B(V(sleep-light), V(sleep-deep) and V(hibernate) are unverified against real
-        firmware.) They are wired to the CIM C(RequestPowerStateChange) codes 3, 4 and 7
-        respectively, but no hardware qualification stage has exercised them -- see
-        C(docs/capability-matrix.md). Sleep and hibernate additionally depend on the
-        B(target operating system) supporting the corresponding ACPI state and on it
-        being enabled in firmware; where it is not, AMT answers the request with a
-        non-zero return code, which this module reports as
-        C(error_class=remote_operation) rather than silently treating as success.
+        They are wired to the CIM C(RequestPowerStateChange) codes 3, 4 and 7
+        respectively -- correct per the DMTF/C(go-wsman-messages) mapping. B(On the one
+        machine that has ever been asked -- AMT 16.1.30, hardware qualification stage
+        11, 2026-07-31 -- firmware refused all three): this module raised
+        C(error_class=remote_operation) for every one of V(sleep-light), V(sleep-deep)
+        B(and) V(hibernate), which that qualification stage's own three-way
+        classification records as C(outcome=firmware_refused) -- AMT rejected the
+        request itself, before it ever reached the platform. The machine was left
+        C(on) and healthy throughout. This is a statement about that one firmware
+        version on that one machine, not a claim that AMT never supports sleep or
+        hibernate -- see C(docs/capability-matrix.md) for the full result and its scope.
+      - >-
+        Sleep and hibernate additionally depend on the B(target operating system)
+        supporting the corresponding ACPI state and on it being enabled in firmware;
+        where it is not, AMT answers the request with a non-zero return code, which
+        this module reports as C(error_class=remote_operation) rather than silently
+        treating as success. The 2026-07-31 result above means that on at least one real
+        endpoint, that non-zero return code comes from firmware refusing the request
+        outright, before any platform ever gets a chance to honour or decline the ACPI
+        transition itself.
       - >-
         A machine that is powered off cannot be put to sleep. AMT rejects such a
         request rather than ignoring it, so it surfaces as
