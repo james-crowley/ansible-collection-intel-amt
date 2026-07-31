@@ -37,7 +37,8 @@
 - name: Ensure the IDE-R redirection service is enabled before attaching media
   james_crowley.intel_amt.amt_redirection:
     host: "{{ amt_baremetal_install_host }}"
-    port: "{{ amt_baremetal_install_port }}"
+    # default(omit, true) -- see defaults/main.yml's comment on amt_baremetal_install_port.
+    port: "{{ amt_baremetal_install_port | default(omit, true) }}"
     username: "{{ amt_baremetal_install_username }}"
     password: "{{ amt_baremetal_install_password }}"
     use_tls: "{{ amt_baremetal_install_use_tls }}"
@@ -79,14 +80,16 @@
     # The redirection port, deliberately not amt_baremetal_install_port: amt_media
     # talks to the IDE-R plane (16994/16995) while the task above talks WS-Man
     # (16992/16993), so passing the WS-Man port here would aim the media session at
-    # the wrong plane. Unset by the caller this resolves to None and amt_media applies
-    # its own use_tls-dependent default, which is what a stock endpoint wants.
+    # the wrong plane. Unset by the caller this resolves to an omitted keyword (see
+    # default(omit, true) below and defaults/main.yml's comment on
+    # amt_baremetal_install_port) and amt_media applies its own use_tls-dependent
+    # default, which is what a stock endpoint wants.
     #
     # ca_path, timeout and connect_timeout remain deliberately absent: amt_media
     # *rejects* ca_path outright (the redirection plane has no CA-chain trust path,
     # only tls_fingerprint pinning), and documents timeout as accepted-for-parity but
     # unused -- attach_timeout below is what actually bounds this call.
-    port: "{{ amt_baremetal_install_media_port }}"
+    port: "{{ amt_baremetal_install_media_port | default(omit, true) }}"
     username: "{{ amt_baremetal_install_username }}"
     password: "{{ amt_baremetal_install_password }}"
     use_tls: "{{ amt_baremetal_install_use_tls }}"

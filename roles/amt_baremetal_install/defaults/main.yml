@@ -23,6 +23,52 @@
 # amt_baremetal_install_password and amt_baremetal_install_tls_fingerprint have
 # no default beyond that fallback on purpose: a missing required value must fail
 # loudly in tasks/validate.yml, not coerce silently.
+#
+# amt_baremetal_install_port and amt_baremetal_install_media_port below keep the same
+# `default(None)` shape as every other variable here, even though "unset" for either of
+# them has to reach amt_info/amt_media/etc. as an *omitted* keyword, not as None. On
+# ansible-core <=2.18, a quoted scalar template that evaluates to Jinja's None is
+# stringified by finalize, and Ansible's convert_data step only evaluates a template's
+# text back into dicts, lists and booleans -- not None -- so `"{{ amt_port |
+# default(None) }}"` arrives as the literal string "" on those cores rather than as the
+# value None. amt_port and amt_media_port are `type: int` at the module boundary, so an
+# empty string is not "unset", it is a type error: "argument 'port' is of type <class
+# 'str'> and we were unable to convert to int". An operator on stock ports -- i.e.
+# anyone who does not set amt_port -- could not use this role at all on those cores.
+#
+# The fix is NOT to make these two variables resolve to `omit` here, even though that
+# looks like the obvious parallel to the rest of this file. Tried and measured: doing
+# so makes the *stored role variable itself* hold Ansible's omit placeholder whenever
+# amt_port/amt_media_port are unset, and what that placeholder actually is differs by
+# core. On <=2.18 it is a harmless literal string (`__omit_place_holder__<hash>`),
+# because Ansible's stringify-then-convert round trip works in `omit`'s favour there
+# rather than against it. On >=2.19, native Jinja templating instead preserves the
+# real `_OmitType` sentinel *object* as the variable's value -- which is fine as long as
+# nothing but a module-parameter assignment ever touches it, but this collection's own
+# integration target's diagnostic dump (files/nested_play.yml) does exactly that for
+# every scenario, via `to_nice_json`, and `_OmitType` is not JSON-serializable: "Object
+# of type '_OmitType' is not JSON serializable by the 'tagless' profile." A role
+# default that only behaves once, in one specific position, and throws an unrelated
+# hard error the moment anything else touches it, is a worse contract than the one it
+# would replace.
+#
+# So these two stay `default(None)` here, matching amt_baremetal_install_host/_password
+# above -- "" on <=2.18, real None on >=2.19, exactly like those -- and the actual
+# omit conversion happens only at each place that passes the value straight into a
+# module's `port` parameter (tasks/probe.yml, tasks/arm_boot.yml, tasks/reset.yml,
+# tasks/observe.yml, tasks/attach_media.yml -- both its ports), via
+# `| default(omit, true)`. The `true` second argument is what makes that filter treat
+# any falsy value -- None *or* "" -- as needing replacement, not only Jinja's Undefined,
+# which is what actually closes the gap on <=2.18: `default(omit)` alone only replaces a
+# genuinely undefined variable, and amt_baremetal_install_port is always defined here
+# (its value is merely falsy). Confining the conversion to those six call sites means
+# the omit sentinel is created and consumed within the same task's argument templating
+# and never becomes a stored variable value anywhere -- so nothing else in this role or
+# any caller of it can observe, forward, or serialize it. Verified end-to-end on 2.17,
+# 2.19 and 2.21: an explicit port is preserved (dials it), an unset one falls through to
+# the module's own use_tls-dependent default, and the integration target's dump of an
+# unset port/media_port is `""`/`null` like every other unset connection variable,
+# never the sentinel.
 # ---------------------------------------------------------------------------
 amt_baremetal_install_host: "{{ amt_host | default(None) }}"
 amt_baremetal_install_port: "{{ amt_port | default(None) }}"
@@ -86,6 +132,16 @@ amt_baremetal_install_media_start_mode: on_reboot
 # the connection block above. amt_port is deliberately NOT the fallback: an
 # operator who sets amt_port for a non-default WS-Man port would otherwise have
 # their redirection traffic silently aimed at the WS-Man port as well.
+#
+# Kept as `default(None)` -- same reasoning as amt_baremetal_install_port above,
+# including why NOT `default(omit)` here despite this being the variable the
+# media_failure integration scenario actually exposed: it never sets amt_media_port, so
+# on ansible-core <=2.18 the unset value arrived as "" and amt_media's `type: int` port
+# argument raised a conversion error before the role's own "outside allowed directory"
+# refusal was ever reached. tasks/attach_media.yml applies `| default(omit, true)` at
+# the one place this reaches a module parameter, so the conversion happens there and
+# this variable's own value stays a plain, serializable None/"" like every other unset
+# connection variable.
 amt_baremetal_install_media_port: "{{ amt_media_port | default(None) }}"
 amt_baremetal_install_media_allowed_directory: null
 amt_baremetal_install_media_runtime_dir: ~/.ansible/intel_amt/media-sessions

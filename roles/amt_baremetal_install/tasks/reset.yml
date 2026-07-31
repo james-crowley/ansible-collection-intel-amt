@@ -43,7 +43,8 @@
     - name: Issue the transition via amt_power
       james_crowley.intel_amt.amt_power:
         host: "{{ amt_baremetal_install_host }}"
-        port: "{{ amt_baremetal_install_port }}"
+        # default(omit, true) -- see defaults/main.yml's comment on amt_baremetal_install_port.
+        port: "{{ amt_baremetal_install_port | default(omit, true) }}"
         username: "{{ amt_baremetal_install_username }}"
         password: "{{ amt_baremetal_install_password }}"
         use_tls: "{{ amt_baremetal_install_use_tls }}"
