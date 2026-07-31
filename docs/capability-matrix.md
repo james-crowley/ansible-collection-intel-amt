@@ -153,7 +153,10 @@ This is the bulk of the collection's verification effort:
   module's argument handling, check-mode behaviour, and idempotence logic — all
   against fakes/mocks, never a socket or a real AMT endpoint.
 
-  Branch coverage over `plugins/` is **93%**. The distribution matters more than the
+  Branch coverage over `plugins/` is **93%**, measured with
+  `coverage run --branch --source=plugins` over that same unit suite — stated because
+  a coverage figure whose measurement is not named cannot be checked, and the two
+  per-file figures below were taken the same way. The distribution matters more than the
   total, and it used to be inverted against consequence: the two least-covered files
   were the two highest-consequence ones. `media_session.py` (the detached daemon that
   holds credentials across a fork) was **50%** and is now **81%**; `ider.py` (the SCSI
@@ -262,19 +265,27 @@ applies here exactly as it does elsewhere.
 What Tier 2 still buys — and it is what makes the *labels*, rather than the plumbing,
 trustworthy:
 
-- **666 unit tests**, and the basis of that number is stated here because the figure it
-  replaces did not state its own. **609** was the *whole-suite delta* of the 0.5.0
-  feature commit — 1078 tests before it, 1687 after, which is the arithmetic that
-  commit's own message records. Read as "609 tests covering the inventory" it claims
-  something narrower than it measured, so the measure is named rather than the number
-  quietly substituted: the growth of the four test files that work touched
-  (`module_utils/test_hardware.py`, `module_utils/test_client.py`,
-  `modules/test_amt_info.py`, `mock_servers/test_wsman_server.py`), **217 before 0.5.0
-  to 883 now**. The 57 between 609 and 666 are the follow-up that added
-  `operation.hardware_reads`, described at the end of this subsection. Two narrower
-  counts, for anyone who wants a figure that needs no reconstruction at all:
-  `test_hardware.py` — the file dedicated to the decoders and the value tables —
-  collects **514** on its own, and the whole unit suite collects 1744.
+- **666 unit tests**, counted as the growth of the four test files this work touched —
+  `module_utils/test_hardware.py`, `module_utils/test_client.py`,
+  `modules/test_amt_info.py`, `mock_servers/test_wsman_server.py` — which held **217
+  before 0.5.0 and hold 883 now**. The basis is stated because the figure it replaces
+  did not state its own, and because reconstructing that figure is the only way to know
+  whether the replacement measures the same thing.
+
+  **609**, the number here previously, turns out to have been defensible on either of
+  the two readings available to it. It is the whole-suite delta of the 0.5.0 feature
+  commit — 1078 tests before, 1687 after, which is the arithmetic that commit's own
+  message records — **and** it is the growth of those same four files, 217 to 826. The
+  two coincide because 0.5.0 added tests to nothing else, so "609 tests covering the
+  inventory" was not the overstatement it looks like from the whole-suite arithmetic
+  alone; the figure has simply drifted. The same holds for the 57 added since: all of
+  them landed in these four files, in the follow-up that added
+  `operation.hardware_reads` described at the end of this subsection, so 826 → 883 and
+  1687 → 1744 are the same 57 tests counted two ways.
+
+  Two narrower counts, for anyone who wants a figure that needs no reconstruction at
+  all: `test_hardware.py` — the file dedicated to the decoders and the value tables —
+  collects **514** on its own, and the whole unit suite collects **1744**.
 
   Of these the bulk are per-value assertions over the nine value
   tables — every defined value plus an out-of-table value for each — written against the
