@@ -1,0 +1,20 @@
+---
+bugfixes:
+  - 'scripts/check-default-none-template.sh - widen the guard to also flag the
+    bare-int shape C({{ ... | default(0) }}) (optionally with a trailing C(, true)),
+    not only C(default(none))/C(default(None)). Measured on ansible-core 2.17.14
+    through 2.21.x: C(default(0)) round-trips through a quoted scalar exactly like
+    C(default(none)) does -- C("0") (str) on <= 2.18, C(0) (int) on >= 2.19 -- by
+    the identical mechanism (Ansible''s C(convert_data) does not evaluate a bare
+    int back from text either). C(default(false))/C(default([]))/C(default({}))
+    were measured to round-trip correctly on every floor from 2.17.14 through 2.21.x
+    and are deliberately NOT flagged, and the separate C(default(X, true))-treats-falsy-
+    as-missing hazard (not a version-floor divergence; it reproduces identically
+    on every floor, and is too semantic to flag mechanically without a high false-positive
+    rate against the many correct C(default(omit, true)) call sites in this repo)
+    is documented as an explicit boundary in the script''s header instead of mechanically
+    checked. Widening found exactly one existing instance
+    (C(tests/integration/targets/amt_baremetal_install_role/files/nested_play.yml)''s
+    C(serial:)), confirmed harmless (Ansible''s C(serial:) keyword parses C("0")
+    and C(0) identically on every floor) and excused with the existing inline
+    C(# default-none-reviewed:) marker.'

@@ -33,7 +33,11 @@
   gather_facts: false
   # 0 means "all hosts in one batch" -- the default. Only the serial-guard scenario
   # passes anything else.
-  serial: "{{ nested_serial | default(0) }}"
+  # default(0) round-trips as the STRING "0" on ansible-core <= 2.18 (see
+  # scripts/check-default-none-template.sh), but `serial:` parses "0" and 0
+  # identically on every floor 2.17-2.21 (verified) -- unlike an `== 0`
+  # check, batching does not care which type it got.
+  serial: "{{ nested_serial | default(0) }}"  # default-none-reviewed: serial: accepts "0" and 0 alike
   tasks:
     - name: Run the role under test, capturing whatever it decides to do
       block:
