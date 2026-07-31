@@ -154,7 +154,7 @@ the two wrong tables noted above.
 
 This is the bulk of the collection's verification effort:
 
-- **1869 unit tests** (collected via `pytest` against the staged collection tree on
+- **1893 unit tests** (collected via `pytest` against the staged collection tree on
   2026-07-30; the number drifts as tests are added, so treat it as a point
   measurement, not a promise) across `tests/unit/plugins/module_utils/`, `tests/unit/plugins/modules/`
   and `tests/unit/mock_servers/`, covering error classification/redaction, TLS trust
@@ -287,11 +287,11 @@ applies here exactly as it does elsewhere.
 What Tier 2 still buys — and it is what makes the *labels*, rather than the plumbing,
 trustworthy:
 
-- **730 unit tests.** **What that number measures**, written out so it cannot quietly
+- **735 unit tests.** **What that number measures**, written out so it cannot quietly
   come to mean something else: `pytest --collect-only` over the four test files this work
   touched — `module_utils/test_hardware.py`, `module_utils/test_client.py`,
   `modules/test_amt_info.py`, `mock_servers/test_wsman_server.py` — **minus their
-  pre-0.5.0 baseline of 217**. Those four collect **947** today, and 947 − 217 = 730.
+  pre-0.5.0 baseline of 217**. Those four collect **952** today, and 952 − 217 = 735.
 
   It is **not** a count of tests that exercise the inventory and nothing else: three of
   those files predate the inventory and keep testing what they always did, and the fourth
@@ -312,17 +312,24 @@ trustworthy:
   ways.
 
   **That coincidence has now ended, and this is the more useful thing to record.** Between
-  1744 and 1869 the suite grew by 125, of which only 64 landed in these four files
-  (883 → 947). The remaining 61 went to `test_redact_evidence.py`, `test_wsman.py`,
-  `test_ider_server.py` and the role's integration target — redaction fixes, the
-  `EndOfSequence` discriminator, the IDE-R `start_session_status` fault, the 2.17
-  connection-guard regressions. So the whole-suite figure and the four-file figure now
-  measure genuinely different things, as they always claimed to but never had to
-  demonstrate. Anyone tempted to treat one as a proxy for the other should stop here.
+  1744 and 1893 the suite grew by **149**, of which only **69** landed in these four files
+  (883 → 952). The other **80** went to `test_redact_evidence.py`, `test_wsman.py`,
+  `test_ider_server.py`, `test_message_log.py` and the role's integration target — redaction
+  fixes, the `EndOfSequence` discriminator, the IDE-R `start_session_status` fault, the 2.17
+  connection-guard regressions, and the event-log empty-slot accounting. So the whole-suite
+  figure and the four-file figure now measure genuinely different things, as they always
+  claimed to but never had to demonstrate. Anyone tempted to treat one as a proxy for the
+  other should stop here.
+
+  A note on maintaining this, earned the hard way: both times these figures were updated,
+  the first attempt was a find-and-replace of the numbers, and both times that silently
+  falsified the arithmetic in this very paragraph — leaving sentences whose sums no longer
+  added up. The numbers here are load-bearing prose, not values. Re-derive the differences
+  when you change them.
 
   Two narrower counts, for anyone who wants a figure that needs no reconstruction at
   all: `test_hardware.py` — the file dedicated to the decoders and the value tables —
-  collects **538** on its own, and the whole unit suite collects **1869**.
+  collects **538** on its own, and the whole unit suite collects **1893**.
 
   Of these the bulk are per-value assertions over the nine value
   tables — every defined value plus an out-of-table value for each — written against the
@@ -503,7 +510,7 @@ do not let a reader check:
   `5767a536-5ed3-46cd-aa82-993972fe53f0` (4), `hardware-media`
   `8c4e4a51-2082-489a-843d-fa32bfc9a13e` (5), `hardware-writable`
   `988a4327-10ca-4252-8c38-9ff5d9b7d281` (6), `hardware-pxe`
-  `310385c9-0916-4863-947f-52428ec895a5` (7), all succeeded.
+  `310385c9-0916-4863-952f-52428ec895a5` (7), all succeeded.
 - **`amt-lab-01` (machine 1) again, read-only stages only** — stages 1, 3 and 8,
   2026-07-29, limited to machine 1 (`hardware-limit=amt-lab-01`), on the
   ansible-core 2.18.18 lab virtualenv every hardware job now builds. Nothing was
