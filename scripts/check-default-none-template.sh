@@ -97,14 +97,20 @@ set -euo pipefail
 # downstream distinguishes "" from None. A typed argspec (`int`) does. So does
 # `is none`/`is not none`. A truthy test does not. Four of these six lines are
 # safe for exactly that reason.
-ALLOWLIST='
-roles/amt_baremetal_install/defaults/main.yml:27
-roles/amt_baremetal_install/defaults/main.yml:28
-roles/amt_baremetal_install/defaults/main.yml:30
-roles/amt_baremetal_install/defaults/main.yml:34
-roles/amt_baremetal_install/defaults/main.yml:35
-roles/amt_baremetal_install/defaults/main.yml:89
-'
+# Deliberately EMPTY, and that is the intended steady state.
+#
+# It existed because this script was first added under a constraint that forbade
+# editing roles/amt_baremetal_install/defaults/main.yml, so six reviewed lines
+# had to be excused from outside the file. It was keyed by "path:line" and went
+# stale within one PR -- #87 added a comment block and every entry shifted
+# (27 -> 73, 34 -> 80, 89 -> 145), so the guard failed on the very lines it was
+# meant to excuse. A line number is not an identity.
+#
+# All six now carry an inline `# default-none-reviewed:` marker instead, which
+# is what this script's header already recommends: the reason lives next to the
+# line it excuses, and it cannot drift out of alignment. Prefer that. Add to this
+# list only if you genuinely cannot edit the offending file.
+ALLOWLIST=''
 
 OPT_OUT_MARKER='# *default-none-reviewed:'
 
@@ -143,7 +149,21 @@ while IFS= read -r hit; do
     file="${hit%%:*}"
     rest="${hit#*:}"
     line="${rest%%:*}"
-    key="${file}:${line}"
+    text="${rest#*:}"
+
+    # Skip comments. Prose that merely *describes* this pattern is not an
+    # executable template, and the project documents this bug extensively --
+    # validate.yml and the role's integration target both quote the offending
+    # shape verbatim to explain it. Without this, writing down the trap trips
+    # the guard, which would teach people to stop writing it down.
+    case "${text#"${text%%[![:space:]]*}"}" in
+        '#'*) continue ;;
+    esac
+
+    # Key on the YAML key (the variable being defined), not the line number.
+    varname="${text#"${text%%[![:space:]]*}"}"
+    varname="${varname%%:*}"
+    key="${file}:${varname}"
 
     if printf '%s\n' "${hit}" | grep -qE "${OPT_OUT_MARKER}"; then
         opted_out_count=$((opted_out_count + 1))

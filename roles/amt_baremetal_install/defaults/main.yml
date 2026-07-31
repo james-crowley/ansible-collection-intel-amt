@@ -70,15 +70,15 @@
 # unset port/media_port is `""`/`null` like every other unset connection variable,
 # never the sentinel.
 # ---------------------------------------------------------------------------
-amt_baremetal_install_host: "{{ amt_host | default(None) }}"
-amt_baremetal_install_port: "{{ amt_port | default(None) }}"
+amt_baremetal_install_host: "{{ amt_host | default(None) }}"  # default-none-reviewed: checked `is truthy`
+amt_baremetal_install_port: "{{ amt_port | default(None) }}"  # default-none-reviewed: used via default(omit, true), #87
 amt_baremetal_install_username: "{{ amt_username | default('admin') }}"
-amt_baremetal_install_password: "{{ amt_password | default(None) }}"
+amt_baremetal_install_password: "{{ amt_password | default(None) }}"  # default-none-reviewed: checked `is truthy`, #87
 amt_baremetal_install_use_tls: "{{ amt_use_tls | default(true) }}"
 amt_baremetal_install_allow_insecure_transport: "{{ amt_allow_insecure_transport | default(false) }}"
 amt_baremetal_install_validate_certs: "{{ amt_validate_certs | default(true) }}"
-amt_baremetal_install_ca_path: "{{ amt_ca_path | default(None) }}"
-amt_baremetal_install_tls_fingerprint: "{{ amt_tls_fingerprint | default(None) }}"
+amt_baremetal_install_ca_path: "{{ amt_ca_path | default(None) }}"  # default-none-reviewed: all consumers truthy
+amt_baremetal_install_tls_fingerprint: "{{ amt_tls_fingerprint | default(None) }}"  # default-none-reviewed: checked `is truthy`, #87
 amt_baremetal_install_timeout: "{{ amt_timeout | default(30) }}"
 amt_baremetal_install_connect_timeout: "{{ amt_connect_timeout | default(10) }}"
 
@@ -142,7 +142,7 @@ amt_baremetal_install_media_start_mode: on_reboot
 # the one place this reaches a module parameter, so the conversion happens there and
 # this variable's own value stays a plain, serializable None/"" like every other unset
 # connection variable.
-amt_baremetal_install_media_port: "{{ amt_media_port | default(None) }}"
+amt_baremetal_install_media_port: "{{ amt_media_port | default(None) }}"  # default-none-reviewed: used via default(omit, true), #87
 amt_baremetal_install_media_allowed_directory: null
 amt_baremetal_install_media_runtime_dir: ~/.ansible/intel_amt/media-sessions
 amt_baremetal_install_media_attach_timeout: 10
