@@ -12,26 +12,37 @@
 # TEST_UNIT_READY + READ_10 + WRITE_10 sequence automatically once a client connects --
 # see that script's docstring for why nothing else in this test could do that driving).
 #
-# Five independent mock instances, run one at a time: (A) the read+write proof over
+# Six independent mock instances, run one at a time: (A) the read+write proof over
 # plaintext, (B) the TLS/fingerprint-pinning happy path, (C) the wrong-password fault
 # injection, (D) firmware that refuses the IDE-R feature toggle, (E) firmware that never
-# answers it. Keeping them sequential avoids juggling several sets of background pids at
-# once and keeps IDE-R's single-connection-at-a-time nature from ever being in doubt.
+# answers it, (F) firmware that refuses the redirection session at the very first exchange.
+# Keeping them sequential avoids juggling several sets of background pids at once and keeps
+# IDE-R's single-connection-at-a-time nature from ever being in doubt.
 #
-# D and E are the only tier that drives the real IderEngine, over a real socket, against
-# an endpoint that does not agree to serve the media. Everything above them proves the
-# module reports success when it should; they are what proves it reports *failure* when it
-# must -- and specifically that it does not report `session_state: attached` for a session
-# whose feature toggle firmware declined, which is the defect issue #69 fixed. That fix
-# lives in media_session._run_daemon's attach gate and was, until these two scenarios,
-# guarded only by unit tests: the mock has always had a feature_toggle_status knob and
-# nothing had ever passed it anything but the happy-path default.
+# C through F are the tier that drives the real RedirectionSession/IderEngine pair, over a
+# real socket, against an endpoint that does not agree to serve the media. Everything above
+# them proves the module reports success when it should; they are what proves it reports
+# *failure* when it must -- and specifically that it does not report
+# `session_state: attached` for a session whose feature toggle firmware declined, which is
+# the defect issue #69 fixed. That fix lives in media_session._run_daemon's attach gate and
+# was, until these scenarios, guarded only by unit tests: the mock has always had a
+# feature_toggle_status knob and nothing had ever passed it anything but the happy-path
+# default.
 #
-# The two are deliberately not one scenario. A refusal is definite -- firmware said no, so
-# no media is being served -- and classifies as `unsupported_capability`. A withheld
-# verdict leaves whether media is served genuinely unknown and can only be ended by a
-# bounded wait, so it classifies as `timeout`. Collapsing them would lose the distinction
-# a caller needs to decide between giving up on an endpoint and retrying it.
+# The refusal scenarios are deliberately not collapsed into one, because they differ in
+# *when* they fire and therefore in what a caller should do about them:
+#
+#   C  during the digest exchange     -> `authentication`          fix the credentials
+#   D  after the session opens        -> `unsupported_capability`  firmware said no; give up
+#   E  after the session opens        -> `timeout`                 firmware never said; retry
+#   F  before authentication at all   -> `protocol`                the session itself was refused
+#
+# D versus E is the sharpest of these: a refusal is definite, so no media is being served,
+# while a withheld verdict leaves that genuinely unknown and can only be ended by a bounded
+# wait. Collapsing them would lose the distinction a caller needs to decide between giving
+# up on an endpoint and retrying it. F is distinct from all three in that it fires entirely
+# upstream of ider.IderEngine -- no engine is ever constructed -- so none of the attach
+# gate, the toggle deadline, or the digest exchange participates in reaching the verdict.
 
 - name: Create a scratch directory for this target's runtime files
   ansible.builtin.tempfile:
@@ -561,6 +572,135 @@
       ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
       changed_when: false
       when: ider_e_pid is defined
+
+# --------------------------------------------------------------------------------
+# (F) Fault injection -- firmware refuses the redirection session outright: the 0x11
+# StartRedirectionSessionReply carries a non-zero status (docs/protocol-notes.md s3.1).
+# The port is open and answering, so nothing before that byte looks wrong, and the
+# session never opens, so authentication is never even offered. Must fail as `protocol`,
+# and the message must carry the status byte firmware actually sent.
+#
+# The status is deliberately 2, not 1. The assertion below reads that number back out of
+# the module's own message, so a client reporting a hardcoded status instead of decoding
+# byte 1 of the reply would pass with 1 and fail here. Any non-zero value means the same
+# thing on the wire, so nothing else depends on which one it is.
+#
+# `protocol` is the vaguest class in the taxonomy, and that is the right answer rather
+# than a gap: the status byte alone does not say *why* the session was refused. IDE-R
+# never provisioned, redirection disabled in firmware, and another session already
+# holding the device would each argue for a different specific class
+# (unsupported_capability, unsupported_capability, invalid_state), and the wire gives no
+# way to tell them apart -- so a more specific claim would be a guess. See errors.py's
+# note on AmtError.error_class defaulting to "the vaguest class rather than something more
+# specific that could be wrong". What matters operationally is that it is *classified* at
+# all and is not mistaken for `authentication` or `connection`; the unit-test counterpart
+# in tests/unit/mock_servers/test_ider_server.py shows that a client which ignores the
+# status byte reports `connection` -- "the peer hung up" -- for a refusal that was
+# perfectly well-formed.
+# --------------------------------------------------------------------------------
+- name: Scenario F -- the endpoint refuses to start a redirection session at all
+  block:
+    - name: Start a mock IDE-R server that refuses the redirection session start
+      ansible.builtin.shell: |
+        set -e
+        nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_ider_mock.py \
+          --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ scratch_dir.path }}/ider_f_ready.json \
+          --start-session-status 2 \
+          > {{ scratch_dir.path }}/ider_f.log 2>&1 &
+        echo $!
+      args:
+        executable: /bin/bash
+      register: ider_f_start
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Wait for the mock IDE-R server to report ready
+      ansible.builtin.wait_for:
+        path: "{{ scratch_dir.path }}/ider_f_ready.json"
+        state: present
+        timeout: 15
+      delegate_to: localhost
+
+    - name: Read the mock IDE-R server's connection info and pid
+      ansible.builtin.set_fact:
+        ider_f_info: "{{ lookup('ansible.builtin.file', scratch_dir.path + '/ider_f_ready.json') | from_json }}"
+        ider_f_pid: "{{ ider_f_start.stdout | trim }}"
+
+    - name: Attach against the endpoint that refuses the session start
+      james_crowley.intel_amt.amt_media:
+        host: 127.0.0.1
+        port: "{{ ider_f_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        floppy: "{{ floppy_path }}"
+        state: attached
+        runtime_dir: "{{ runtime_dir }}"
+        attach_timeout: 15
+      delegate_to: localhost
+      no_log: true
+      register: media_session_refused
+      ignore_errors: true
+
+    - name: Assert the refused session start failed the attach as a classified protocol error
+      ansible.builtin.assert:
+        that:
+          - media_session_refused.failed == true
+          - media_session_refused.session_state != 'attached'
+          - media_session_refused.error_class == 'protocol'
+          - media_session_refused.session_state == 'error'
+          - media_session_refused.changed == false
+          # Not merely "failed": the message must name the refusal and carry the status byte
+          # decoded off the wire, so an operator can look the code up. `status=2` is the
+          # value this scenario asked the mock for -- see the header comment.
+          - "'redirection session start rejected' in media_session_refused.msg"
+          - "'status=2' in media_session_refused.msg"
+          # Wrong classifications a caller would act on incorrectly, called out explicitly
+          # rather than left implied by the equality above: `authentication` sends someone to
+          # check a password that was never sent, and `connection` says the network broke
+          # when firmware in fact answered clearly.
+          - media_session_refused.error_class != 'authentication'
+          - media_session_refused.error_class != 'connection'
+
+    - name: Confirm the refused session left no daemon and moved no bytes
+      ansible.builtin.assert:
+        that:
+          - media_session_refused.bytes_read == 0
+          - media_session_refused.bytes_written == 0
+
+    # A bounded wait rather than a bare read: the mock rewrites its ready file from its own
+    # main thread the moment wait_for_handshake() raises, which races the module's failure
+    # above rather than being ordered before it. Scenario E has no such race because there
+    # the handshake succeeds long before its toggle deadline.
+    - name: Wait for the mock to record why its handshake ended
+      ansible.builtin.wait_for:
+        path: "{{ scratch_dir.path }}/ider_f_ready.json"
+        search_regex: handshake aborted
+        timeout: 15
+      delegate_to: localhost
+
+    - name: Read the mock IDE-R server's own account of the session
+      ansible.builtin.set_fact:
+        ider_f_result: "{{ lookup('ansible.builtin.file', scratch_dir.path + '/ider_f_ready.json') | from_json }}"
+      delegate_to: localhost
+
+    - name: Confirm the failure was the refused session start, not something else
+      ansible.builtin.assert:
+        that:
+          # Pins which fault actually fired. Every assertion above would hold equally well if
+          # the client had failed for an unrelated reason and never reached the start-session
+          # reply at all, which would make them vacuous -- the same check scenario E makes for
+          # the opposite reason (there, that the handshake *did* complete).
+          - ider_f_result.handshake == false
+          - "'start-session status configured non-zero' in ider_f_result.error"
+  always:
+    - name: Stop the mock IDE-R server (scenario F)
+      ansible.builtin.command: "kill {{ ider_f_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
+      changed_when: false
+      when: ider_f_pid is defined
 
 - name: Remove the scratch directory
   ansible.builtin.file:

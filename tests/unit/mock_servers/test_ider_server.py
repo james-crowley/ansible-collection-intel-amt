@@ -31,9 +31,11 @@ builds itself. The two met nowhere below the ``amt_media`` integration target,
 which needs a forked daemon and a playbook to run.
 
 ``TestRealEngineAgainstMock`` is deliberately thin: a wiring check on the
-handshake and on the feature-toggle verdict, not a second SCSI suite. Keeping it
-small is the point -- it costs a socket and no daemon, and it is the cheapest
-place to notice the two implementations drifting apart.
+handshake (including its refusal), on the feature-toggle verdict, and on one
+chunked read -- not a second SCSI suite. Keeping it small is the point -- it costs
+a socket and no daemon, and it is the cheapest place to notice the two
+implementations drifting apart, or to notice that a refusal the mock can express
+is one the client does not classify.
 """
 
 from __future__ import annotations
@@ -75,12 +77,20 @@ from ider_server import (
     encode_status_data,
 )
 
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import ErrorClass, ProtocolError
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.ider import DEVICE_FLOPPY, IderEngine, MediaImage
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.redirection import START_SESSION_IDER, RedirectionSession
 
 FAKE_USERNAME = "admin"
 FAKE_PASSWORD = "test-password-not-real"
 AUTH_URI = "/RedirectionService"
+
+#: A deliberately distinctive non-zero ``0x11`` StartRedirectionSessionReply status.
+#: Not ``1``: the test below reads this number back out of the *client's own* error
+#: message, so a client that reported a hardcoded ``status=1`` instead of decoding byte 1
+#: of the reply would pass with ``1`` and fail here. Nothing else depends on the value --
+#: protocol-notes.md §3.1 distinguishes only zero from non-zero.
+REFUSED_START_SESSION_STATUS = 2
 
 
 def _md5(data: str) -> str:
@@ -793,6 +803,64 @@ def _floppy_image(tmp_path, sectors: int = 4):
 
 
 class TestRealEngineAgainstMock:
+    def test_refused_session_start_is_classified_and_names_the_status(self):
+        """``0x11`` comes back with a non-zero status: reachable firmware that will not open a session.
+
+        Deliberately does **not** use :class:`_RealClientHarness`. This fault fires inside
+        ``RedirectionSession.connect()``, which the harness calls in its own constructor, so
+        there is no harness to build -- and that is the substance of the test rather than an
+        inconvenience. The refusal lands upstream of ``IderEngine`` entirely: no media is
+        opened, no engine exists, and neither the digest exchange nor ``media_session``'s
+        attach gate is involved in reaching the verdict. It is the only endpoint fault the
+        mock can inject where that is true.
+
+        Three things must hold at once, and each is a distinct way a redirection client can
+        get this wrong:
+
+        * **It must raise, not hang.** A client that kept reading past the refusal would
+          block until the socket timed out. ``connect_timeout`` is also the socket's recv
+          timeout (see ``RedirectionSession._default_socket_factory``), so that outcome
+          arrives as ``TimeoutError_`` -- a different type, which this ``pytest.raises`` does
+          not accept, so a hang fails rather than passes slowly.
+        * **It must not be reported as an authentication failure.** The credentials were
+          never offered; the session was refused before the auth-type query went out.
+          Classifying this as ``authentication`` would send an operator to check a password
+          that had nothing to do with it.
+        * **It must carry the status firmware actually sent**, decoded from the reply, so the
+          code can be looked up rather than the caller being told only that "something
+          failed".
+        """
+        with IderMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD, start_session_status=REFUSED_START_SESSION_STATUS) as srv:
+            session = RedirectionSession(
+                srv.host,
+                username=FAKE_USERNAME,
+                password=FAKE_PASSWORD,
+                use_tls=False,
+                port=srv.port,
+                connect_timeout=5.0,
+                start_frame=START_SESSION_IDER,
+            )
+            try:
+                with pytest.raises(ProtocolError) as excinfo:
+                    session.connect()
+            finally:
+                session.close()
+
+            assert excinfo.value.error_class == ErrorClass.PROTOCOL
+            assert f"status={REFUSED_START_SESSION_STATUS}" in str(excinfo.value)
+            assert excinfo.value.endpoint == f"{srv.host}:{srv.port}"
+            # Every error this module raises is built with secrets=self._password; this path
+            # is no exception, and a redaction hole would be least likely to be noticed on a
+            # failure path nothing previously exercised.
+            assert FAKE_PASSWORD not in str(excinfo.value)
+
+            # Pin *which* fault fired. Without this, the assertions above would pass equally
+            # well if the mock had aborted for some unrelated reason and the client had merely
+            # read a garbled reply -- the same vacuity that scenario E's handshake check
+            # exists to rule out on the integration side.
+            with pytest.raises(ProtocolViolation, match="start-session status configured non-zero"):
+                srv.wait_for_handshake(timeout=5.0)
+
     def test_handshake_completes_and_the_toggle_is_accepted(self, tmp_path):
         with IderMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD, readbfr=512, writebfr=512) as srv:
             harness = _RealClientHarness(srv, _floppy_image(tmp_path))
