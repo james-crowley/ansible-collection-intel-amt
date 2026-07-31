@@ -1,9 +1,53 @@
 ---
-# Documentation only -- no module, role, playbook or CI behaviour changes -- so every
-# entry is `trivial` and none of it reaches the published changelog. Recorded at this
-# length anyway, because the capability matrix is this project's evidence document and a
-# change to what it claims should be as reviewable as a change to what the code does.
-trivial:
+# Documentation only, and deliberately NOT `trivial`.
+#
+# `docs/capability-matrix.md` is this project's authoritative evidence document and is
+# linked from the README, and it carried claims that were false: 1687 unit tests, 92%
+# branch coverage, and "three" contributing hardware runs. Anyone who read those numbers
+# and relied on them should be able to see from the published changelog that they
+# changed. That is what `bugfixes` is for, and it is what this project already did for
+# the same kind of change in `docs-integrity-pass` and `matrix-recalibration`.
+#
+# "No code changed" is not the test for `trivial`. "Would a reader's understanding
+# change" is. So the corrections below are `bugfixes`, and the material that is newly
+# recorded rather than previously wrong -- the Tier 4 split, the run citations, the
+# stated coverage methodology -- is `minor_changes`, matching how `matrix-recalibration`
+# divided the same two kinds of edit. Nothing here is hidden from the changelog either
+# way; the only question was which heading it belongs under.
+#
+# Recorded at this length because a change to what the evidence document claims should be
+# as reviewable as a change to what the code does.
+bugfixes:
+  - "docs/capability-matrix.md - correct three counts that had drifted since they were written. The unit-test figure said
+    B(1687) and the suite collects B(1744); branch coverage over C(plugins/) said B(92%) and is B(93%); and the
+    hardware-inventory subsection's B(609) is now B(666). All three were accurate when written -- 1687 is exactly what
+    the 0.5.0 inventory commit's own message records -- so this is drift rather than error, and the existing \"point
+    measurement, not a promise\" framing is kept and now carries the date the measurement was taken so the next reader
+    can tell how stale it is."
+  - "docs/capability-matrix.md - correct the reconstruction of what the B(609) measured, which was itself wrong in this
+    project's favour. It had been described as a whole-suite delta only (1078 to 1687), and therefore as claiming
+    something narrower than it measured when read as \"609 tests covering the inventory\". Measuring the four inventory
+    test files at the feature commit gives B(217 to 826) -- the same 609, because 0.5.0 added tests to no other file. So
+    B(both readings of the old number were true) and the update is drift and nothing more. The 57 added since coincide
+    the same way, all of them in those four files and all from the C(operation.hardware_reads) follow-up. The subsection
+    now states B(what the number measures) as a definition a future editor has to re-run or replace --
+    C(pytest --collect-only) over those four files minus their pre-0.5.0 baseline of 217 -- because stating no measure is
+    exactly how the previous figure drifted into meaning something its arithmetic never claimed."
+  - "docs/capability-matrix.md / docs/testing.md - correct a false hardware-run count. Three places said the Tier 3
+    evidence came from B(three) runs, which predates the 2026-07-30 inventory run that the tier's own bullet list and
+    stage table already included: the tier list in the introduction, the Tier 3 preamble, and the runner-Python section
+    of the testing guide. All three now say four."
+  - "docs/capability-matrix.md - correct two claims that 0.5.0 and 0.6.0 left stale. The untested-generation entry in
+    Tier 4 said both lab generations had been read with the B(v0.2.0 fact set), which no longer accounts for the 0.5.0
+    inventory both have since returned. The closing Tier-3-to-Tier-1 section listed five Tier 4 items and silently
+    omitted the two that are about modules rather than measurements -- C(amt_event_log)/C(amt_log_clear), and stage 5's
+    missing evidence file."
+  - "docs/testing.md - the qualification order never mentioned B(stage 1b) at all, even though the capability matrix
+    gives it a row in the Tier 3 stage table and cites it as the sole evidence for the inventory. It is now documented
+    where it actually lives -- inside C(qualify_readonly.yml), alongside stage 1 -- with why it is numbered C(1b) and not
+    C(9): it is read-only and gates nothing, so the eight numbered stages are still eight."
+
+minor_changes:
   - "docs/capability-matrix.md - split B(Tier 4: Still unproven) into two labelled subsections, because one list held two
     kinds of entry and nothing told a reader which kind any entry was. C(Not yet done) is a backlog: an evidence file for
     stage 5, C(amt_event_log)/C(amt_log_clear) against real firmware, the sleep/hibernate request path, and a deliberate
@@ -12,7 +56,7 @@ trivial:
     release is expected to close: a non-zero IDE-R write, that a PXE exchange happened, that AMT's internal one-shot role
     bit was consumed, and any firmware generation beyond 16.1.30 and 19.0.5 including Small Business Mode / no-TLS. B(No
     entry was added or dropped and no caveat was trimmed) -- the tier's value is that its hedges are precise."
-  - "docs/capability-matrix.md - name which half is which for the two Tier 4 entries that span the split, since filing
+  - "docs/capability-matrix.md - name which half is which for the two Tier 4 entries that B(span the split), since filing
     them under a heading forced a question the undivided list let them leave open. B(Sleep and hibernate): whether
     firmware accepts CIM codes 3, 4 and 7 as issued is one stage away, but whether the machine actually enters S3/S4/S5
     needs an operating system on the target -- the same limit that keeps the IDE-R write in the accepted list -- so a
@@ -39,28 +83,8 @@ trivial:
     ordering), since pipeline numbers are sequential and a guessed identifier is precisely what this document exists not
     to contain. No artifact digest is recorded anywhere, so a reader can confirm that a run happened without confirming
     that the artifact they fetch is the one this document read."
-  - "docs/capability-matrix.md - reconstruct what the hardware-inventory subsection's unit-test count measured, and
-    correct the reconstruction that preceded it. The count is now B(666), the growth of the four test files that work
-    touched (C(module_utils/test_hardware.py), C(module_utils/test_client.py), C(modules/test_amt_info.py),
-    C(mock_servers/test_wsman_server.py)), 217 before 0.5.0 to 883 now. The B(609) it replaces was previously described
-    as a whole-suite delta only, and so as claiming something narrower than it measured -- but measuring those four files
-    at the feature commit shows 217 to 826, the same 609 as the whole-suite delta 1078 to 1687, because 0.5.0 added tests
-    to no other file. B(Both readings of the old number were true); the correction is drift and nothing else. The 57
-    added since coincide the same way, all of them in these four files and all from the C(operation.hardware_reads)
-    follow-up."
   - "docs/capability-matrix.md - name the measurement behind the branch-coverage figure. B(93%) over C(plugins/), with
     C(media_session.py) at 81% and C(ider.py) at 92%, all reproduce under C(coverage run --branch --source=plugins) over
-    the unit suite -- but a reader had to infer the methodology from the two per-file figures matching, and a coverage
-    number whose measurement is not stated cannot be checked. Every figure in the subsection was re-collected rather
-    than trusted, against a freshly staged collection tree on ansible-core 2.21."
-  - "docs/capability-matrix.md - correct three counts left stale by 0.5.0 and 0.6.0. The intro and the Tier 3 preamble
-    said B(three) contributing hardware runs, predating the 2026-07-30 inventory run that the tier's own bullet list and
-    stage table already included. The untested-generation entry in Tier 4 said both generations had been read with the
-    B(v0.2.0 fact set), which no longer accounts for the 0.5.0 inventory both have now returned. The closing
-    Tier-3-to-Tier-1 section listed five Tier 4 items and omitted the two about modules rather than measurements; it now
-    mirrors the split."
-  - "docs/testing.md - record the fourth hardware run and stage 1b. The runner-Python section said the Tier 3 evidence
-    came from B(three) runs and stopped at 2026-07-29, and the qualification order never mentioned stage 1b at all even
-    though the capability matrix gives it a stage-table row. Both fixed, with why 1b is numbered C(1b) and not C(9): it
-    is read-only, it gates nothing, and it rides inside C(qualify_readonly.yml), so the eight numbered stages are still
-    eight."
+    the unit suite -- but a reader had to infer the methodology from the two per-file figures happening to match, and a
+    coverage number whose measurement is not stated cannot be checked. Every figure in the subsection was re-collected
+    rather than trusted, against a freshly staged collection tree on ansible-core 2.21."
