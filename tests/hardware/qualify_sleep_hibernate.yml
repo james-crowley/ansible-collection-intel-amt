@@ -1,0 +1,109 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Hardware qualification stage 11 (see README.md): sleep-light, sleep-deep, and hibernate.
+# amt_power accepts these three ACPI transitions (CIM RequestPowerStateChange codes 3, 4, 7),
+# the codes are unit-tested, but no hardware stage before this one had ever issued any of
+# them -- stage 4 (qualify_power.yml) covers only on/off.
+#
+# CRITICAL NUANCE -- read this before trusting (or distrusting) a result from this stage:
+#
+#   Sleep and hibernate depend on the TARGET OPERATING SYSTEM supporting and enabling the
+#   corresponding ACPI state. AMT's RequestPowerStateChange only ASKS the platform to
+#   transition; it cannot force an OS that does not support S1/S3, or a BIOS/MEBx
+#   configuration that disables it, to actually enter that state. So "the machine never went
+#   to sleep" does not necessarily mean a defect in this collection or in AMT -- it may
+#   simply mean the OS or firmware configuration on the target does not support the state
+#   asked for. Design intent for this whole stage is exactly to keep those two apart:
+#
+#     firmware_refused      -- AMT itself rejected the request (error_class in
+#                               [remote_operation, invalid_state, unsupported_capability]),
+#                               before it ever reached the platform.
+#     os_did_not_transition -- AMT accepted the request, but a bounded postcondition probe
+#                               never observed the machine reach the expected state. Consistent
+#                               with "the OS/BIOS does not support this ACPI state", NOT
+#                               evidence of a defect here.
+#     confirmed_transition  -- the probe actually observed the transition. The only outcome
+#                               that positively exercises the CIM code end to end.
+#
+#   See _qualify_sleep_hibernate_transition.yml (included below, once per state) for exactly
+#   how each outcome is classified, and tests/hardware/PREFLIGHT.md for the full pre-flight
+#   brief on this stage -- read that before approving the CircleCI job.
+#
+# MUST restore the machine to 'on'. Every state transition attempted is followed
+# unconditionally by a restore-to-on and an independent confirmation that it actually landed,
+# regardless of what was classified above -- see the included file's own "must never paper
+# over" comment. A machine that will not come back to 'on' is a hard stage failure, not an
+# ambiguous one.
+#
+# Wired into CircleCI as the hardware-sleep-hibernate job, behind its own approval gate,
+# downstream of hardware-log-clear (see .circleci/config.yml) -- but still only ever one host
+# at a time, attended.
+#
+# Run manually, one host at a time, attended:
+#
+#   ansible-playbook tests/hardware/qualify_sleep_hibernate.yml \
+#     -i tests/hardware/inventory.yml -l <single-host>
+
+- name: "Hardware qualification stage 11: sleep-light, sleep-deep, hibernate"
+  hosts: amt_targets
+  serial: 1
+  gather_facts: false
+  connection: local
+  vars:
+    amt_output_dir: "{{ playbook_dir }}/output"
+    amt_sleep_hibernate_observe_retries: 5
+    amt_sleep_hibernate_observe_delay: 10
+    # The module `state` value paired with the normalized state a successful transition
+    # converges on (see amt_power's own `_ACTION_EXPECTED_STATE`). sleep-light and
+    # sleep-deep both normalize to the single state "sleep" -- see that module's own
+    # DOCUMENTATION for exactly why the two ACPI depths cannot be told apart by AMT's CIM
+    # PowerState alone -- which this stage inherits rather than works around: it is not
+    # this collection's ambiguity to resolve.
+    amt_sleep_hibernate_states:
+      - {state: sleep-light, expected_normalized: sleep}
+      - {state: sleep-deep, expected_normalized: sleep}
+      - {state: hibernate, expected_normalized: hibernate}
+    amt_sleep_hibernate_results: []
+
+  tasks:
+    - name: Refuse to run against more than one host at a time
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+        fail_msg: "This stage puts real hardware to sleep and must run one machine at a time. Re-run with -l <single-host>."
+
+    - name: Exercise each ACPI state in turn
+      ansible.builtin.include_tasks: _qualify_sleep_hibernate_transition.yml
+      loop: "{{ amt_sleep_hibernate_states }}"
+      loop_control:
+        loop_var: amt_sleep_state_spec
+      vars:
+        amt_sleep_state: "{{ amt_sleep_state_spec.state }}"
+        amt_sleep_expected_normalized: "{{ amt_sleep_state_spec.expected_normalized }}"
+
+    - name: Summarise every state's outcome
+      ansible.builtin.debug:
+        msg: "{{ amt_sleep_hibernate_results | items2dict(key_name='state', value_name='outcome') }}"
+
+    - name: Ensure the evidence output directory exists
+      ansible.builtin.file:
+        path: "{{ amt_output_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+
+    - name: Record evidence for this target
+      ansible.builtin.copy:
+        content: >-
+          {{ {'results': amt_sleep_hibernate_results,
+              'note': "os_did_not_transition is an expected, legitimate outcome when the "
+                      + "target OS/firmware does not support or enable the ACPI state asked "
+                      + "for -- it is not, by itself, evidence of a defect in this collection. "
+                      + "See this playbook's header and PREFLIGHT.md."}
+             | to_nice_json }}
+        dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_sleep_hibernate.json"
+        mode: "0600"
+      delegate_to: localhost

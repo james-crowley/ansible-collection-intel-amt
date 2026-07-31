@@ -1,0 +1,207 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Included by qualify_sleep_hibernate.yml (stage 11), once per ACPI state under test, via
+# `include_tasks` + `loop` -- not a playbook itself (no `hosts:` key) and not meant to be run
+# directly. Factored out because the three states this stage exercises (sleep-light,
+# sleep-deep, hibernate) need the identical sequence and the identical three-way outcome
+# classification; three unrolled copies would be three places for that classification logic to
+# drift apart, which is exactly the kind of duplication this collection's stage playbooks
+# otherwise avoid by staying flat.
+#
+# Expects `amt_sleep_state` (the module's `state` value, e.g. "sleep-light") and
+# `amt_sleep_expected_normalized` (the normalized state a successful transition converges on,
+# e.g. "sleep") to be set by the caller's loop_control.loop_var-driven `set_fact` below, and
+# appends one result dict to `amt_sleep_hibernate_results`.
+#
+# THE THREE-WAY CLASSIFICATION THIS FILE EXISTS FOR:
+#
+#   firmware_refused     -- amt_power itself raised: AMT rejected the request at the protocol
+#                            level (error_class in [remote_operation, invalid_state,
+#                            unsupported_capability]). A real finding about this firmware/module,
+#                            worth surfacing, but not a hard stage failure -- see the assert below.
+#   os_did_not_transition -- AMT accepted the request (no exception), but the bounded
+#                             postcondition probe never observed the expected normalized state.
+#                             This is the ambiguous case the whole stage exists to make legible:
+#                             the ME can only ask the platform's ACPI subsystem to transition: it
+#                             cannot force an OS that does not support or enable that state to
+#                             enter it. Also not a hard stage failure.
+#   confirmed_transition   -- the probe actually observed the machine reach the expected state.
+#                             The one outcome that positively exercises the CIM code for real.
+#
+# Any OTHER error class (connection, tls_validation, authentication, timeout, protocol,
+# identity_mismatch) is NOT part of this classification -- it means the run itself is broken
+# (wrong credentials, network problem, TLS pin mismatch), which has nothing to do with sleep or
+# hibernate support and must not be swallowed into "firmware refused". The rescue below re-raises
+# unconditionally for anything outside the tolerated set, exactly as every other stage's rescue
+# does.
+
+- name: "Query power state before the transition ({{ amt_sleep_state }})"
+  james_crowley.intel_amt.amt_power:
+    host: "{{ amt_host }}"
+    username: "{{ amt_username }}"
+    password: "{{ amt_password }}"
+    tls_fingerprint: "{{ amt_tls_fingerprint }}"
+    state: query
+  delegate_to: localhost
+  no_log: true
+  register: amt_sleep_before
+
+- name: "Refuse to continue if the machine is not currently on ({{ amt_sleep_state }})"
+  ansible.builtin.assert:
+    that:
+      - ((amt_sleep_before.previous_state | default({})).normalized | default('')) == 'on'
+    fail_msg: >-
+      {{ inventory_hostname }} is reporting power state
+      '{{ amt_sleep_before.previous_state.normalized }}', not 'on', immediately before requesting
+      {{ amt_sleep_state }}. A machine that is not on cannot be meaningfully put to sleep --
+      AMT itself rejects such a request rather than ignoring it (see amt_power's own
+      DOCUMENTATION) -- and testing from an unknown starting state would make the
+      confirmed_transition/os_did_not_transition distinction below meaningless. Restore the
+      machine to 'on' manually before re-running this stage.
+
+- name: "Pause for the operator to confirm they are watching this machine ({{ amt_sleep_state }})"
+  ansible.builtin.pause:
+    prompt: >-
+      About to request {{ amt_sleep_state }} on {{ inventory_hostname }} ({{ amt_host }}),
+      currently on. This will be followed by an attempt to restore 'on' regardless of outcome.
+      Confirm you are watching this machine (console/KVM) and press enter to continue, or
+      Ctrl-C then A to abort
+  when: amt_qualify_attended | default(true) | bool
+
+- name: "Request the transition ({{ amt_sleep_state }})"
+  block:
+    - name: "Issue the request ({{ amt_sleep_state }})"
+      james_crowley.intel_amt.amt_power:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+        state: "{{ amt_sleep_state }}"
+      delegate_to: localhost
+      no_log: true
+      register: amt_sleep_request
+
+    # Only entered when the request above did NOT raise -- AMT accepted it at the
+    # protocol level. Whether the platform actually transitioned is what the probe
+    # below exists to tell apart from a firmware-level refusal.
+    - name: "Bounded postcondition probe for the expected state ({{ amt_sleep_state }})"
+      james_crowley.intel_amt.amt_power:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+        state: query
+      delegate_to: localhost
+      no_log: true
+      register: amt_sleep_probe
+      until: (amt_sleep_probe.previous_state | default({})).normalized | default('') == amt_sleep_expected_normalized
+      retries: "{{ amt_sleep_hibernate_observe_retries | default(5) }}"
+      delay: "{{ amt_sleep_hibernate_observe_delay | default(10) }}"
+      failed_when: false
+
+    - name: "Classify the outcome ({{ amt_sleep_state }})"
+      ansible.builtin.set_fact:
+        amt_sleep_outcome: >-
+          {{ 'confirmed_transition'
+             if (amt_sleep_probe.previous_state.normalized | default('')) == amt_sleep_expected_normalized
+             else 'os_did_not_transition' }}
+        amt_sleep_error_class: null
+  rescue:
+    # Deliberately not `errors.py`'s ErrorClass constants imported here -- these are stable
+    # public strings by contract (see that module's own docstring), so spelling them as
+    # literals is exactly as safe as importing them and needs no extra plumbing in a playbook.
+    - name: "Require the failure to be one this stage knows how to classify ({{ amt_sleep_state }})"
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_result.error_class | default('') in ['remote_operation', 'invalid_state', 'unsupported_capability']
+        fail_msg: >-
+          amt_power state={{ amt_sleep_state }} failed against {{ inventory_hostname }} with
+          error_class={{ ansible_failed_result.error_class | default('unknown') }}, which is not
+          one of the classes this stage treats as "firmware refused the transition"
+          (remote_operation, invalid_state, unsupported_capability). This looks like a broken
+          run (credentials, network, TLS pin) rather than a sleep/hibernate finding --
+          message: {{ ansible_failed_result.msg | default('(no message)') }}. Re-raising rather
+          than misclassifying it.
+
+    - name: "Record the firmware-level refusal ({{ amt_sleep_state }})"
+      ansible.builtin.set_fact:
+        amt_sleep_outcome: firmware_refused
+        amt_sleep_error_class: "{{ ansible_failed_result.error_class }}"
+        amt_sleep_probe: {previous_state: null}
+
+- name: "Report the classified outcome ({{ amt_sleep_state }})"
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} / {{ amt_sleep_state }}: {{ amt_sleep_outcome }}.
+      {{ {
+        'confirmed_transition':
+          'The platform actually reached ' + amt_sleep_expected_normalized + ' -- a real, positive exercise of this CIM code.',
+        'os_did_not_transition':
+          'AMT accepted the request but the platform never reached ' + amt_sleep_expected_normalized + ' within the probe '
+          + 'window. This does NOT necessarily mean a defect in this collection -- it commonly means the target OS does not '
+          + 'support or enable this ACPI state. See PREFLIGHT.md.',
+        'firmware_refused':
+          'AMT itself rejected the request (error_class=' + (amt_sleep_error_class | default('?', true)) + ') before it ever '
+          + 'reached the platform.',
+      }[amt_sleep_outcome] }}
+
+# Restore is unconditional and outside the block/rescue above: it must run whether the
+# request succeeded, was refused, or the platform simply never transitioned. This is the
+# hard constraint this stage exists under -- "must restore the machine to on".
+- name: "Restore power state to 'on' ({{ amt_sleep_state }})"
+  james_crowley.intel_amt.amt_power:
+    host: "{{ amt_host }}"
+    username: "{{ amt_username }}"
+    password: "{{ amt_password }}"
+    tls_fingerprint: "{{ amt_tls_fingerprint }}"
+    state: "on"
+  delegate_to: localhost
+  no_log: true
+  register: amt_sleep_restore
+
+- name: "Independently confirm the restore actually landed on 'on' ({{ amt_sleep_state }})"
+  james_crowley.intel_amt.amt_power:
+    host: "{{ amt_host }}"
+    username: "{{ amt_username }}"
+    password: "{{ amt_password }}"
+    tls_fingerprint: "{{ amt_tls_fingerprint }}"
+    state: query
+  delegate_to: localhost
+  no_log: true
+  register: amt_sleep_restore_confirm
+  until: (amt_sleep_restore_confirm.previous_state | default({})).normalized | default('') == 'on'
+  retries: "{{ amt_sleep_hibernate_observe_retries | default(5) }}"
+  delay: "{{ amt_sleep_hibernate_observe_delay | default(10) }}"
+  failed_when: false
+
+# A hard failure, deliberately, and NOT folded into the three-way classification above: an
+# ACPI state accepted-but-not-entered is an ambiguous, expected outcome; a machine that will
+# not come back to 'on' afterwards is a stranded machine, which is the one outcome this stage
+# must never paper over. See PREFLIGHT.md's recovery section if this actually fires.
+- name: "Require the restore to have actually converged on 'on' ({{ amt_sleep_state }})"
+  ansible.builtin.assert:
+    that:
+      - ((amt_sleep_restore_confirm.previous_state | default({})).normalized | default('')) == 'on'
+    fail_msg: >-
+      {{ inventory_hostname }} did not converge back to power state 'on' after
+      {{ amt_sleep_state }}, within {{ amt_sleep_hibernate_observe_retries | default(5) }}
+      retries. The machine may be stranded -- see
+      tests/hardware/PREFLIGHT.md#amt_power-sleep-and-hibernate for physical recovery steps
+      (power button, WOL, KVM). Stopping this stage here rather than attempting the remaining
+      ACPI states against a machine that may still be asleep.
+
+- name: "Append this state's result"
+  ansible.builtin.set_fact:
+    amt_sleep_hibernate_results: >-
+      {{ amt_sleep_hibernate_results
+         | default([])
+         + [{'state': amt_sleep_state,
+             'expected_normalized': amt_sleep_expected_normalized,
+             'outcome': amt_sleep_outcome,
+             'error_class': amt_sleep_error_class,
+             'before': amt_sleep_before.previous_state,
+             'probe_final': amt_sleep_probe.previous_state | default(None),
+             'restored_to': amt_sleep_restore_confirm.previous_state}] }}

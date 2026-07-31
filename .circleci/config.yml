@@ -916,6 +916,46 @@ jobs:
       - note-recovery-path-on-failure
 
   # -------------------------------------------------------------------------
+  # Hardware-in-the-loop, stage 11 (tests/hardware/qualify_sleep_hibernate.yml): sleep-light,
+  # sleep-deep, hibernate. Escalates past hardware-log-clear behind its own approval gate.
+  #
+  # IMPORTANT: a green run here does not mean every ACPI state was actually entered. Sleep and
+  # hibernate depend on the TARGET OPERATING SYSTEM supporting and enabling the corresponding
+  # ACPI state -- AMT can only ask the platform to transition, not force it. The playbook
+  # classifies each state's outcome three ways (confirmed_transition, os_did_not_transition,
+  # firmware_refused) precisely so "the OS didn't support it" is never conflated with "this
+  # collection is broken" -- see the playbook's own header and tests/hardware/PREFLIGHT.md
+  # before approving this job. What this job DOES guarantee every run, regardless of outcome:
+  # the machine is restored to 'on' and that restore is independently confirmed -- a failure to
+  # converge back to 'on' is the one thing this stage always treats as fatal.
+  hardware-sleep-hibernate:
+    machine: true
+    resource_class: crowley/amt-runner
+    steps:
+      - checkout
+      - verify-lab-credentials
+      - install-lab-ansible-venv
+      - render-lab-inventory
+      - export-hardware-limit
+      - run:
+          name: "Stage 11: sleep-light, sleep-deep, hibernate (unattended in CI; the approval gate is the human checkpoint)"
+          command: |
+            . .venv/bin/activate
+            ansible-playbook tests/hardware/qualify_sleep_hibernate.yml \
+              -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -e amt_qualify_attended=false -v
+      - redact-hardware-evidence
+      - store_artifacts:
+          # Runs on failure too -- a failed stage is exactly when the evidence
+          # matters, and note-recovery-path-on-failure below already tells the
+          # operator it was published. Safe because redact-hardware-evidence
+          # above also runs when: always, so nothing unredacted is ever stored.
+          path: tests/hardware/output
+          destination: hardware-evidence
+          when: always
+      - remove-lab-inventory
+      - note-recovery-path-on-failure
+
+  # -------------------------------------------------------------------------
   publish:
     executor:
       name: python
@@ -1171,6 +1211,25 @@ workflows:
               only: main
       - hardware-log-clear:
           requires: [hardware-log-clear-approval]
+          context: amt-lab-runner
+          filters:
+            branches:
+              only: main
+
+      # -----------------------------------------------------------------------
+      # Stage 11: sleep-light, sleep-deep, hibernate. Extends the chain past
+      # hardware-log-clear, behind its own approval -- see tests/hardware/PREFLIGHT.md
+      # before approving: a green run does not mean every ACPI state was actually
+      # entered, only that this stage correctly told an OS/firmware limitation apart
+      # from a defect here, and always restored the machine to 'on'.
+      - hardware-sleep-hibernate-approval:
+          type: approval
+          requires: [hardware-log-clear]
+          filters:
+            branches:
+              only: main
+      - hardware-sleep-hibernate:
+          requires: [hardware-sleep-hibernate-approval]
           context: amt-lab-runner
           filters:
             branches:
