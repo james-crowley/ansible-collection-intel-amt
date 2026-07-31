@@ -61,11 +61,13 @@ from wsman_server import (
     CIM_POWER_MANAGEMENT_SERVICE,
     CIM_PROCESSOR,
     DEFAULT_MESSAGE_LOG_RECORDS,
+    EMPTY_MESSAGE_LOG_SLOT,
     ETHERNET_PORT_0_INSTANCE_ID,
     MESSAGE_LOG_BATCH_SIZE,
     WsmanMockServer,
 )
 
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils import message_log
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.boot import discover_and_validate
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import ErrorClass, UnsupportedCapabilityError
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.wsman import WsmanClient
@@ -1848,3 +1850,140 @@ class TestRealClientPageSizeBoundaries:
                     results[page_size] = [instance["InstanceID"] for instance in client.enumerate("CIM_BootSourceSetting")]
 
         assert all(ids == list(BOOT_SOURCE_NAMES) for ids in results.values()), results
+
+
+class _RecordArrayCountingSession(requests.Session):
+    """Counts ``RecordArray`` elements in every **response** the mock sends back.
+
+    The request-side counter above cannot see this: the whole question is how many
+    record elements the *server* put on the wire versus how many the client ended up
+    reporting. Without it, ``empty_slots == 5`` would only prove that the client and
+    the mock agree with each other, not that five zero-filled elements were actually
+    transmitted and then discarded.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.record_elements = 0
+
+    def post(self, url, data=None, **kwargs):  # type: ignore[override]
+        response = super().post(url, data=data, **kwargs)
+        if response.status_code == 200 and "RecordArray" in response.text:
+            root = ET.fromstring(response.content)  # noqa: S314 -- the mock's own envelope, built in-process
+            self.record_elements += sum(1 for elem in root.iter() if elem.tag.rsplit("}", 1)[-1] == "RecordArray")
+        return response
+
+
+class TestRealClientMessageLogEmptySlots:
+    """``AmtState.message_log_empty_slots`` driven through the real client. Issue #105.
+
+    The state under test is the one that produced the defect on real hardware:
+    ``amt-lab-01`` (AMT 16.1.30, CircleCI job 2976) answered one ``GetRecords`` call
+    with 223 ``RecordArray`` elements -- 18 real records followed by 205 identical
+    all-zero ones -- while ``CurrentNumberOfRecords`` reported 18. This collection
+    counted the padding and returned ``records_read: 223``.
+
+    **Nothing in this mock could produce that state before.** It always kept
+    ``CurrentNumberOfRecords`` and its record array consistent, so the two numbers
+    could not disagree and the defect had no way to appear anywhere but on hardware.
+    That is precisely the gap issue #105 asked to close, and the reason the knob
+    exists rather than the defect merely being fixed.
+
+    Driven through ``message_log.read_records`` over the real ``WsmanClient`` rather
+    than by inspecting the mock directly, for the reason issue #92 established: this
+    repository holds two implementations of one protocol, and a raw POST proves what
+    the mock emits while saying nothing about what the client does with it. The
+    padding has to survive the round trip to be worth serving.
+    """
+
+    _REAL_RECORDS = len(DEFAULT_MESSAGE_LOG_RECORDS)  # 6
+    _SLOTS = 5
+
+    def test_padding_is_served_on_the_wire_and_excluded_from_the_records_the_client_reports(self):
+        """The regression, end to end over a socket.
+
+        The two counters are the control that stops this being vacuous:
+        ``session.record_elements`` is what the mock transmitted (11) and
+        ``len(read.records)`` is what the client kept (6). A mock that ignored the
+        knob transmits 6 and fails the first; a client that counted padding as records
+        keeps 11 and fails the second.
+        """
+        session = _RecordArrayCountingSession()
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.state.message_log_empty_slots = self._SLOTS
+            with _real_client(srv, session=session) as client:
+                read = message_log.read_records(client)
+
+        assert session.record_elements == self._REAL_RECORDS + self._SLOTS
+        assert len(read.records) == self._REAL_RECORDS
+        assert read.empty_slots == self._SLOTS
+        # Firmware's counter never included the padding and is not adjusted here.
+        assert read.total_records == self._REAL_RECORDS
+        assert len(read.records) == read.total_records
+        assert all(not message_log.is_empty_record_slot(record) for record in read.records)
+
+    def test_the_padded_read_still_ends_normally_and_traverses_every_batch(self):
+        """Padding is not a fault and must not look like one.
+
+        ``batches`` is the load-bearing number: 11 elements at the mock's batch size
+        of 2 is six round trips, against three for the unpadded log. A client that
+        stopped at the first zero-filled element would report fewer, and would still
+        satisfy every count assertion in the test above.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.state.message_log_empty_slots = self._SLOTS
+            with _real_client(srv) as client:
+                read = message_log.read_records(client)
+
+        expected_batches = -(-(self._REAL_RECORDS + self._SLOTS) // MESSAGE_LOG_BATCH_SIZE)
+        assert read.batches == expected_batches == 6
+        assert read.stop_reason == "no_more_records"
+        assert read.complete is True
+        assert read.truncated is False
+
+    def test_the_padding_the_mock_serves_is_the_string_real_firmware_sent(self):
+        """The knob would be worthless if it padded with something firmware never sends.
+
+        Asserted against the base64 in the hardware evidence artifact, via the mock's
+        own constant, so a change to either side has to change both.
+        """
+        assert EMPTY_MESSAGE_LOG_SLOT == "AAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        assert base64.b64decode(EMPTY_MESSAGE_LOG_SLOT) == bytes(21)
+        assert message_log.is_empty_record_slot(message_log.decode_record(EMPTY_MESSAGE_LOG_SLOT)) is True
+
+    def test_a_log_that_is_nothing_but_freed_slots_reads_as_zero_records_not_as_a_failure(self):
+        """The extreme of the same state: every slot freed, none refilled yet.
+
+        ``PositionToFirstRecord`` must not answer "no record exists" here -- it and
+        ``GetRecords`` have to agree about what the endpoint holds -- and the read must
+        come back as an ordinary successful read of zero records rather than an error
+        or a list of six zero-filled entries.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.state.message_log_records.clear()
+            srv.state.message_log_empty_slots = 3
+            with _real_client(srv) as client:
+                read = message_log.read_records(client)
+
+        assert read.records == []
+        assert read.empty_slots == 3
+        assert read.total_records == 0
+        assert read.complete is True
+        assert read.stop_reason == "no_more_records"
+
+    def test_the_knob_at_its_default_serves_an_unpadded_log(self):
+        """The negative control, so the assertions above are known to be the knob's effect.
+
+        Same server, same client, knob untouched: no padding on the wire, no
+        ``empty_slots``, three batches instead of six.
+        """
+        session = _RecordArrayCountingSession()
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            assert srv.state.message_log_empty_slots == 0
+            with _real_client(srv, session=session) as client:
+                read = message_log.read_records(client)
+
+        assert session.record_elements == self._REAL_RECORDS
+        assert read.empty_slots == 0
+        assert len(read.records) == self._REAL_RECORDS
+        assert read.batches == 3
