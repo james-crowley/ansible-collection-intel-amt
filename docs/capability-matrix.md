@@ -748,13 +748,19 @@ check. What is recorded now, and what still is not:
   runs are therefore cited by UUID and date only. **No pipeline number has been
   inferred from ordering** — sequence would make one easy to guess and a guessed
   identifier is worse than an absent one in a document whose purpose is this.
-- **No artifact digest is recorded anywhere.** The inventory subsection below names its
-  two artifact paths, and every stage but 5 uploads a JSON artifact under
-  `hardware-evidence`, redacted by `tests/hardware/redact-evidence.py`. But nothing
-  here fixes *which* bytes those artifacts held, so a reader can confirm that a run
-  happened and that an artifact exists without being able to confirm that the artifact
-  they fetch is the one this document read. That is the part of the original complaint
-  that is still open.
+- **Runs from now on carry a digest; the four runs above do not, permanently.** This
+  used to read "no artifact digest is recorded anywhere" (issue #90). Every hardware job
+  now emits `hardware-evidence/SHA256SUMS` — a SHA-256 per published evidence file,
+  computed by the job itself immediately after `tests/hardware/redact-evidence.py` runs
+  and before `store_artifacts` publishes, so the digest covers exactly the bytes a
+  reader can fetch. A reader who downloads a future run's evidence can re-hash it and
+  check the result against that run's cited manifest, which closes the original
+  complaint for every run from here on. **The four runs cited above cannot be given
+  one retroactively, and are explicitly digest-less rather than silently left without
+  one**: their artifacts can still be hashed *as served today*, but that would only
+  prove what CircleCI is serving now, not what this document's authors actually read
+  at the time — the one thing a digest is for. That gap is permanent for those four,
+  the same way the two limits above it are not fixable after the fact.
 
 ## Tier 4: Still unproven
 

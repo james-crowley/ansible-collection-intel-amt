@@ -299,11 +299,13 @@ commands:
 
   redact-hardware-evidence:
     description: >-
-      Replace identifying lab data in tests/hardware/output with stable pseudonyms,
-      immediately before store_artifacts publishes it. Six stage playbooks write evidence
-      there, so this runs once at the CI layer instead: six write sites are six chances to
-      forget, and a seventh playbook added later would leak by default. Redacting where the
-      data leaves the machine is the only version of this that stays correct.
+      Replace identifying lab data in tests/hardware/output with stable pseudonyms, then emit
+      a SHA-256 digest manifest over the result -- both immediately before store_artifacts
+      publishes it. Six stage playbooks write evidence there, so this runs once at the CI
+      layer instead: six write sites are six chances to forget a redaction or a digest, and a
+      seventh playbook added later would leak, or publish undigested, by default. Doing both
+      at the point the data leaves the machine is the only version of either that stays
+      correct.
     steps:
       - run:
           name: Redact identifying data from the hardware evidence
@@ -319,6 +321,93 @@ commands:
             # System python3 on purpose. The script is stdlib-only, and this step runs
             # even on the paths where .venv was never built or the install failed.
             python3 tests/hardware/redact-evidence.py tests/hardware/output
+      - run:
+          # Issue #90: a job UUID and an artifact path prove a run happened and that
+          # something exists there. They do not bind this collection's documentation (or
+          # anyone else) to the specific bytes a later fetch returns. A per-file SHA-256,
+          # computed by the job itself, closes that gap -- but only if it runs in the right
+          # place and never by hand.
+          #
+          # Placement is the whole point. This step MUST run after redact-hardware-evidence's
+          # redaction step and before store_artifacts: hashing pre-redaction bytes would pin
+          # content nobody can ever fetch (redaction rewrites the files in place), and hashing
+          # post-publish would require a second round-trip through the CircleCI artifact API
+          # that could itself observe a different copy than the one actually stored. Directly
+          # after redaction, directly before publish, is the only point where "the bytes just
+          # hashed" and "the bytes about to be published" are provably the same bytes.
+          #
+          # Why here, in the shared command, rather than duplicated in each of the eight
+          # hardware jobs: every one of them already calls redact-hardware-evidence
+          # immediately before its own store_artifacts, for the identical reason (six write
+          # sites, one redaction seam). A digest step pasted into each job individually would
+          # be the same mistake redact-hardware-evidence's own header already argues against --
+          # eight chances for one of them to be forgotten, reordered relative to
+          # store_artifacts, or to drift from the others. Living in this command, it is
+          # structurally impossible for a hardware job to publish evidence without also
+          # publishing a manifest for it, and a ninth job later gets both for free.
+          name: Emit a SHA-256 digest manifest for the published hardware evidence
+          # always, for the same reason the redaction step above is: evidence written before
+          # a stage failed still gets published, and still needs a digest a reader can check.
+          when: always
+          command: |
+            output_dir="tests/hardware/output"
+            manifest="${output_dir}/SHA256SUMS"
+
+            if [ ! -d "${output_dir}" ]; then
+              # Mirrors redact-evidence.py's own "no directory" branch: reached whenever a
+              # stage failed before writing anything, which `when: always` deliberately still
+              # runs this step for. Nothing to hash is a normal outcome, not a failure.
+              echo "sha256sums: no evidence directory at ${output_dir}; nothing to hash."
+              exit 0
+            fi
+
+            # sha256sum is GNU coreutils, present on this runner's Debian/Ubuntu base (see
+            # install-lab-ansible-venv above for that same OS identification). shasum -a 256
+            # is the fallback for any other userland this step might ever run under -- a
+            # maintainer reproducing this manually on macOS, say -- so the step is not silently
+            # runner-specific. Checked at run time, not assumed, the same way the Python
+            # interpreter search above this command does not assume python3.12 is on PATH.
+            if command -v sha256sum >/dev/null 2>&1; then
+              digest() { sha256sum "$@"; }
+            elif command -v shasum >/dev/null 2>&1; then
+              digest() { shasum -a 256 "$@"; }
+            else
+              echo "ERROR: neither sha256sum nor 'shasum -a 256' is available on this runner." >&2
+              echo "Cannot emit a digest manifest for the hardware evidence." >&2
+              exit 1
+            fi
+
+            # Removed first, not appended to: a stale manifest from an earlier attempt in the
+            # same job must never survive into the one this run actually publishes.
+            rm -f "${manifest}"
+
+            # Every published file gets a line, not only the JSON ones redact-evidence.py
+            # rewrites -- the manifest has to cover what store_artifacts actually uploads, and
+            # redact-evidence.py itself warns (rather than silently passing over) any non-JSON
+            # file precisely because it does not touch them. Sorted so the manifest is
+            # deterministic and diffs cleanly between runs; excludes SHA256SUMS itself so a
+            # rerun of this step in the same job cannot fold its own previous output back in.
+            files="$(cd "${output_dir}" && find . -type f -not -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort)"
+
+            if [ -z "${files}" ]; then
+              echo "sha256sums: ${output_dir} has no files; nothing to hash."
+              exit 0
+            fi
+
+            # Run from inside output_dir, so the manifest holds paths relative to the
+            # hardware-evidence artifact root rather than the job's absolute workspace path --
+            # `sha256sum -c SHA256SUMS` has to work for a reader who downloaded only that
+            # artifact and cannot know what the workspace path was.
+            (
+              cd "${output_dir}"
+              echo "${files}" | while IFS= read -r f; do
+                digest "${f}"
+              done
+            ) > "${manifest}"
+
+            count=$(wc -l < "${manifest}" | tr -d ' ')
+            echo "sha256sums: wrote ${count} digest(s) to ${manifest}"
+            cat "${manifest}"
 
   remove-lab-inventory:
     description: Remove the rendered inventory, always -- even on failure, so a resolvable secret lookup never lingers past the job that needed it.
