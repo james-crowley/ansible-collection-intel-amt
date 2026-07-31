@@ -217,9 +217,19 @@
           Per-class read outcomes agree with the reported facts for {{ inventory_hostname }}:
           {{ reads.values() | map(attribute='outcome') | list | sort | unique | list | join(', ') }}.
 
+    # `amt_hw.amt` alone was the facts with no receipt: the assertions immediately
+    # above this task are only trustworthy because operation.hardware_reads exists
+    # to cross-check them, but the evidence file omitted exactly that field. A
+    # `null` fact group in a saved artifact was therefore permanently
+    # indistinguishable from firmware answering an empty class -- the same defect
+    # this stage's own header comment (see "Report the per-class read outcome"
+    # above) explains for the live debug output, just not yet fixed for what
+    # actually gets published. 0.6.0's hardware_reads diagnostic -- outcome,
+    # error_class, and which of Get/Enumerate answered, per class -- had no
+    # durable artifact until this task carried it too.
     - name: Record hardware inventory evidence for this target
       ansible.builtin.copy:
-        content: "{{ amt_hw.amt | to_nice_json }}\n"
+        content: "{{ {'facts': amt_hw.amt, 'operation': amt_hw.operation} | to_nice_json }}\n"
         dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_hardware_inventory.json"
         mode: "0600"
       delegate_to: localhost
