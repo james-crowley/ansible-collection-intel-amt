@@ -757,16 +757,16 @@ lab; the rest are limits of what an unattended two-machine lab can observe at al
 reader deciding whether to wait for something needs to know which is which, and the
 undivided list did not say.
 
-No entry has been added to or dropped by the split. Two of them gained a sentence,
-because filing an entry under a heading forced a question the undivided list let it
-leave open: *which part* of the claim is backlog and which part is out of reach. Both
-are marked below.
+No entry has been added to or dropped by the split, and no caveat trimmed. Two entries
+gained a paragraph, because filing an entry under a heading forced a question the
+undivided list let it leave open: *which part* of the claim is backlog and which part is
+out of reach. Both are marked **spans the split** below.
 
 ### Not yet done — closeable with planned lab work
 
 These are a backlog. Each names a specific test or artifact that does not exist yet,
-each is reachable without changing what the lab *is*, and each would move a claim up a
-tier when it runs.
+each would move a claim up a tier when it runs, and none needs a *different* lab — at
+most an attended run or a small addition to the one that exists, said where it applies.
 
 - **That stage 5 served media, in any form a third party can check.** The stage passes
   and the engine is exercised, but it emits no evidence file — see the caveat above.

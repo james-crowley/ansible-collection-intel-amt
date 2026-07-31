@@ -1,0 +1,66 @@
+---
+# Documentation only -- no module, role, playbook or CI behaviour changes -- so every
+# entry is `trivial` and none of it reaches the published changelog. Recorded at this
+# length anyway, because the capability matrix is this project's evidence document and a
+# change to what it claims should be as reviewable as a change to what the code does.
+trivial:
+  - "docs/capability-matrix.md - split B(Tier 4: Still unproven) into two labelled subsections, because one list held two
+    kinds of entry and nothing told a reader which kind any entry was. C(Not yet done) is a backlog: an evidence file for
+    stage 5, C(amt_event_log)/C(amt_log_clear) against real firmware, the sleep/hibernate request path, and a deliberate
+    power-off followed by a WS-Man read. C(Permanently unproven) is accepted, and the subsection says what accepted means
+    -- B(documented as out of reach, not forgotten, and not pending work), so no reader treats it as a gap a future
+    release is expected to close: a non-zero IDE-R write, that a PXE exchange happened, that AMT's internal one-shot role
+    bit was consumed, and any firmware generation beyond 16.1.30 and 19.0.5 including Small Business Mode / no-TLS. B(No
+    entry was added or dropped and no caveat was trimmed) -- the tier's value is that its hedges are precise."
+  - "docs/capability-matrix.md - name which half is which for the two Tier 4 entries that span the split, since filing
+    them under a heading forced a question the undivided list let them leave open. B(Sleep and hibernate): whether
+    firmware accepts CIM codes 3, 4 and 7 as issued is one stage away, but whether the machine actually enters S3/S4/S5
+    needs an operating system on the target -- the same limit that keeps the IDE-R write in the accepted list -- so a
+    green stage would prove the request path and not the state transition, and would have to say so. B(Wake-from-off):
+    powering off and then reading is an ordinary extension of stage 4, but the B(independent) confirmation that the
+    machine is off is not, for the reason stage 2's note already gives about machine identity. Named as needing an
+    attended run or a switched outlet the runner can query. B(Neither claim is weakened): reachability while off remains
+    unmeasured, and configuration remains not a measurement."
+  - "docs/capability-matrix.md - cite the CircleCI run behind every Tier 3 claim. B(Tier 3 rows citing no run ID) has
+    been a tracked complaint against this document since the tier existed, and only the 0.5.0 inventory row answered it.
+    The other three runs were recoverable: machine 1's eight-stage qualification of 2026-07-28 (workflow C(6ced8630)),
+    machine 2's of 2026-07-29 (B(pipeline #93), workflow C(6b0b30d8), the number from the commit message that recorded
+    it), and machine 1's read-only re-run of 2026-07-29 (workflow C(3756bbcd)). Each stage is now cited by the individual
+    job it executed as, so \"stage 6 on machine 2\" resolves to one job UUID rather than to a date, and each attribution
+    was confirmed against that job's own log rather than matched on date."
+  - "docs/capability-matrix.md - state the two things that make a Tier 3 citation look failed at first glance. The
+    2026-07-30 workflow's overall outcome reads C(canceled), because its four mutating approvals were never given and
+    were cancelled hours after the read-only job finished; the 2026-07-29 re-run's workflow is still B(on hold) at
+    C(hardware-power-approval) and so reports as unfinished. In both cases the cited read-only job succeeded and no
+    mutating job ever started. A citation a reader cannot reconcile with the CircleCI UI is worse than no citation."
+  - "docs/capability-matrix.md - record what is still not citeable, rather than letting the closed complaint imply
+    nothing is left. Pipeline numbers for the two earlier runs are absent because the API used returns run, workflow and
+    job UUIDs and not the pipeline number, and no commit recorded them; they are B(deliberately not inferred from
+    ordering), since pipeline numbers are sequential and a guessed identifier is precisely what this document exists not
+    to contain. No artifact digest is recorded anywhere, so a reader can confirm that a run happened without confirming
+    that the artifact they fetch is the one this document read."
+  - "docs/capability-matrix.md - reconstruct what the hardware-inventory subsection's unit-test count measured, and
+    correct the reconstruction that preceded it. The count is now B(666), the growth of the four test files that work
+    touched (C(module_utils/test_hardware.py), C(module_utils/test_client.py), C(modules/test_amt_info.py),
+    C(mock_servers/test_wsman_server.py)), 217 before 0.5.0 to 883 now. The B(609) it replaces was previously described
+    as a whole-suite delta only, and so as claiming something narrower than it measured -- but measuring those four files
+    at the feature commit shows 217 to 826, the same 609 as the whole-suite delta 1078 to 1687, because 0.5.0 added tests
+    to no other file. B(Both readings of the old number were true); the correction is drift and nothing else. The 57
+    added since coincide the same way, all of them in these four files and all from the C(operation.hardware_reads)
+    follow-up."
+  - "docs/capability-matrix.md - name the measurement behind the branch-coverage figure. B(93%) over C(plugins/), with
+    C(media_session.py) at 81% and C(ider.py) at 92%, all reproduce under C(coverage run --branch --source=plugins) over
+    the unit suite -- but a reader had to infer the methodology from the two per-file figures matching, and a coverage
+    number whose measurement is not stated cannot be checked. Every figure in the subsection was re-collected rather
+    than trusted, against a freshly staged collection tree on ansible-core 2.21."
+  - "docs/capability-matrix.md - correct three counts left stale by 0.5.0 and 0.6.0. The intro and the Tier 3 preamble
+    said B(three) contributing hardware runs, predating the 2026-07-30 inventory run that the tier's own bullet list and
+    stage table already included. The untested-generation entry in Tier 4 said both generations had been read with the
+    B(v0.2.0 fact set), which no longer accounts for the 0.5.0 inventory both have now returned. The closing
+    Tier-3-to-Tier-1 section listed five Tier 4 items and omitted the two about modules rather than measurements; it now
+    mirrors the split."
+  - "docs/testing.md - record the fourth hardware run and stage 1b. The runner-Python section said the Tier 3 evidence
+    came from B(three) runs and stopped at 2026-07-29, and the qualification order never mentioned stage 1b at all even
+    though the capability matrix gives it a stage-table row. Both fixed, with why 1b is numbered C(1b) and not C(9): it
+    is read-only, it gates nothing, and it rides inside C(qualify_readonly.yml), so the eight numbered stages are still
+    eight."
