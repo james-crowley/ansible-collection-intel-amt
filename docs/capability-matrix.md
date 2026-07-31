@@ -701,13 +701,27 @@ table does.
 
 ## Tier 4: Still unproven
 
-A short list, deliberately.
+A short list, deliberately — and split, because it was previously one list holding two
+different kinds of thing. Some entries are work that is planned and closeable in this
+lab; the rest are limits of what an unattended two-machine lab can observe at all. A
+reader deciding whether to wait for something needs to know which is which, and the
+undivided list did not say.
+
+No entry has been added to or dropped by the split. Two of them gained a sentence,
+because filing an entry under a heading forced a question the undivided list let it
+leave open: *which part* of the claim is backlog and which part is out of reach. Both
+are marked below.
+
+### Not yet done — closeable with planned lab work
+
+These are a backlog. Each names a specific test or artifact that does not exist yet,
+each is reachable without changing what the lab *is*, and each would move a claim up a
+tier when it runs.
 
 - **That stage 5 served media, in any form a third party can check.** The stage passes
   and the engine is exercised, but it emits no evidence file — see the caveat above.
   Until it does, this is the one Tier 3 claim resting on an operator's visual
   confirmation rather than on a recorded artifact.
-
 - **`amt_event_log` and `amt_log_clear`, in their entirety.** No hardware
   qualification stage reads or clears a real firmware event log. Neither module has
   ever touched real Intel AMT firmware: the eight stages predate both of them and
@@ -727,22 +741,15 @@ A short list, deliberately.
   operating system supporting the corresponding ACPI state, so a failure against
   real hardware would not necessarily indicate a defect in this collection — which
   is exactly why they are listed here rather than claimed.
-- **A non-zero IDE-R write.** Stage 6 proves the device is accepted, attached and
-  presented writable, and that the session stays healthy. It does **not** prove
-  bytes were written, because nothing at the other end issues a SCSI write: a
-  BIOS sitting at a boot prompt does not spontaneously write to an attached
-  floppy. `bytes_written == 0` is the expected unattended outcome and is reported
-  as such — and it is now the observed outcome on **both** machines, across both
-  firmware generations, which strengthens that explanation rather than weakening
-  it: the zero is a property of the unattended setup, not of one endpoint. Proving
-  a real write needs an operating system on the target that writes.
-- **That a PXE exchange actually happened.** Stage 7 proves the arming, the reset
-  and the recovery. Whether the machine reached a DHCP/TFTP exchange depends on
-  boot services this collection cannot observe.
-- **That AMT's internal one-shot role bit was consumed.** No module exposes a read
-  path for it, so stage 7 asserts `AMT_BootSettingData` stability instead. The
-  headline claim that a one-time boot "does not persist" is therefore
-  *inferred*, not directly measured.
+
+  **This entry spans the split, and says which half is which.** What a stage can close
+  here is whether real firmware accepts codes 3, 4 and 7 as this collection issues them,
+  and what power state it reports afterwards — a stage away, and the reason the entry
+  sits in the backlog. What no stage in this lab can establish is that the machine
+  actually *entered* S3, S4 or S5, because that needs an operating system on the target
+  to honour the request, which is the same limit that keeps the IDE-R write below in the
+  accepted list. A green stage here would therefore prove the request path and not the
+  state transition, and would have to say so.
 - **Whether either endpoint answers WS-Man while powered off.** Still untested, and
   this entry stays — but the evidence now points the *other* way than it did in 0.3.0.
   Both machines carry `link_policy` value `14` (Sx AC) and so report
@@ -759,13 +766,63 @@ A short list, deliberately.
   that it is broken — only that what would have been the leading explanation for a
   failure (an S0-only link policy) has been ruled out on these two machines, and that
   the explanation was itself wrong for two releases.
+
+  **This entry spans the split too, at the confirmation step.** Powering a machine off
+  and then attempting a WS-Man read is an ordinary extension of stage 4. The
+  *independent* confirmation that it is off is not: independent means outside this
+  collection's own read path, and that is the same thing stage 2's note says CI cannot
+  reach for machine identity. Supplying it needs something the lab does not have yet — a
+  switched outlet the runner can query, or a human at the machine — so this closes with
+  an attended run or a small addition to the lab, not by adding a task to an existing
+  stage. That is a statement about the shape of the missing test and changes nothing
+  about the claim: reachability while off is still **not measured**, and configuration
+  is still not a measurement.
+
+### Permanently unproven — documented as out of reach, and accepted
+
+**What "accepted" means here.** These are out of reach without changing what the lab
+*is* — an unattended pair of machines with no operating system on the target and no
+visibility into the boot services around it. They are recorded rather than dropped
+because a claim this document does not make is exactly as much a part of the accounting
+as one it does, and because each explains why a result a reader might expect to see is
+absent. **Accepted is not forgotten, and it is not pending work**: nothing below is
+waiting on anyone, none of it is a defect, and no reader should treat this subsection as
+a gap that a future release is expected to close. If any of it ever does become
+reachable — an attended run with an OS on the target, an instrumented boot network, a
+third firmware generation — the entry moves up to the backlog above and says so.
+
+- **A non-zero IDE-R write.** Stage 6 proves the device is accepted, attached and
+  presented writable, and that the session stays healthy. It does **not** prove
+  bytes were written, because nothing at the other end issues a SCSI write: a
+  BIOS sitting at a boot prompt does not spontaneously write to an attached
+  floppy. `bytes_written == 0` is the expected unattended outcome and is reported
+  as such — and it is now the observed outcome on **both** machines, across both
+  firmware generations, which strengthens that explanation rather than weakening
+  it: the zero is a property of the unattended setup, not of one endpoint. Proving
+  a real write needs an operating system on the target that writes.
+- **That a PXE exchange actually happened.** Stage 7 proves the arming, the reset
+  and the recovery. Whether the machine reached a DHCP/TFTP exchange depends on
+  boot services this collection cannot observe.
+- **That AMT's internal one-shot role bit was consumed.** No module exposes a read
+  path for it, so stage 7 asserts `AMT_BootSettingData` stability instead. The
+  headline claim that a one-time boot "does not persist" is therefore
+  *inferred*, not directly measured. Accepted rather than queued because the claim
+  this document can make is about **this collection's** read paths: no module has one,
+  and nothing consulted here establishes that AMT exposes one to be implemented
+  against. That is a narrower statement than "AMT offers no read path", and the
+  narrower one is what the evidence supports — so this entry is not a request for a
+  module nobody has written, and should not be read as one.
 - **Any firmware generation other than 16.1.30 and 19.0.5.** Both lab generations
-  have now been mutated through stages 4 to 7 and read with the full v0.2.0 fact
-  set, so neither "mutating anything at all" nor "reading the network and
-  system-state facts" is a single-generation result any more. Every generation
-  outside those two is still untouched, including the Small Business Mode / no-TLS
-  path, which is inferred from `parmstro`'s reporting rather than observed here. Two
-  generations is repeatability; it is not a compatibility guarantee.
+  have now been mutated through stages 4 to 7, read with the full v0.2.0 fact set, and
+  read with the 0.5.0 hardware/asset inventory — so none of "mutating anything at all",
+  "reading the network and system-state facts" and "reading the inventory classes" is a
+  single-generation result any more. Every generation outside those two is still
+  untouched, including the Small Business Mode / no-TLS path, which is inferred from
+  `parmstro`'s reporting rather than observed here. Two generations is repeatability; it
+  is not a compatibility guarantee. Accepted rather than queued because what is missing
+  is a machine the lab does not have, not a test nobody has written: no amount of work
+  on this collection closes it, and the Small Business Mode / no-TLS path needs a
+  differently *provisioned* endpoint on top of that.
 
 ## Known open risks
 
@@ -908,9 +965,15 @@ afterwards to prove repeatability, never both cut over to a new stage at once.
 
 All eight stages have now cleared that bar on two machines of different firmware
 generations, machine 1 first and machine 2 afterwards, never both cut over at once,
-and the read-only stages have since been re-run against machine 1 so that both
-generations have been read with the same fact code. What Tier 4 still lists is
-therefore neither "a second machine" nor "a re-run of the first" — it is the
-specific things no green run on either machine measures: a real SCSI write, a PXE
-exchange, the internal one-shot role bit, the sleep/hibernate actions, and whether
-either endpoint answers WS-Man at all while powered off.
+and the read-only stages have since been re-run against both machines so that both
+generations have been read with the same fact code, inventory included. What Tier 4
+still lists is therefore neither "a second machine" nor "a re-run of the first" — it is
+the specific things no green run on either machine measures — a list now split by
+whether running something would close it:
+
+- **Backlog** — an evidence file for stage 5, `amt_event_log` and `amt_log_clear`
+  against real firmware, the sleep/hibernate request path, and a deliberate power-off
+  followed by a WS-Man read.
+- **Accepted as out of reach** — a real SCSI write, a PXE exchange, the internal
+  one-shot role bit, and any third firmware generation. These are not waiting on
+  anyone; they are what an unattended lab with no OS on the target cannot see.
