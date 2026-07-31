@@ -23,7 +23,10 @@
 - name: Arm the one-time boot selection
   james_crowley.intel_amt.amt_boot:
     host: "{{ amt_baremetal_install_host }}"
-    port: "{{ amt_baremetal_install_port }}"
+    # default(omit, true) turns an unset port (None or "", depending on core -- see
+    # defaults/main.yml) into an omitted keyword, so amt_boot applies its own
+    # use_tls-dependent default port instead of failing type conversion on "".
+    port: "{{ amt_baremetal_install_port | default(omit, true) }}"
     username: "{{ amt_baremetal_install_username }}"
     password: "{{ amt_baremetal_install_password }}"
     use_tls: "{{ amt_baremetal_install_use_tls }}"

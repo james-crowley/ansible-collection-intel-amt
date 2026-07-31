@@ -46,6 +46,25 @@
 #      runs -- measured by amt_media's own session state file being gone from the runtime
 #      directory afterwards, which only state=detached removes.
 #
+# A seventh, found while fixing #87: every `nested_observation` field in
+# files/nested_play.yml is its own quoted scalar template
+# (`"{{ amt_baremetal_install_run_state | default(none) }}"` and friends). On
+# ansible-core <=2.18 that has the exact same defect #87 fixes in the role's own
+# defaults/main.yml: Jinja's finalize step stringifies a bare None before Ansible's
+# convert_data step gets a chance to evaluate it back, so a field that was genuinely
+# never set (the role refused before reaching it) arrives here as "" rather than as
+# None. `run_state is none` / `power_action is none` below would therefore have quietly
+# stopped proving anything on those cores -- an empty string is not none, so a refusal
+# that left them unset and one that (hypothetically) set them to "" would both read as
+# "passed". `is falsy` catches both None and "", exactly like validate.yml's
+# `is truthy` guards now do, for the same reason: don't touch files/nested_play.yml or
+# tasks/run_nested.yml here, that file is owned by #80's concurrent fix, so the
+# assertions are hardened on this side of the boundary instead. This does NOT apply to
+# `run_state.session_id is none` / `run_state.last_failure is none` a little further
+# down: those read a sub-field of a run_state that is itself a real dict (dicts survive
+# the round trip; only bare None does not), sourced from a state file loaded with
+# `from_json`, not from a live scalar template evaluating to None.
+#
 # Why this target is called amt_baremetal_install_role and not amt_baremetal_install:
 # ansible-test runs each target as a role and resolves it by the collection-qualified
 # name, so a target sharing a name with a role in roles/ silently runs *that role* with
@@ -381,8 +400,8 @@
           - nested_obs['amt-target-b.invalid'].failed_assertion == 'ansible_play_hosts_all | length == 1'
           - nested_obs['amt-target-a.invalid'].play_hosts_all_count | int == 2
           # Nothing was reconciled or persisted: the guard fires before state.yml.
-          - nested_obs['amt-target-a.invalid'].run_state is none
-          - nested_obs['amt-target-a.invalid'].power_action is none
+          - nested_obs['amt-target-a.invalid'].run_state is falsy
+          - nested_obs['amt-target-a.invalid'].power_action is falsy
         fail_msg: >-
           The fan-out guard did not refuse a two-host play. rc={{ nested_run.rc }}.
           Nested output tail:
@@ -426,8 +445,8 @@
           - (nested_obs['amt-target-a.invalid'].play_batch_count | int == 1) == true
           - (nested_obs['amt-target-a.invalid'].play_hosts_all_count | int == 1) == false
           # Nothing was reached: the roster guard is the first task in the role.
-          - nested_obs['amt-target-a.invalid'].run_state is none
-          - nested_obs['amt-target-a.invalid'].power_action is none
+          - nested_obs['amt-target-a.invalid'].run_state is falsy
+          - nested_obs['amt-target-a.invalid'].power_action is falsy
         fail_msg: >-
           A serial: 1 two-host play was not refused. rc={{ nested_run.rc }}.
           Nested output tail:
@@ -473,8 +492,8 @@
           - nested_run.rc != 0
           - nested_obs['amt-target-a.invalid'].outcome == 'failed'
           - nested_obs['amt-target-a.invalid'].failed_assertion == 'amt_baremetal_install_confirm_destructive | bool'
-          - nested_obs['amt-target-a.invalid'].run_state is none
-          - nested_obs['amt-target-a.invalid'].power_action is none
+          - nested_obs['amt-target-a.invalid'].run_state is falsy
+          - nested_obs['amt-target-a.invalid'].power_action is falsy
         fail_msg: >-
           The role got past validation with confirmation withheld. rc={{ nested_run.rc }}.
           Nested output tail:
@@ -507,7 +526,7 @@
           - nested_obs['amt-target-a.invalid'].resolved_host is falsy
           - nested_obs['amt-target-a.invalid'].resolved_host != nested_obs['amt-target-a.invalid'].inventory_hostname
           # Never reached probe.yml, so nothing was ever contacted.
-          - nested_obs['amt-target-a.invalid'].run_state is none
+          - nested_obs['amt-target-a.invalid'].run_state is falsy
         fail_msg: >-
           An unset amt_host did not fail loudly in validate.yml. If failed_assertion is
           something else, the role resolved an endpoint from somewhere -- and
@@ -544,7 +563,7 @@
           - nested_obs['amt-target-a.invalid'].run_state.boot_armed == false
           - nested_obs['amt-target-a.invalid'].run_state.reset_issued == false
           - nested_obs['amt-target-a.invalid'].run_state.media_attached == false
-          - nested_obs['amt-target-a.invalid'].power_action is none
+          - nested_obs['amt-target-a.invalid'].power_action is falsy
         fail_msg: >-
           The role did not refuse an endpoint that advertises no IDE-R support.
           rc={{ nested_run.rc }}. Nested output tail:
@@ -570,7 +589,7 @@
           - "'AMT_BootCapabilities.ForcePXEBoot' in nested_obs['amt-target-a.invalid'].failed_msg"
           - nested_obs['amt-target-a.invalid'].run_state.boot_armed == false
           - nested_obs['amt-target-a.invalid'].run_state.reset_issued == false
-          - nested_obs['amt-target-a.invalid'].power_action is none
+          - nested_obs['amt-target-a.invalid'].power_action is falsy
         fail_msg: >-
           The role did not refuse an endpoint that advertises no forced-PXE support.
           rc={{ nested_run.rc }}. Nested output tail:
@@ -726,7 +745,7 @@
           # Read the prior run's history rather than starting from scratch, and stopped
           # before probe.yml -- so nothing was re-armed and nothing was reset.
           - nested_obs['amt-target-a.invalid'].run_state.boot_armed == true
-          - nested_obs['amt-target-a.invalid'].power_action is none
+          - nested_obs['amt-target-a.invalid'].power_action is falsy
         fail_msg: >-
           The role resumed past an unconfirmed boot/reset without acknowledgement.
           rc={{ nested_run.rc }}. Nested output tail:
@@ -959,7 +978,7 @@
           # must therefore leave the machine untouched.
           - nested_obs['amt-target-a.invalid'].run_state.boot_armed == false
           - nested_obs['amt-target-a.invalid'].run_state.reset_issued == false
-          - nested_obs['amt-target-a.invalid'].power_action is none
+          - nested_obs['amt-target-a.invalid'].power_action is falsy
           # ...and the always block still ran.
           - media_failure_state_on_disk.detached == true
           - media_failure_state_on_disk.reset_issued == false
@@ -1020,8 +1039,8 @@
           - nested_obs['amt-target-a.invalid'].resolved_handoff_host != nested_obs['amt-target-a.invalid'].inventory_hostname
           # Refused before state.yml, so nothing was reconciled, contacted or reset. This
           # is the entire value of moving the failure up front.
-          - nested_obs['amt-target-a.invalid'].run_state is none
-          - nested_obs['amt-target-a.invalid'].power_action is none
+          - nested_obs['amt-target-a.invalid'].run_state is falsy
+          - nested_obs['amt-target-a.invalid'].power_action is falsy
           - "'amt_baremetal_install_wait_for_handoff=false' in nested_obs['amt-target-a.invalid'].failed_msg"
         fail_msg: >-
           wait_for_handoff=true with no handoff_host must fail in validate.yml. If
@@ -1280,7 +1299,7 @@
           # Nothing past the media phase happened, so the machine was never touched.
           - nested_obs['amt-target-a.invalid'].run_state.boot_armed == false
           - nested_obs['amt-target-a.invalid'].run_state.reset_issued == false
-          - nested_obs['amt-target-a.invalid'].power_action is none
+          - nested_obs['amt-target-a.invalid'].power_action is falsy
         fail_msg: >-
           A failed media attach orphaned its IDE-R session. session_id in run state was
           {{ nested_obs['amt-target-a.invalid'].run_state.session_id | default('(absent)') }};
@@ -1307,6 +1326,114 @@
           The role failed without naming the media session id in its output, so an
           operator whose detach also failed has no way to find the stranded session.
           Nested output tail:
+          {{ nested_tail }}
+
+    # ------------------------------------------------------------------------------
+    # (12) Regression for #87. An unset amt_baremetal_install_port/_media_port must
+    # resolve to None-or-omitted, on whatever ansible-core is running this target --
+    # never to the empty string. On ansible-core <=2.18, a quoted scalar template that
+    # evaluates to Jinja's None is stringified by finalize before Ansible's convert_data
+    # step gets a chance to evaluate it back, so `"{{ amt_port | default(None) }}"`
+    # arrived at the module boundary as literal "" rather than None -- and amt_port is
+    # `type: int` there, so that was a type error raised before any connection was
+    # attempted, not a graceful fall-through. An operator on stock ports (i.e. every
+    # scenario above except 16 and 17, none of which set amt_port) could not use this
+    # role at all on those cores.
+    #
+    # This scenario is the strongest available proof that the fix (`default(omit, true)`
+    # applied at each of the six places tasks/*.yml pass these as a module `port` --
+    # see defaults/main.yml's comment on amt_baremetal_install_port for why the
+    # conversion lives there and not in the stored role variable itself) actually
+    # reaches the module's own default port rather than merely avoiding a crash: a mock
+    # is bound to the *exact* plaintext default (module_utils/tls.py's
+    # DEFAULT_PLAINTEXT_PORT, 16992) and nothing else in this target ever listens there,
+    # so the run below can only reach reset_confirmed=true if probe.yml, arm_boot.yml,
+    # reset.yml and observe.yml *all four* independently resolved the omitted port to
+    # that same live endpoint. amt_port is not set anywhere in scenario_vars below --
+    # that absence is the entire point.
+    #
+    # To prove this scenario can fail: revert defaults/main.yml's
+    # amt_baremetal_install_port to `"{{ amt_port | default(None) }}"` used directly as
+    # the six tasks' `port:` value (i.e. drop `| default(omit, true)` at each call site)
+    # and rerun on ansible-core <=2.18 -- the assertion below fails with rc!=0 and
+    # "cannot be converted to an int" in the nested output, which is exactly the
+    # signature this scenario pins against.
+    - name: Start a mock WS-Man server on the exact plaintext default port, for the port-fallthrough regression
+      ansible.builtin.shell: |
+        set -e
+        nohup {{ ansible_playbook_python }} {{ role_path }}/files/run_wsman_mock_fixed_port.py \
+          --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ default_port_ready_file }} \
+          --port 16992 \
+          > {{ scratch_dir.path }}/wsman_default_port.log 2>&1 &
+        echo $!
+      args:
+        executable: /bin/bash
+      register: default_port_start
+      changed_when: false
+      delegate_to: localhost
+      vars:
+        default_port_ready_file: "{{ scratch_dir.path }}/wsman_default_port_ready.json"
+
+    - name: Wait for the fixed-port mock to report ready
+      ansible.builtin.wait_for:
+        path: "{{ scratch_dir.path }}/wsman_default_port_ready.json"
+        state: present
+        timeout: 15
+      delegate_to: localhost
+
+    - name: Read the fixed-port mock's connection info and pid
+      ansible.builtin.set_fact:
+        default_port_info: "{{ lookup('ansible.builtin.file', scratch_dir.path ~ '/wsman_default_port_ready.json') | from_json }}"
+        default_port_pid: "{{ default_port_start.stdout | trim }}"
+
+    - name: Assert the fixed-port mock actually bound the exact plaintext default, not something else
+      # The premise of the scenario: if this landed on a different port (e.g. because
+      # 16992 was already taken and the bind silently fell back), success below would
+      # prove nothing about the fix.
+      ansible.builtin.assert:
+        that:
+          - default_port_info.port | int == 16992
+        fail_msg: >-
+          The fixed-port mock did not bind 16992 (module_utils/tls.py's
+          DEFAULT_PLAINTEXT_PORT). Got port={{ default_port_info.port }}.
+
+    - name: Scenario 18 -- an unset amt_port falls through to the module's own default port, all the way to a completed run
+      ansible.builtin.include_tasks: run_nested.yml
+      vars:
+        scenario: port_falls_through_to_module_default
+        scenario_inventory: "{{ nested_dir }}/inventory_one_host.yml"
+        scenario_hosts: [amt-target-a.invalid]
+        # amt_port is deliberately absent from this combine -- that is the entire
+        # point of the scenario. amt_host still has to be set, or validate.yml would
+        # refuse before ever reaching the port this scenario cares about.
+        scenario_vars: >-
+          {{ nested_base_vars | combine({
+               'amt_host': '127.0.0.1',
+               'amt_baremetal_install_state_dir': scratch_dir.path ~ '/state/port_fallthrough',
+             }) }}
+
+    - name: Assert the run completed end to end with no port ever specified, and never saw the old type-conversion failure
+      ansible.builtin.assert:
+        that:
+          - nested_run.rc == 0
+          - nested_obs['amt-target-a.invalid'].outcome == 'succeeded'
+          # The stored role variable itself: None on ansible-core >=2.19, "" on <=2.18
+          # (see defaults/main.yml) -- never the omit sentinel, and never anything
+          # that reads as present.
+          - nested_obs['amt-target-a.invalid'].resolved_port is falsy
+          # probe.yml, arm_boot.yml, reset.yml and observe.yml all reached the one
+          # endpoint listening on the module's own default port -- nothing else in
+          # this target listens on 16992, so this could not have completed any other
+          # way with amt_port unset everywhere above.
+          - nested_obs['amt-target-a.invalid'].run_state.boot_armed == true
+          - nested_obs['amt-target-a.invalid'].run_state.reset_issued == true
+          - nested_obs['amt-target-a.invalid'].run_state.reset_confirmed == true
+          # Pins the exact failure signature #87 reports, so a regression here is
+          # never mistaken for an unrelated failure.
+          - "'cannot be converted to an int' not in nested_run.stdout"
+        fail_msg: >-
+          An unset amt_port did not cleanly fall through to the module's own default
+          port. rc={{ nested_run.rc }}. Nested output tail:
           {{ nested_tail }}
 
     - name: Assert nothing in this target ever wrote to the real home directory
@@ -1344,6 +1471,15 @@
       failed_when: false
       changed_when: false
       when: ider_pid is defined
+
+    - name: Stop the fixed-port mock WS-Man server
+      # Guarded the same way as the IDE-R server above: started even later in the
+      # block, so an earlier failure means it was never launched.
+      ansible.builtin.command: "kill {{ default_port_pid }}"
+      delegate_to: localhost
+      failed_when: false
+      changed_when: false
+      when: default_port_pid is defined
 
     - name: Remove the scratch directory
       ansible.builtin.file:
