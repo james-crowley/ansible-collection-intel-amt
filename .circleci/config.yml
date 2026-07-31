@@ -489,7 +489,7 @@ jobs:
             cd "${COLLECTION_PATH}"
             # No skip-guard here on purpose. There used to be one, from the era
             # when tests/integration/targets was empty (issue #8) and a fatal
-            # "no targets" exit would have held main red. All five targets are
+            # "no targets" exit would have held main red. All nine targets are
             # committed now, so the guard was dead code whose only remaining
             # effect would be to exit 0 -- green -- if the targets ever silently
             # disappeared from the staged tree, which is precisely the failure it

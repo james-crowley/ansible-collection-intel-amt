@@ -24,7 +24,9 @@ implying a higher tier than it earns:
    2026-07-29, which closed the last difference in coverage between the two runs:
    `amt_info`'s network and system-state facts have now come back populated on
    **both** generations, so this tier no longer has to state that particular
-   claim per generation.
+   claim per generation. A fourth run, 2026-07-30, read **both** machines with the
+   0.5.0 hardware-inventory code and moved that inventory's classes and shapes into
+   this tier as well. All four runs are cited by workflow and job below.
 4. **Still unproven** — a short, specific list, kept honest.
 
 The collection is no longer "hardware-unverified". Hardware qualification found
@@ -144,16 +146,19 @@ the two wrong tables noted above.
 
 This is the bulk of the collection's verification effort:
 
-- **1687 unit tests** (measured via `pytest` against the staged collection tree; the
-  number drifts as tests are added, so treat it as a point measurement, not a
-  promise) across `tests/unit/plugins/module_utils/`, `tests/unit/plugins/modules/`
+- **1744 unit tests** (collected via `pytest` against the staged collection tree on
+  2026-07-30; the number drifts as tests are added, so treat it as a point
+  measurement, not a promise) across `tests/unit/plugins/module_utils/`, `tests/unit/plugins/modules/`
   and `tests/unit/mock_servers/`, covering error classification/redaction, TLS trust
   policy, the WS-Man envelope/SOAP layer, the boot five-step sequence, the redirection
   handshake, the IDE-R SCSI state machine, the media-session daemon, and every
   module's argument handling, check-mode behaviour, and idempotence logic — all
   against fakes/mocks, never a socket or a real AMT endpoint.
 
-  Branch coverage over `plugins/` is **92%**. The distribution matters more than the
+  Branch coverage over `plugins/` is **93%**, measured with
+  `coverage run --branch --source=plugins` over that same unit suite — stated because
+  a coverage figure whose measurement is not named cannot be checked, and the two
+  per-file figures below were taken the same way. The distribution matters more than the
   total, and it used to be inverted against consequence: the two least-covered files
   were the two highest-consequence ones. `media_session.py` (the detached daemon that
   holds credentials across a fork) was **50%** and is now **81%**; `ider.py` (the SCSI
@@ -262,7 +267,36 @@ applies here exactly as it does elsewhere.
 What Tier 2 still buys — and it is what makes the *labels*, rather than the plumbing,
 trustworthy:
 
-- **609 unit tests**, of which the bulk are per-value assertions over the nine value
+- **666 unit tests.** **What that number measures**, written out so it cannot quietly
+  come to mean something else: `pytest --collect-only` over the four test files this work
+  touched — `module_utils/test_hardware.py`, `module_utils/test_client.py`,
+  `modules/test_amt_info.py`, `mock_servers/test_wsman_server.py` — **minus their
+  pre-0.5.0 baseline of 217**. Those four collect **883** today, and 883 − 217 = 666.
+
+  It is **not** a count of tests that exercise the inventory and nothing else: three of
+  those files predate the inventory and keep testing what they always did, and the fourth
+  is dedicated to it. It is **not** the whole suite. Anyone updating this figure has to
+  re-collect those same four files against the same 217 baseline, or replace the measure
+  and say so in the same edit — because the reason the previous number needed
+  reconstructing at all is that it stated no measure, which let it drift into meaning
+  something its arithmetic never claimed.
+
+  **609**, the number here previously, turns out to have been defensible on either of
+  the two readings available to it. It is the whole-suite delta of the 0.5.0 feature
+  commit — 1078 tests before, 1687 after, which is the arithmetic that commit's own
+  message records — **and** it is the growth of those same four files, 217 to 826. The
+  two coincide because 0.5.0 added tests to nothing else, so "609 tests covering the
+  inventory" was not the overstatement it looks like from the whole-suite arithmetic
+  alone; the figure has simply drifted. The same holds for the 57 added since: all of
+  them landed in these four files, in the follow-up that added
+  `operation.hardware_reads` described at the end of this subsection, so 826 → 883 and
+  1687 → 1744 are the same 57 tests counted two ways.
+
+  Two narrower counts, for anyone who wants a figure that needs no reconstruction at
+  all: `test_hardware.py` — the file dedicated to the decoders and the value tables —
+  collects **514** on its own, and the whole unit suite collects **1744**.
+
+  Of these the bulk are per-value assertions over the nine value
   tables — every defined value plus an out-of-table value for each — written against the
   *cited source* rather than against the implementation. Plus multi-instance parsing at
   zero, one, several and paged instance counts; the CIM single-element-array shape; the
@@ -403,27 +437,54 @@ about this.
 
 Two machines have now each completed **all eight** stages, on the lab's self-hosted
 CircleCI runner (`crowley/amt-runner`), with TLS pinned to each endpoint's own
-reviewed leaf certificate. Three runs contributed, on different dates and in
+reviewed leaf certificate. **Four** runs contributed, on different dates and in
 different runner environments, and each is recorded as itself rather than averaged
-into one:
+into one. Every one now carries the identifiers needed to go and look at it — see
+"Two limits on how far Tier 3 can be audited" below for what those identifiers do and
+do not let a reader check:
 
 - **`amt-lab-01` (machine 1), AMT 16.1.30** — all eight stages, 2026-07-28, on
-  Python 3.10 with ansible-core 2.17.
+  Python 3.10 (3.10.12) with ansible-core 2.17, against collection 0.1.0.
+  `hardware` workflow `6ced8630-58e3-44d0-bfdc-68f8d2f47a7a`; jobs
+  `hardware-tests` `e01e14b5-e1ae-4003-919b-e3b99fea3c11` (stages 1, 2, 3, 8),
+  `hardware-power` `a01cda9b-565c-424e-b812-0536b0a14194` (4),
+  `hardware-media` `a3e56c2c-e301-41ea-b726-2fb304fa1aa9` (5),
+  `hardware-writable` `23113b0c-1090-4a9b-9412-9fb74e2bc528` (6),
+  `hardware-pxe` `6315a506-db04-4809-807b-1c8c6b32424d` (7), all succeeded. This run
+  predates the `hardware-limit` parameter; it reached only machine 1 because the lab
+  inventory held one endpoint at the time, which the job's own
+  "Credentials present for 1 endpoint(s)" step records.
 - **`amt-lab-02` (machine 2), AMT 19.0.5** — all eight stages, 2026-07-29, on
   Python 3.12.13 with ansible-core 2.18.18. That run was deliberately limited to
   machine 2 (`hardware-limit=amt-lab-02`); machine 1 was not touched by it.
+  CircleCI **pipeline #93**, `hardware` workflow
+  `6b0b30d8-0956-4017-9b37-b8dd4d62db63`; jobs `hardware-tests`
+  `97cf1c8d-8615-46bf-b33e-b1c3f91d54d3` (stages 1, 2, 3, 8), `hardware-power`
+  `5767a536-5ed3-46cd-aa82-993972fe53f0` (4), `hardware-media`
+  `8c4e4a51-2082-489a-843d-fa32bfc9a13e` (5), `hardware-writable`
+  `988a4327-10ca-4252-8c38-9ff5d9b7d281` (6), `hardware-pxe`
+  `310385c9-0916-4863-947f-52428ec895a5` (7), all succeeded.
 - **`amt-lab-01` (machine 1) again, read-only stages only** — stages 1, 3 and 8,
   2026-07-29, limited to machine 1 (`hardware-limit=amt-lab-01`), on the
   ansible-core 2.18.18 lab virtualenv every hardware job now builds. Nothing was
   mutated: this run existed to read machine 1 with the v0.2.0 fact code, which its
   2026-07-28 evidence predated. Machine 1's mutating result stands on the
-  2026-07-28 run and was not re-established here.
+  2026-07-28 run and was not re-established here. `hardware` workflow
+  `3756bbcd-3867-458a-83a2-648ee03bffdf`, job `hardware-tests`
+  `7a33fe92-99d8-44c0-bcd5-53248f409df4`, succeeded. **That workflow is still on
+  hold** at `hardware-power-approval` and so reports as unfinished; the read-only job
+  it is cited for completed and its artifacts were uploaded.
 - **Both machines, read-only stages only** — stages 1, 1b, 3 and 8, 2026-07-30,
-  CircleCI pipeline 167, job UUID `65ddc061-b273-4777-8c51-174a48e74402`, on the
-  ansible-core 2.18.18 lab virtualenv. Nothing was mutated. This run existed to read
-  both machines with the 0.5.0 hardware-inventory code, which every earlier run
-  predated, and it is the sole evidence for the inventory subsection at the end of
-  this tier.
+  against collection 0.5.0, on the ansible-core 2.18.18 lab virtualenv. Nothing was
+  mutated. This run existed to read both machines with the 0.5.0 hardware-inventory
+  code, which every earlier run predated, and it is the sole evidence for the
+  inventory subsection at the end of this tier. CircleCI **pipeline 167**, `hardware`
+  workflow `aa1af1c2-6069-47bc-b5f6-de4a9c273399`, job `hardware-tests`
+  `65ddc061-b273-4777-8c51-174a48e74402`, succeeded. **That workflow's overall
+  outcome reads `canceled`**, because the four mutating approvals were never given and
+  were cancelled hours later; the read-only job cited here succeeded, and no mutating
+  job in it ever started. A reader checking the citation will see the cancelled
+  workflow first, which is why it is stated here rather than left to surprise them.
 
 So power control, IDE-R media, the writable-image path and native one-time PXE are
 verified on **two machines across two firmware generations**, not one — and
@@ -541,9 +602,11 @@ fact groups came back populated on both machines**.
 `65ddc061-b273-4777-8c51-174a48e74402`), artifacts
 `hardware-evidence/amt-lab-01-qualify_hardware_inventory.json` and
 `hardware-evidence/amt-lab-02-qualify_hardware_inventory.json`. Both post-redaction, per
-`tests/hardware/redact-evidence.py`. This row cites its run because Tier 3 rows that
-cite no run ID are a tracked shortcoming of this document, and adding another would make
-it worse.
+`tests/hardware/redact-evidence.py`. This row was the first in this tier to cite its
+run, added because Tier 3 rows citing no run ID were a tracked shortcoming and adding
+another would have made it worse. The other three runs have since been recovered and are
+cited in the run list at the top of this tier; this row keeps its own citation because it
+is the only claim in the document resting on a single run.
 
 | Fact group | Class | Verb | 16.1.30 (machine 1) | 19.0.5 (machine 2) |
 |---|---|---|---|---|
@@ -666,23 +729,56 @@ other stage emits a JSON artifact. Stage 3's evidence gap was found and fixed
 (`check_mode: false`, since the playbook runs under `--check` by design); stage 5's is
 still open, and is tracked in Tier 4.
 
-**No Tier 3 row cites a specific run.** The dates, machines and firmware versions
-above are accurate, but there is no pipeline number, workflow URL or artifact digest
-anywhere in this document, so a reader cannot go and check. That is a gap in this
-document rather than in the evidence — the runs exist and their artifacts are
-redacted-and-publishable since `tests/hardware/redact-evidence.py` landed — but until
-run identifiers are recorded here, Tier 3 asks for more trust than the rest of the
-table does.
+**Every Tier 3 row now cites a run, but not to the same depth.** This entry used to
+read "no Tier 3 row cites a specific run" — accurate when written, and the reason it
+was written is that dates and machine names alone leave a reader nothing to go and
+check. What is recorded now, and what still is not:
+
+- **Every stage row is citeable**, but through the run list at the top of this tier
+  rather than in the row itself. The stage table names machines and outcomes; the run
+  list names the workflow and the individual job each stage ran as, so "stage 6 on
+  machine 2" resolves to one job UUID. The rows are not repeated with their own
+  citations because a stage row that named its own job would have to name two — one
+  per machine — and the run list already distinguishes them by date.
+- **Pipeline numbers exist for two of the four runs**, #93 and 167. For machine 1's
+  2026-07-28 qualification and its 2026-07-29 read-only re-run, the workflow and job
+  UUIDs were recovered and are recorded above, but the pipeline number was not: the
+  API surface used to recover them returns run, workflow and job UUIDs and does not
+  expose the pipeline number, and no commit message recorded it at the time. Those two
+  runs are therefore cited by UUID and date only. **No pipeline number has been
+  inferred from ordering** — sequence would make one easy to guess and a guessed
+  identifier is worse than an absent one in a document whose purpose is this.
+- **No artifact digest is recorded anywhere.** The inventory subsection below names its
+  two artifact paths, and every stage but 5 uploads a JSON artifact under
+  `hardware-evidence`, redacted by `tests/hardware/redact-evidence.py`. But nothing
+  here fixes *which* bytes those artifacts held, so a reader can confirm that a run
+  happened and that an artifact exists without being able to confirm that the artifact
+  they fetch is the one this document read. That is the part of the original complaint
+  that is still open.
 
 ## Tier 4: Still unproven
 
-A short list, deliberately.
+A short list, deliberately — and split, because it was previously one list holding two
+different kinds of thing. Some entries are work that is planned and closeable in this
+lab; the rest are limits of what an unattended two-machine lab can observe at all. A
+reader deciding whether to wait for something needs to know which is which, and the
+undivided list did not say.
+
+No entry has been added to or dropped by the split, and no caveat trimmed. Two entries
+gained a paragraph, because filing an entry under a heading forced a question the
+undivided list let it leave open: *which part* of the claim is backlog and which part is
+out of reach. Both are marked **spans the split** below.
+
+### Not yet done — closeable with planned lab work
+
+These are a backlog. Each names a specific test or artifact that does not exist yet,
+each would move a claim up a tier when it runs, and none needs a *different* lab — at
+most an attended run or a small addition to the one that exists, said where it applies.
 
 - **That stage 5 served media, in any form a third party can check.** The stage passes
   and the engine is exercised, but it emits no evidence file — see the caveat above.
   Until it does, this is the one Tier 3 claim resting on an operator's visual
   confirmation rather than on a recorded artifact.
-
 - **`amt_event_log` and `amt_log_clear`, in their entirety.** No hardware
   qualification stage reads or clears a real firmware event log. Neither module has
   ever touched real Intel AMT firmware: the eight stages predate both of them and
@@ -702,22 +798,15 @@ A short list, deliberately.
   operating system supporting the corresponding ACPI state, so a failure against
   real hardware would not necessarily indicate a defect in this collection — which
   is exactly why they are listed here rather than claimed.
-- **A non-zero IDE-R write.** Stage 6 proves the device is accepted, attached and
-  presented writable, and that the session stays healthy. It does **not** prove
-  bytes were written, because nothing at the other end issues a SCSI write: a
-  BIOS sitting at a boot prompt does not spontaneously write to an attached
-  floppy. `bytes_written == 0` is the expected unattended outcome and is reported
-  as such — and it is now the observed outcome on **both** machines, across both
-  firmware generations, which strengthens that explanation rather than weakening
-  it: the zero is a property of the unattended setup, not of one endpoint. Proving
-  a real write needs an operating system on the target that writes.
-- **That a PXE exchange actually happened.** Stage 7 proves the arming, the reset
-  and the recovery. Whether the machine reached a DHCP/TFTP exchange depends on
-  boot services this collection cannot observe.
-- **That AMT's internal one-shot role bit was consumed.** No module exposes a read
-  path for it, so stage 7 asserts `AMT_BootSettingData` stability instead. The
-  headline claim that a one-time boot "does not persist" is therefore
-  *inferred*, not directly measured.
+
+  **This entry spans the split, and says which half is which.** What a stage can close
+  here is whether real firmware accepts codes 3, 4 and 7 as this collection issues them,
+  and what power state it reports afterwards — a stage away, and the reason the entry
+  sits in the backlog. What no stage in this lab can establish is that the machine
+  actually *entered* S3, S4 or S5, because that needs an operating system on the target
+  to honour the request, which is the same limit that keeps the IDE-R write below in the
+  accepted list. A green stage here would therefore prove the request path and not the
+  state transition, and would have to say so.
 - **Whether either endpoint answers WS-Man while powered off.** Still untested, and
   this entry stays — but the evidence now points the *other* way than it did in 0.3.0.
   Both machines carry `link_policy` value `14` (Sx AC) and so report
@@ -734,13 +823,63 @@ A short list, deliberately.
   that it is broken — only that what would have been the leading explanation for a
   failure (an S0-only link policy) has been ruled out on these two machines, and that
   the explanation was itself wrong for two releases.
+
+  **This entry spans the split too, at the confirmation step.** Powering a machine off
+  and then attempting a WS-Man read is an ordinary extension of stage 4. The
+  *independent* confirmation that it is off is not: independent means outside this
+  collection's own read path, and that is the same thing stage 2's note says CI cannot
+  reach for machine identity. Supplying it needs something the lab does not have yet — a
+  switched outlet the runner can query, or a human at the machine — so this closes with
+  an attended run or a small addition to the lab, not by adding a task to an existing
+  stage. That is a statement about the shape of the missing test and changes nothing
+  about the claim: reachability while off is still **not measured**, and configuration
+  is still not a measurement.
+
+### Permanently unproven — documented as out of reach, and accepted
+
+**What "accepted" means here.** These are out of reach without changing what the lab
+*is* — an unattended pair of machines with no operating system on the target and no
+visibility into the boot services around it. They are recorded rather than dropped
+because a claim this document does not make is exactly as much a part of the accounting
+as one it does, and because each explains why a result a reader might expect to see is
+absent. **Accepted is not forgotten, and it is not pending work**: nothing below is
+waiting on anyone, none of it is a defect, and no reader should treat this subsection as
+a gap that a future release is expected to close. If any of it ever does become
+reachable — an attended run with an OS on the target, an instrumented boot network, a
+third firmware generation — the entry moves up to the backlog above and says so.
+
+- **A non-zero IDE-R write.** Stage 6 proves the device is accepted, attached and
+  presented writable, and that the session stays healthy. It does **not** prove
+  bytes were written, because nothing at the other end issues a SCSI write: a
+  BIOS sitting at a boot prompt does not spontaneously write to an attached
+  floppy. `bytes_written == 0` is the expected unattended outcome and is reported
+  as such — and it is now the observed outcome on **both** machines, across both
+  firmware generations, which strengthens that explanation rather than weakening
+  it: the zero is a property of the unattended setup, not of one endpoint. Proving
+  a real write needs an operating system on the target that writes.
+- **That a PXE exchange actually happened.** Stage 7 proves the arming, the reset
+  and the recovery. Whether the machine reached a DHCP/TFTP exchange depends on
+  boot services this collection cannot observe.
+- **That AMT's internal one-shot role bit was consumed.** No module exposes a read
+  path for it, so stage 7 asserts `AMT_BootSettingData` stability instead. The
+  headline claim that a one-time boot "does not persist" is therefore
+  *inferred*, not directly measured. Accepted rather than queued because the claim
+  this document can make is about **this collection's** read paths: no module has one,
+  and nothing consulted here establishes that AMT exposes one to be implemented
+  against. That is a narrower statement than "AMT offers no read path", and the
+  narrower one is what the evidence supports — so this entry is not a request for a
+  module nobody has written, and should not be read as one.
 - **Any firmware generation other than 16.1.30 and 19.0.5.** Both lab generations
-  have now been mutated through stages 4 to 7 and read with the full v0.2.0 fact
-  set, so neither "mutating anything at all" nor "reading the network and
-  system-state facts" is a single-generation result any more. Every generation
-  outside those two is still untouched, including the Small Business Mode / no-TLS
-  path, which is inferred from `parmstro`'s reporting rather than observed here. Two
-  generations is repeatability; it is not a compatibility guarantee.
+  have now been mutated through stages 4 to 7, read with the full v0.2.0 fact set, and
+  read with the 0.5.0 hardware/asset inventory — so none of "mutating anything at all",
+  "reading the network and system-state facts" and "reading the inventory classes" is a
+  single-generation result any more. Every generation outside those two is still
+  untouched, including the Small Business Mode / no-TLS path, which is inferred from
+  `parmstro`'s reporting rather than observed here. Two generations is repeatability; it
+  is not a compatibility guarantee. Accepted rather than queued because what is missing
+  is a machine the lab does not have, not a test nobody has written: no amount of work
+  on this collection closes it, and the Small Business Mode / no-TLS path needs a
+  differently *provisioned* endpoint on top of that.
 
 ## Known open risks
 
@@ -883,9 +1022,15 @@ afterwards to prove repeatability, never both cut over to a new stage at once.
 
 All eight stages have now cleared that bar on two machines of different firmware
 generations, machine 1 first and machine 2 afterwards, never both cut over at once,
-and the read-only stages have since been re-run against machine 1 so that both
-generations have been read with the same fact code. What Tier 4 still lists is
-therefore neither "a second machine" nor "a re-run of the first" — it is the
-specific things no green run on either machine measures: a real SCSI write, a PXE
-exchange, the internal one-shot role bit, the sleep/hibernate actions, and whether
-either endpoint answers WS-Man at all while powered off.
+and the read-only stages have since been re-run against both machines so that both
+generations have been read with the same fact code, inventory included. What Tier 4
+still lists is therefore neither "a second machine" nor "a re-run of the first" — it is
+the specific things no green run on either machine measures — a list now split by
+whether running something would close it:
+
+- **Backlog** — an evidence file for stage 5, `amt_event_log` and `amt_log_clear`
+  against real firmware, the sleep/hibernate request path, and a deliberate power-off
+  followed by a WS-Man read.
+- **Accepted as out of reach** — a real SCSI write, a PXE exchange, the internal
+  one-shot role bit, and any third firmware generation. These are not waiting on
+  anyone; they are what an unattended lab with no OS on the target cannot see.
