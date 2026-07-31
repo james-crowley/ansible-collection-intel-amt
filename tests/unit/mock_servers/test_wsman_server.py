@@ -1745,11 +1745,21 @@ class TestRealClientPageSizeBoundaries:
     * **1** -- a page per instance, the maximum number of continuations, and the
       only size at which an off-by-one in the client's ``EnumerationContext``
       handling loses a specific instance rather than a whole page.
-    * **above the instance count** -- everything in the first Pull with
-      ``EndOfSequence`` and *no* ``EnumerationContext``, so a client that keys
-      "keep pulling" off the presence of a context rather than the absence of
-      ``EndOfSequence`` never loops at all. That firmware is real: AMT is entitled
-      to return the whole set at once.
+    * **above the instance count** -- everything in the first Pull, with
+      ``EndOfSequence`` and *no* ``EnumerationContext``. That firmware is real: AMT
+      is entitled to return the whole set at once. The test below proves exactly
+      that shape (single Pull, no continuation) for this mock.
+
+      It does *not* prove a client keys "keep pulling" off the absence of
+      ``EndOfSequence`` rather than the presence of a context: this mock's
+      ``_handle_pull`` never emits both in the same response (see
+      ``tests/integration/mock_servers/wsman_server.py``), so that confusion has
+      no response shape here to trigger it. Deleting the ``end_of_sequence is
+      None`` guard in ``wsman.py``'s ``enumerate()`` leaves this test passing.
+      That exact bug -- a context present *alongside* ``EndOfSequence`` -- is
+      caught instead by
+      ``tests/unit/plugins/module_utils/test_wsman.py::TestEnumeratePull::test_end_of_sequence_wins_even_when_a_context_is_also_present``,
+      which fabricates the response directly rather than going through this mock.
 
     Both are asserted with an exact Pull count, not just a complete result set,
     because a complete result set is what you get at *every* page size.
