@@ -956,6 +956,49 @@ jobs:
       - note-recovery-path-on-failure
 
   # -------------------------------------------------------------------------
+  # Hardware-in-the-loop, stage 12 (tests/hardware/qualify_wake_from_off.yml):
+  # wake-while-powered-off. LAST job in the chain, behind its own approval gate,
+  # downstream of hardware-sleep-hibernate.
+  #
+  # READ tests/hardware/PREFLIGHT.md before approving this one specifically. In
+  # short: this powers the machine off and then tries to reach and wake it over
+  # WS-Man. Unattended in CI, there is no independent confirmation available that
+  # the host was ever genuinely powered off -- "AMT reports off" is that same
+  # state machine's own self-report, not an outside observation. What a green run
+  # here DOES establish: WS-Man kept answering while AMT reported off, and an
+  # explicit power-on request issued in that state was accepted and landed. The
+  # owner has explicitly accepted the risk of a stranded machine needing a
+  # physical reset -- see PREFLIGHT.md's recovery steps -- so this job's failure
+  # output is written to say exactly what state the machine was left in rather
+  # than being watered down to avoid that risk.
+  hardware-wake-from-off:
+    machine: true
+    resource_class: crowley/amt-runner
+    steps:
+      - checkout
+      - verify-lab-credentials
+      - install-lab-ansible-venv
+      - render-lab-inventory
+      - export-hardware-limit
+      - run:
+          name: "Stage 12: wake-while-powered-off (unattended in CI; the approval gate is the human checkpoint)"
+          command: |
+            . .venv/bin/activate
+            ansible-playbook tests/hardware/qualify_wake_from_off.yml \
+              -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -e amt_qualify_attended=false -v
+      - redact-hardware-evidence
+      - store_artifacts:
+          # Runs on failure too -- a failed stage is exactly when the evidence
+          # matters, and note-recovery-path-on-failure below already tells the
+          # operator it was published. Safe because redact-hardware-evidence
+          # above also runs when: always, so nothing unredacted is ever stored.
+          path: tests/hardware/output
+          destination: hardware-evidence
+          when: always
+      - remove-lab-inventory
+      - note-recovery-path-on-failure
+
+  # -------------------------------------------------------------------------
   publish:
     executor:
       name: python
@@ -1230,6 +1273,27 @@ workflows:
               only: main
       - hardware-sleep-hibernate:
           requires: [hardware-sleep-hibernate-approval]
+          context: amt-lab-runner
+          filters:
+            branches:
+              only: main
+
+      # -----------------------------------------------------------------------
+      # Stage 12: wake-while-powered-off. LAST stage in the chain, behind its own
+      # approval -- read tests/hardware/PREFLIGHT.md before approving this one. A
+      # green run does not prove the host was ever genuinely, physically off;
+      # only an attended run with a human watching the machine or its KVM console
+      # can supply that. What it does prove: WS-Man stayed reachable while AMT
+      # reported off, and an explicit power-on request issued in that state was
+      # accepted and landed.
+      - hardware-wake-from-off-approval:
+          type: approval
+          requires: [hardware-sleep-hibernate]
+          filters:
+            branches:
+              only: main
+      - hardware-wake-from-off:
+          requires: [hardware-wake-from-off-approval]
           context: amt-lab-runner
           filters:
             branches:
