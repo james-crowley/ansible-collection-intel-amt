@@ -117,6 +117,36 @@ Verified against `argument_spec()` in `plugins/modules/amt_log_clear.py` and the
 not from assuming the mutation did what it said. If a firmware ever accepts `ClearLog` and
 leaves records behind, `records_after` is where that shows up.
 
+### A read after a clear is trustworthy — this was tested, not assumed
+
+**Post-clear reads are reliable, and this module carries no warning to the contrary
+because there is nothing to warn about.** It is worth stating positively, because the
+opposite was suspected: after the first hardware clear, a subsequent
+[`amt_event_log`](amt_event_log.md) read on the same machine returned far more entries
+than firmware's own record count, and the leading explanation was that `GetRecords` was
+serving records `ClearLog` had deleted.
+
+**It was measured, and it is false.** Not one of the records archived before the clear
+appeared anywhere in the read that followed it. The extra entries were **all-zero
+padding** — firmware returning a zero-filled 21-byte entry for each record slot the clear
+had freed, carrying no timestamp, no entity and no event data, and nothing whatsoever
+that was in the log before the clear. Nothing deleted is being served. The over-count was
+a defect in `amt_event_log`, which counted those empty slots as records; it is fixed in
+0.7.1 and reported there as `empty_slots`. The full accounting, and why the arithmetic
+made the wrong explanation look convincing, is in
+[`capability-matrix.md`](capability-matrix.md) under "The hypothesis that `GetRecords`
+serves records `ClearLog` deleted — tested and refuted".
+
+Two practical consequences:
+
+- **`records_after` was never exposed to that defect.** It is read from
+  `CurrentNumberOfRecords` on the log container, not by counting returned records, and
+  firmware's counter was correct throughout — it reported `18` while the read returned
+  `223` entries. The verification this module performs is the one that was right.
+- **A non-zero `empty_slots` on the next `amt_event_log` read is expected, not a
+  failure.** A clear that frees 205 slots can leave 205 slots to pad with. It means the
+  slots are empty, which is what a clear is for.
+
 ## Check mode
 
 **Fully supported, and it really reads.** `CurrentNumberOfRecords` is fetched so the preview

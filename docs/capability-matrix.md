@@ -29,11 +29,15 @@ implying a higher tier than it earns:
    this tier as well. A fifth run, 2026-07-31 (pipeline **208**), put stages 9-12 —
    event log, log clear, sleep/hibernate, and wake-while-off — to real firmware for
    the first time, on **machine 1 only**, and is the first run whose evidence carries
-   a per-file SHA-256 digest. All five runs are cited by workflow and job below.
+   a per-file SHA-256 digest. A sixth run re-ran stage 9 against **both** machines on
+   a log machine 1's stage-10 clear had emptied, and **found a real defect** —
+   `amt_event_log` was counting firmware's zero-filled empty record slots as records
+   (issue #105); machine 2 passed the identical stage cleanly. All six runs are cited
+   by workflow and job below where the identifiers exist.
 4. **Still unproven** — a short, specific list, kept honest.
 
 The collection is no longer "hardware-unverified". Hardware qualification found
-**six real defects** that neither the unit tier nor the mock-integration tier
+**seven real defects** that neither the unit tier nor the mock-integration tier
 could have found:
 
 | Defect | Why the mocks could not catch it |
@@ -44,6 +48,7 @@ could have found:
 | empty `<Source/>` rejected by the firmware's own schema | the mock's XML parser accepted the empty element happily |
 | role always issuing `reset`, which does nothing to a powered-off machine | required actually leaving a machine off, then trying to boot it |
 | role connection defaults resolving to `inventory_hostname` | any mock inventory happens to make that resolvable |
+| `amt_event_log` counting zero-filled empty record slots as records (#105) | the mock derived both the `GetRecords` record array **and** the container's own `CurrentNumberOfRecords` from one list, so the two could not disagree — and the defect is only visible when they do |
 
 That is the argument for the hardware tier existing, stated concretely rather
 than in principle.
@@ -215,16 +220,27 @@ a role in `roles/` is resolved by `ansible-test` as that role — so a target na
 `amt_baremetal_install` ran the role's `validate.yml` and none of its own tasks, a
 test that could not fail because it never executed.
 
-### `amt_event_log` and `amt_log_clear` — now Tier 3 on machine 1
+### `amt_event_log` and `amt_log_clear` — now Tier 3 on real firmware
 
 **This section used to say these two modules stop at Tier 2 — and only Tier 2 —
-because no hardware qualification stage exercised either of them. That is now false
-for machine 1.** Stage 9 (`qualify_event_log.yml`, read-only) and stage 10
-(`qualify_log_clear.yml`, irreversible) both ran for the first time against
-`amt-lab-01`, AMT 16.1.30, and both passed. `amt_event_log` and `amt_log_clear` are
-no longer listed again in Tier 4 in their entirety — see the dedicated Tier 3
-subsection below for the evidence and citation, and the note there about what is
-still missing: machine 2 has never run either stage.
+because no hardware qualification stage exercised either of them. That is now false.**
+Stage 9 (`qualify_event_log.yml`, read-only) and stage 10 (`qualify_log_clear.yml`,
+irreversible) both ran for the first time against `amt-lab-01`, AMT 16.1.30, and both
+passed. Stage 9 has since also run against `amt-lab-02`, AMT 19.0.5, and passed there
+too — and a later stage-9 re-run against machine 1, on a log stage 10 had cleared,
+**found a real defect in `amt_event_log`'s record accounting** (issue #105).
+`amt_event_log` and `amt_log_clear` are no longer listed again in Tier 4 in their
+entirety — see the dedicated Tier 3 subsections below for the evidence and citations,
+and the note there about what is still missing: machine 2 has never run stage 10.
+
+**That defect is the strongest argument in this document for why this tier is separate
+from Tier 2, so it belongs here as well as in Tier 3.** The mock WS-Man server derived
+both the `GetRecords` record array and the container's own `CurrentNumberOfRecords`
+from a single list, so no mock configuration could make them disagree, and the defect
+is invisible until they do. Every unit and integration test over this module passed
+while `records_read` could exceed `total_records` on real firmware. That is the
+mock-and-code-agree-while-both-wrong failure this document already names for
+`wake_on_lan_capable`, in a second, independent place.
 
 Their wire protocol and record layout still also rest on a captured real-firmware
 response fixture set plus MeshCentral, recorded in `docs/protocol-notes.md` §2.8 —
@@ -449,7 +465,7 @@ about this.
 
 Two machines have now each completed **all eight** stages, on the lab's self-hosted
 CircleCI runner (`crowley/amt-runner`), with TLS pinned to each endpoint's own
-reviewed leaf certificate. **Five** runs now contribute, on different dates and in
+reviewed leaf certificate. **Six** runs now contribute, on different dates and in
 different runner environments, and each is recorded as itself rather than averaged
 into one. Every one now carries the identifiers needed to go and look at it — see
 "Two limits on how far Tier 3 can be audited" below for what those identifiers do and
@@ -464,7 +480,8 @@ do not let a reader check:
 > sentence as "all twelve", and nothing in the first four runs should be read as
 > covering event-log, log-clear, sleep/hibernate or wake-from-off. The fifth run below,
 > and the dedicated subsections that follow the stage table, are what now covers those
-> four stages — on machine 1 only. Machine 2 has never run any of them.
+> four stages — on machine 1 only. A sixth run has since put **stage 9 alone** to
+> machine 2 as well; machine 2 has never run stages 10, 11 or 12.
 
 - **`amt-lab-01` (machine 1), AMT 16.1.30** — all eight stages *as they existed then*, 2026-07-28, on
   Python 3.10 (3.10.12) with ansible-core 2.17, against collection 0.1.0.
@@ -521,14 +538,31 @@ do not let a reader check:
   can re-hash the published artifact and check it against the run's own record. The
   four runs above this one remain permanently digest-less — see "Two limits on how far
   Tier 3 can be audited" below.
+- **Both machines, stage 9 only — the run that found issue #105.** Stage 9 was re-run
+  against `amt-lab-01` (AMT 16.1.30) after its stage-10 clear had emptied the log, and
+  against `amt-lab-02` (AMT 19.0.5). **Machine 1's run failed its accounting
+  assertion**, which is what surfaced the defect; machine 2 passed cleanly. This is the
+  first Tier 3 run recorded here that did **not** end green, and it is recorded as a
+  result of the tier rather than as an interruption of it — see "Stage 9 found a real
+  defect" below for the full accounting. Machine 1's reading is CircleCI job **2976**,
+  evidence file `hardware-evidence/amt-lab-01-qualify_event_log.json`; machine 2's clean
+  110-record read is on record for CircleCI **pipeline 226**. The same accounting
+  mismatch had already fired on machine 1 in pipeline **226**, before the stage was
+  reordered to write its evidence ahead of its assertions, so that earlier firing kept
+  none of the records that would have explained it — the reorder is why job 2976 has an
+  artifact at all. **No workflow UUID and no pipeline number is recorded for job 2976
+  here**, because neither was captured at the time and this document does not infer
+  identifiers from ordering; the job number and the evidence filename are what it can
+  cite, and they are cited.
 
 So power control, IDE-R media, the writable-image path and native one-time PXE are
 verified on **two machines across two firmware generations**, not one — and
 `amt_info`'s network and system-state facts are now verified on both of those
 generations too, which is what the third run added. The fourth run added the
 hardware/asset inventory on both. The fifth run added stages 9-12 — event log,
-log clear, sleep/hibernate, and wake-while-off — but on **machine 1 only**. See the
-subsections at the end of this tier.
+log clear, sleep/hibernate, and wake-while-off — but on **machine 1 only**. The sixth
+added stage 9 on machine 2, and found a defect on machine 1. See the subsections at the
+end of this tier.
 
 | Stage | Machines | What real firmware confirmed |
 |---|---|---|
@@ -541,7 +575,7 @@ subsections at the end of this tier.
 | 6 writable image | 1 and 2 | the device was presented **writable** — MODE_SENSE write-protect bit `0x00`, not `0x80`. On machine 2: `devices.floppy.writable = true`, `bytes_read = 0`, `bytes_written = 0`, `error_class = null` — same shape as machine 1, a writable device with no bytes transferred |
 | 7 native PXE | 1 and 2 | one-time PXE armed and read back as armed, reset issued and recovered, `AMT_BootSettingData` stable afterwards. On machine 2 the `before_arm` and `after_reset` snapshots agree, with `UseIDER=false`, `BIOSSetup=false`, `BootMediaIndex=0`. This also settled issue #13: the prefixed-namespace EPR form **is** accepted by real firmware, now on both generations |
 | 8 idempotent re-probe | 1 and 2 | repeated reads reported `changed: false` and agreed with each other; no session or state was left drifting behind the stages above |
-| 9 event log (read-only) | 1 only | a single `GetRecords` batch read the log to completion: `total_records: 205`, `records_read: 205`, `batches: 1`, `stop_reason: no_more_records`, `complete: true`, `truncated: false`, `filtered_out: 0`, every record decoding with `decode_error: null`. Log metadata decoded coherently alongside: `max_record_size: 21`, `current_number_of_records: 205`, `max_number_of_records: 390`, `overwrite_policy: 2`, `is_frozen: false`, `log_state: 4`. See the subsection below the table |
+| 9 event log (read-only) | 1 and 2 | On machine 1 (pipeline 208) a single `GetRecords` batch read the log to completion: `total_records: 205`, `records_read: 205`, `batches: 1`, `stop_reason: no_more_records`, `complete: true`, `truncated: false`, `filtered_out: 0`, every record decoding with `decode_error: null`. Log metadata decoded coherently alongside: `max_record_size: 21`, `current_number_of_records: 205`, `max_number_of_records: 390`, `overwrite_policy: 2`, `is_frozen: false`, `log_state: 4`. Machine 2 read **110 records** with `records_read == total_records` and passed cleanly. A later re-run against machine 1, on a log the stage-10 clear had emptied, **failed its accounting assertion and found a real defect** (issue #105) — the decode was unaffected. Two subsections below the table |
 | 10 log clear (irreversible) | 1 only | the same 205 records were archived to disk (`complete: true`) *before* the clear; `ClearLog` then reported `records_before: 205`, `records_after: 0`, `cleared: true`, `changed: true`, `return_value: 0`; a separate, independent re-read afterwards confirmed empty (`total_records: 0`, `records: []`, `stop_reason: "no_record_exists"`, `complete: true`). See the subsection below the table |
 | 11 sleep/hibernate | 1 only | all three actions — `sleep-light`, `sleep-deep`, `hibernate` — came back `outcome: "firmware_refused"`, `error_class: "remote_operation"`. AMT rejected every request itself, before it reached the platform; the machine was reported `on` throughout and was left `on`. See the dedicated subsection at the end of this tier — this is a **negative** result, and a consequential one |
 | 12 wake-while-off | 1 only | AMT answered WS-Man **3 for 3** while reporting itself powered off (`off_confirmed_by_amt`), accepted a wake request (`wake_request_accepted: true`), and the machine came back `on` (`restored_to`). `operator_attestation` is `null` — unattended CI has no way to supply it. See the dedicated subsection at the end of this tier for exactly what this does and does not establish |
@@ -818,8 +852,118 @@ event-code label *means*: stage 9 shows the layout decodes structurally and that
 sampled records' fields are plausible, not that every event-code name this collection
 has ever assigned is correct. That claim stays exactly where it already was — Tier 1 by
 citation, `docs/protocol-notes.md` §2.8 — for the same existence-vs-meaning reason drawn
-throughout this document. And both stages ran on **one machine, one firmware version**:
-machine 2, AMT 19.0.5, has never run either. See Tier 4.
+throughout this document. And both stages ran, in this run, on **one machine, one
+firmware version**. Stage 9 has since also run against machine 2 — see the next
+subsection. Stage 10 has not: `amt_log_clear` remains a one-machine, one-generation
+result. See Tier 4.
+
+### Stage 9 found a real defect: empty record slots counted as records (#105)
+
+**This is a success of the qualification tier, not a failure of it**, and it is the
+clearest example in this document of what the hardware tier is for. Stage 9 was re-run
+against `amt-lab-01` after the stage-10 clear above had emptied its log and the machine
+had partly refilled it, and the stage's **accounting** assertion fired. No other tier in
+this collection could have fired it: both the unit tier and the mock tier derived a
+`GetRecords` response's record array **and** the container's own
+`CurrentNumberOfRecords` from the same list, so those two numbers could not disagree
+there, and the defect is only visible when they do. Real firmware made them disagree.
+That is the seventh entry in the defect table at the top of this document.
+
+**Evidence.** `amt-lab-01`, AMT 16.1.30, CircleCI job **2976**, evidence file
+`hardware-evidence/amt-lab-01-qualify_event_log.json`:
+
+| Field | Value |
+|---|---|
+| `records_read` | **223** |
+| `total_records` | **18** |
+| `batches` | `1` |
+| `stop_reason` | `no_more_records` |
+| `truncated` | `false` |
+
+The 223 returned records collapse to **13 distinct values**: nine appearing once, three
+appearing three times each, and **one all-zero record repeated 205 times**, with
+`timestamp: 0`, `entity: 0` and `event_offset: 0`. 9 + (3 × 3) = **18 real records**,
+exactly what firmware reported in `total_records`.
+
+**Firmware's counter was correct, and this collection's was not.** The 205 repeats are
+empty record slots — slots freed by an earlier `ClearLog`, which archived 205 records
+immediately before it, the stage-10 clear recorded above. Firmware pads its `GetRecords`
+response with a zero-filled 21-byte entry for each freed slot. The correlation with the
+clear is real. **The defect is that `amt_event_log` counted those zero-filled empty
+slots as records**: `records_read` should have been 18. Fixed in **0.7.1** — see
+[`docs/amt_event_log.md`](amt_event_log.md) for what a caller saw before that and what
+changes after it.
+
+**The module already had the concept, applied to one assertion and not to the count.**
+Stage 9's timestamp assertion is scoped to every **non-sentinel** timestamp, which is
+precisely why it passed on this read while the accounting assertion failed: 205 records
+carrying the `0` timestamp sentinel were excluded from the timestamp check and still
+counted in the total. The gap was not a missing idea. It was an idea applied in one
+place and not the other.
+
+**Machine 2 passed the identical stage cleanly, and that is not a version difference.**
+`amt-lab-02`, AMT 19.0.5, ran the identical stage on the identical collection code and
+read **110 records** with `records_read == total_records` — no mismatch at all, decode
+assertion included (pipeline **226**, the run in which machine 1's mismatch fired). What
+separates the two machines is not the firmware generation but the **state of the log**:
+reproducing this needs a log that has been cleared and then only partly refilled, so
+that freed slots and live records coexist. Machine 1's log was in exactly that state
+because stage 10 had cleared it; machine 2's was not. Nobody should file this under
+"16.1.30 pads and 19.0.5 does not" — nothing measured here supports that, and machine 2
+has never been read on a freshly cleared log.
+
+**What this does not take away: the decode is untouched and still hardware-proven.**
+205 records read cleanly on 16.1.30 in pipeline 208, and 110 on 19.0.5 in pipeline 226.
+What was wrong is **accounting** — which returned entries count as records — not
+**decoding**. Every claim in the subsection above about the 21-byte layout, the
+`GetRecords` iteration and the per-field decode stands exactly as written; it is worth
+being explicit about that, because "the event-log stage found a bug" compresses very
+easily into "the event-log decode is suspect", and those are different sentences.
+
+#### The hypothesis that `GetRecords` serves records `ClearLog` deleted — tested and refuted
+
+**Recorded permanently, and plainly, because this is the kind of hypothesis that gets
+repeated as fact once it has been said out loud.** The leading explanation for the 205
+was that firmware was serving records `ClearLog` had already deleted — stale data
+surviving a clear. Had that been true the consequences would have been serious and wide:
+every post-clear `amt_event_log` read would have been untrustworthy, `amt_log_clear`
+would have needed a documented warning saying so, and the independent post-clear re-read
+that stage 10 relies on to confirm a clear actually happened would have been resting on
+nothing.
+
+**It was tested, and it is false.** Stage 10's archive holds all 205 records that
+existed before the clear. **Zero of them appear anywhere in this read.** The 205 repeats
+are one identical all-zero record — no timestamp, no entity, no event data, no content
+of any kind that was in the log before the clear. Nothing deleted is being served. The
+mechanism is **padding, not stale data**, and the two are not near-neighbours: one would
+mean firmware retains what it reports destroying; the other means firmware reports an
+empty slot as an empty slot and this collection failed to recognise one.
+
+**Why it was plausible — the coincidence, on the record.**
+`records_read − total_records` = 223 − 18 = **205**, exactly the number of records the
+clear had archived, and that arithmetic reproduced across two runs. It looked like a
+one-to-one correspondence between deleted records and served records. It is instead a
+coincidence of two counts that are necessarily equal for an entirely different reason: a
+clear that frees 205 slots leaves 205 slots to pad with. The identity holds without a
+single byte of deleted content surviving, which is why the arithmetic could never have
+settled it and only the record contents could.
+
+**`amt_log_clear` therefore does not gain a "post-clear reads are unreliable" warning,
+and must not.** Such a warning would state as a standing caveat the exact thing this
+measurement disproved. `amt_log_clear`'s documentation was re-checked against this
+finding and nothing in it was wrong: its `records_after` is read back from firmware's own
+`CurrentNumberOfRecords` rather than from counting returned records, so it was never
+exposed to this defect at all. See [`docs/amt_log_clear.md`](amt_log_clear.md), which
+records what a post-clear read looks like rather than warning against doing one.
+
+**What is still not established.** No source consulted by this collection describes this
+padding at all — not `go-wsman-messages`, not MeshCentral, not the response fixtures in
+[`protocol-notes.md`](protocol-notes.md) §2.8. So "firmware pads freed slots with
+zero-filled entries" is a claim resting on **one machine in one state**, measured here
+and nowhere corroborated. Whether padding is always trailing, whether a freed slot
+between live records is ever padded, and whether any other generation pads at all are
+all unmeasured. That is why the fix skips empty slots rather than treating the first one
+as end-of-data.
 
 ### Sleep and hibernate: firmware refuses all three, on machine 1
 
@@ -918,14 +1062,19 @@ check. What is recorded now, and what still is not:
   machine 2" resolves to one job UUID. The rows are not repeated with their own
   citations because a stage row that named its own job would have to name two — one
   per machine — and the run list already distinguishes them by date.
-- **Pipeline numbers exist for three of the five runs**, #93, 167 and 208. For machine
+- **Pipeline numbers exist for four of the six runs**, #93, 167, 208 and 226. For machine
   1's 2026-07-28 qualification and its 2026-07-29 read-only re-run, the workflow and job
   UUIDs were recovered and are recorded above, but the pipeline number was not: the
   API surface used to recover them returns run, workflow and job UUIDs and does not
   expose the pipeline number, and no commit message recorded it at the time. Those two
   runs are therefore cited by UUID and date only. **No pipeline number has been
   inferred from ordering** — sequence would make one easy to guess and a guessed
-  identifier is worse than an absent one in a document whose purpose is this.
+  identifier is worse than an absent one in a document whose purpose is this. The
+  sixth run is the thinnest citation in this tier and deliberately so: **job 2976 is
+  cited with no workflow UUID and no pipeline number**, because neither was captured
+  and the rule above forbids reconstructing them from the fact that 226 came earlier.
+  Its evidence file is named instead, which is what a reader can actually go and
+  fetch.
 - **Runs from now on carry a digest; the first four do not, permanently.** This used to
   read "no artifact digest is recorded anywhere" (issue #90). Every hardware job now
   emits `hardware-evidence/SHA256SUMS` — a SHA-256 per published evidence file,
@@ -968,12 +1117,17 @@ most an attended run or a small addition to the one that exists, said where it a
   alone. What is still unproven is narrower and unchanged — that bytes were *served* —
   because nothing at the other end issues a SCSI read during an unattended run. The
   artifact records what the engine did, not what a BIOS consumed.
-- **`amt_event_log` and `amt_log_clear` on machine 2.** Both modules are now Tier 3 on
-  machine 1 (stages 9 and 10, pipeline 208, 2026-07-31 — see the dedicated Tier 3
-  subsection). Machine 2 (AMT 19.0.5) has never run either stage. Closeable the
-  ordinary way: run stages 9 and 10 against machine 2, the same repeatability step
-  every other mutating stage has already had. Until then this is one machine, one
-  firmware version, not the two-generation coverage the rest of Tier 3 has.
+- **`amt_log_clear` on machine 2 — and `amt_event_log` on a *cleared* log on machine 2.**
+  This entry used to cover both modules; **half of it has closed.** Stage 9 has now run
+  against machine 2 (AMT 19.0.5) and passed, 110 records, `records_read ==
+  total_records` — so `amt_event_log` has two-generation coverage like the rest of
+  Tier 3. Two things are left, and they are narrower than what this entry used to say.
+  Stage 10 has still only ever run against machine 1, so `amt_log_clear` is still one
+  machine, one firmware version. And machine 2 has only ever been read on a log nobody
+  had cleared, so **whether AMT 19.0.5 pads freed record slots the way 16.1.30 does is
+  unmeasured** — the #105 finding rests on one machine in one log state, and the
+  ordinary way to close it is to run stage 10 against machine 2 and then stage 9 again
+  straight afterwards, which closes both halves of this entry in one approval.
 - **Sleep and hibernate on machine 2.** Stage 11 has run once, against machine 1, and
   the answer there was a clean, negative one — see the dedicated Tier 3 subsection.
   Whether AMT 19.0.5 answers the same three requests the same way is unmeasured;
@@ -1170,8 +1324,8 @@ generations in Tier 3 above.
 | 10.x, Enterprise/other modes | Yes | Present | Present | Present | **Inferred** — not tested |
 | 11.x+ Enterprise | Yes | Present | Present | Present | **Inferred** — not tested |
 | 12.x+ | Yes, enhanced | Present | Present | Present | **Inferred** — not tested |
-| **16.1.30** (machine 1) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages as they existed then** (2026-07-28). `amt_info`'s network/system-state facts came back fully populated on a read-only re-run (2026-07-29). Stages 9-12 then ran here for the first time (2026-07-31, pipeline 208): `amt_event_log`/`amt_log_clear` passed; `sleep-light`/`sleep-deep`/`hibernate` were all refused by firmware; wake-while-off answered WS-Man 3/3 and accepted a wake request |
-| **19.0.5** (machine 2) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages as they existed then** (2026-07-29). Capability flags were read live and all four came back `true`; the network/system-state facts came back fully populated here too |
+| **16.1.30** (machine 1) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages as they existed then** (2026-07-28). `amt_info`'s network/system-state facts came back fully populated on a read-only re-run (2026-07-29). Stages 9-12 then ran here for the first time (2026-07-31, pipeline 208): `amt_event_log`/`amt_log_clear` passed; `sleep-light`/`sleep-deep`/`hibernate` were all refused by firmware; wake-while-off answered WS-Man 3/3 and accepted a wake request. A later stage-9 re-run on a log the stage-10 clear had emptied returned **223 `RecordArray` entries against `CurrentNumberOfRecords: 18`** — 205 of them zero-filled padding for freed slots (issue #105, job 2976). Padding is observed on this generation and unmeasured on every other, this table's rows included |
+| **19.0.5** (machine 2) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages as they existed then** (2026-07-29). Capability flags were read live and all four came back `true`; the network/system-state facts came back fully populated here too. Stage 9 has since passed here (110 records, `records_read == total_records`, pipeline 226) — but on a log nobody had cleared, so this row says nothing about whether 19.0.5 pads freed slots |
 
 "Present" in the IDE-R/SOL/PXE columns means "AMT's published feature set for this
 generation includes it," per `docs/protocol-notes.md` §1.1 and Intel's own
@@ -1201,13 +1355,14 @@ still lists is therefore neither "a second machine" nor "a re-run of the first" 
 the specific things no green run on either machine measures — a list now split by
 whether running something would close it:
 
-- **Backlog** — that bytes were genuinely served during stage 5, `amt_event_log` and
-  `amt_log_clear` against real firmware on machine 2, the sleep/hibernate request path
-  on machine 2, and independent confirmation of physical power-off for stage 12.
-  Stages 9, 10, 11 and 12 have each now run once, against machine 1 only (pipeline
-  208, 2026-07-31) — see the dedicated Tier 3 subsections — so what is left in this
-  half of Tier 4 for those four stages is machine-2 repeatability and, for stage 12
-  specifically, the independent-confirmation step no CI run can supply.
+- **Backlog** — that bytes were genuinely served during stage 5, `amt_log_clear`
+  against real firmware on machine 2 (and with it, whether AMT 19.0.5 pads freed record
+  slots the way 16.1.30 does), the sleep/hibernate request path on machine 2, and
+  independent confirmation of physical power-off for stage 12. Stages 10, 11 and 12
+  have each run once, against machine 1 only (pipeline 208, 2026-07-31); stage 9 has
+  since run against both machines — see the dedicated Tier 3 subsections — so what is
+  left in this half of Tier 4 for those stages is machine-2 repeatability and, for
+  stage 12 specifically, the independent-confirmation step no CI run can supply.
 - **Accepted as out of reach** — a real SCSI write, a PXE exchange, the internal
   one-shot role bit, that a target OS genuinely enters S1/S3/S4/S5, and any third
   firmware generation. These are not waiting on anyone; they are what an unattended
