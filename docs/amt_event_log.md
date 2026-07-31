@@ -8,18 +8,22 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 Read the Intel AMT event log.
 
-> **Exercised against real firmware for the first time on 2026-07-31, on one machine.**
-> Hardware qualification stage 9 (`qualify_event_log.yml`) read `amt-lab-01`, AMT
-> 16.1.30 (CircleCI pipeline 208, job `hardware-tests` 2568), and passed: all 205
-> records read to completion, zero decode errors, the 21-byte record layout confirmed.
-> `amt-lab-02` (AMT 19.0.5) has never run this stage — see
-> [`capability-matrix.md`](capability-matrix.md) Tier 3 for the full result and Tier 4
-> for what a second machine would still add. The wire protocol and the record layout
-> were, and still are, also decoded per the sources recorded in
+> **Exercised against real firmware on both lab generations, and it found a bug.**
+> Hardware qualification stage 9 (`qualify_event_log.yml`) first read `amt-lab-01`, AMT
+> 16.1.30 (2026-07-31, CircleCI pipeline 208, job `hardware-tests` 2568), and passed: all
+> 205 records read to completion, zero decode errors, the 21-byte record layout
+> confirmed. It has since passed on `amt-lab-02`, AMT 19.0.5, too (110 records, pipeline
+> 226). A later re-run against `amt-lab-01`, on a log a `ClearLog` had emptied, **failed
+> its accounting assertion** and surfaced the record over-count fixed in 0.7.1 — see
+> "Empty record slots are not records" below and
+> [`capability-matrix.md`](capability-matrix.md) Tier 3 for the full accounting. **The
+> decode was not affected** and remains hardware-proven on both generations. The wire
+> protocol and the record layout were, and still are, also decoded per the sources
+> recorded in
 > [`protocol-notes.md`](protocol-notes.md) §2.8 — a captured real-firmware response
 > fixture set and MeshCentral. Every record is returned with its **raw bytes** alongside
 > the decoded fields regardless: a decode is not automatically trustworthy everywhere
-> merely because it decoded cleanly on one machine.
+> merely because it decoded cleanly on two machines.
 
 ## Purpose
 
@@ -59,6 +63,55 @@ cannot spin a play forever.
 **Truncation is never silent.** Compare `records_read` against `total_records` (which comes
 from `CurrentNumberOfRecords` on the log itself, not from counting what arrived) to tell a
 bounded read from a short log.
+
+### Empty record slots are not records
+
+Real firmware **pads** its `GetRecords` response. When a previous `ClearLog` has freed
+record slots, some generations return an all-zero 21-byte entry for each freed slot,
+alongside the real records, without counting those entries in
+`CurrentNumberOfRecords`. This module skips them: they do not appear in `records`, they
+are not counted in `records_read`, and `empty_slots` reports how many were excluded.
+
+**Versions before 0.7.1 counted them as records.** On a log with freed slots, a caller
+running 0.7.0 or earlier saw:
+
+- **`records_read` larger than `total_records`** — the one comparison this document tells
+  you to use to detect truncation, reading as though *more* records existed than firmware
+  admitted to. Measured on `amt-lab-01` (AMT 16.1.30): `records_read: 223` against
+  `total_records: 18`, with `stop_reason: no_more_records` and `truncated: false`.
+- **Entries in `records` with no timestamp, no entity, no severity and no event data** —
+  `timestamp: 0`, so `timestamp_utc: null` by the sentinel rule below, and every other
+  decoded field zero. They decoded without error; there was simply nothing in them.
+- **Any Jinja that counts, groups or reports over `records`** skewed by however many
+  slots the last clear had freed — 205 of the 223 above, one per archived record.
+
+Firmware's own count was correct throughout and is never adjusted; `records_read` was
+the number that was wrong. If you have a `records_read != total_records` check in a play
+and it fires on a recently cleared log, that is this bug, not a short read.
+
+**A non-zero `empty_slots` is normal, not a fault**, and it is specifically **not**
+evidence that deleted records are being served. That hypothesis was tested against the
+same firmware and disproven — none of the records a `ClearLog` archived appeared in the
+read that followed it, and the padding entries are all zero and carry nothing that was
+in the log before the clear. See [`capability-matrix.md`](capability-matrix.md), "The
+hypothesis that `GetRecords` serves records `ClearLog` deleted — tested and refuted".
+
+**The test is all 21 bytes zero and nothing weaker.** A record whose timestamp is `0`
+but whose other fields are populated is a firmware RTC fault worth seeing, not padding
+to discard, and is still returned. An all-zero record of any *other* length is still
+returned too, because an unexpected record length is itself a finding. A record that
+failed to decode is never treated as an empty slot: "we could not read these bytes" is
+not "we read them and they were empty".
+
+**Padding is observed on one generation, in one log state.** No source consulted here
+describes it — not the response fixtures in [`protocol-notes.md`](protocol-notes.md)
+§2.8, not MeshCentral, not `go-wsman-messages`. It was measured on AMT 16.1.30 on a
+freshly cleared log; `amt-lab-02` (AMT 19.0.5) has only ever been read on a log nobody
+had cleared, so whether it pads is unknown. Empty slots are therefore **skipped rather
+than treated as end-of-data**: on the one machine measured they were contiguous and
+strictly trailing, but "padding is always trailing" rests on that single observation,
+and stopping at the first one would silently discard every record after an interleaved
+slot on a generation that placed one there.
 
 ### Raw bytes are always returned
 
@@ -141,7 +194,8 @@ reading unfiltered and filtering in Jinja, where the dropped records are still i
 |---|---|---|
 | `records` | `list` of `dict` | The decoded records, in firmware's order. AMT normally stores the log **newest first**, so `records[0]` is usually the most recent event — compare `timestamp` rather than relying on position. |
 | `total_records` | `int` | `CurrentNumberOfRecords` from the log. `null` if firmware did not report it. |
-| `records_read` | `int` | How many records were read from firmware, before `severity` was applied. |
+| `records_read` | `int` | How many records were read from firmware, before `severity` was applied. Zero-filled empty record slots are **not** counted — see "Empty record slots are not records" above. |
+| `empty_slots` | `int` | How many all-zero `RecordArray` entries firmware returned that were excluded from `records`. `0` on a log firmware did not pad. New in 0.7.1. |
 | `filtered_out` | `int` | How many read records the `severity` filter removed. |
 | `truncated` | `bool` | `true` when `max_records` stopped the read while records remained. |
 | `complete` | `bool` | `true` when the iteration ended the way firmware said it should. |
@@ -203,9 +257,13 @@ and its raw bytes attached, so one unreadable record does not cost you the other
 
 ## Limitations
 
-- **Verified against real firmware on one machine, one generation.** Stage 9
-  (2026-07-31, `amt-lab-01`, AMT 16.1.30) passed; `amt-lab-02` (AMT 19.0.5) has never
-  run this stage. See [`capability-matrix.md`](capability-matrix.md) Tier 3.
+- **Verified against real firmware on both lab generations** — `amt-lab-01` (AMT
+  16.1.30, pipeline 208) and `amt-lab-02` (AMT 19.0.5, pipeline 226). See
+  [`capability-matrix.md`](capability-matrix.md) Tier 3.
+- **The empty-slot padding is measured on one generation, in one log state.** Only
+  16.1.30 has ever been read on a freshly cleared log, so whether any other firmware
+  pads freed slots — or pads them only at the end — is unmeasured, and no source
+  describes the behaviour at all. See "Empty record slots are not records" above.
 - The record layout, the method names, the `ReturnValue` maps and every value table are
   third-party-sourced. Each fact names its source in
   [`protocol-notes.md`](protocol-notes.md) §2.8, and anything still inferred says so — in

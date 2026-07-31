@@ -281,11 +281,22 @@ That document cites each run by workflow and job; this list is about interpreter
   (`hardware-evidence/SHA256SUMS`) -- see `docs/capability-matrix.md`'s Tier 3 audit-
   limits subsection for what that does and does not let a reader check for this run
   versus the four before it.
+- **Both machines, stage 9 only — the run that found issue #105.** Stage 9 was re-run
+  against `amt-lab-01` after its stage-10 clear had emptied the log, and against
+  `amt-lab-02`. **Machine 1 failed its accounting assertion** — `records_read: 223`
+  against `total_records: 18`, because firmware pads its `GetRecords` response with a
+  zero-filled entry per record slot the clear had freed and `amt_event_log` was counting
+  them. Machine 2 passed cleanly, 110 records. Machine 1's reading is CircleCI job
+  **2976**, evidence file `hardware-evidence/amt-lab-01-qualify_event_log.json`; machine
+  2's clean read is on record for **pipeline 226**. No workflow UUID and no pipeline
+  number is recorded for job 2976, and none is inferred from ordering. This is the only
+  run listed here that did not end green, and the defect it found is the seventh in
+  `docs/capability-matrix.md`'s hardware-defect table.
 
 None of the first four runs above cover stages 9-12 at all -- "all eight" in each of
 those bullets means all eight that existed on that date, not all twelve that exist
-now. The fifth run covers stages 9-12, but only on machine 1. See "Qualification
-order" below.
+now. The fifth run covers stages 9-12, but only on machine 1; the sixth adds stage 9
+on machine 2. See "Qualification order" below.
 
 Machine 2's run **clears GHSA-w8p5-mx5w-cpqj [HIGH] for the lab runner**: the 2.17
 line it previously used is EOL and permanently affected, and the runner is now
@@ -353,13 +364,23 @@ stage 1's playbook (`qualify_readonly.yml`).
     [`PREFLIGHT.md`](../tests/hardware/PREFLIGHT.md) for exactly what a run of this
     stage does and does not establish.
 
-**Stages 9-12 have now each run against real hardware once, on machine 1 only**
-(pipeline 208, 2026-07-31) — see "What the recorded qualifications ran on" above.
-All four passed: stage 9 read the log to completion with zero decode errors; stage
-10 archived, cleared and independently confirmed empty; stage 11 found firmware
-refused all three sleep/hibernate actions; stage 12 found AMT answering WS-Man and
-accepting a wake request while self-reporting off. None has yet run against
-machine 2 — see `docs/capability-matrix.md` Tier 4 for what that leaves open.
+**Stages 9-12 have each run against real hardware on machine 1** (pipeline 208,
+2026-07-31) — see "What the recorded qualifications ran on" above. All four passed:
+stage 9 read the log to completion with zero decode errors; stage 10 archived, cleared
+and independently confirmed empty; stage 11 found firmware refused all three
+sleep/hibernate actions; stage 12 found AMT answering WS-Man and accepting a wake
+request while self-reporting off. **Stage 9 has since also run against machine 2, and
+been re-run against machine 1 on the log stage 10 had cleared — where it failed and
+found a real defect** (issue #105, `amt_event_log` counting firmware's zero-filled empty
+record slots as records). Stages 10, 11 and 12 have still never run against machine 2 —
+see `docs/capability-matrix.md` Tier 4 for what that leaves open.
+
+**A failing qualification stage is the tier working.** Stage 9's failure is the reason
+issue #105 exists, and no unit or mock test in this repository could have produced it —
+the mock derived both the `GetRecords` record array and the container's own
+`CurrentNumberOfRecords` from one list, so they could not disagree there. Do not read
+"stage 9 failed" as a hardware-tier problem to be tidied away; it is the return on
+having the tier.
 
 **Qualify one machine through all twelve stages first.** A second machine proves
 repeatability. Never cut both over to a new stage at once — if a firmware quirk
@@ -386,20 +407,37 @@ Being explicit, because the gap matters:
   same call did reject an empty `<Source/>` — so this firmware demonstrably
   enforces its schema, which is what makes the passing result meaningful.
 - Mock servers implement the protocol *as we understand it*. A shared
-  misunderstanding between implementation and mock passes both.
+  misunderstanding between implementation and mock passes both. **Issue #105 is the
+  second recorded instance of exactly that** — after the `wake_on_lan_capable`
+  inversion — and the sharper of the two, because the agreement was structural rather
+  than a matter of understanding: the mock built the `GetRecords` record array and the
+  container's `CurrentNumberOfRecords` from the same list, so no configuration of it
+  could make the two disagree, and the bug lived entirely in the case where they do.
 - Real firmware differs across AMT generations and SKUs. Anything version
   dependent is unverified until step 1 runs on that generation.
-- **`amt_event_log` and `amt_log_clear` have now run against real hardware — once,
-  on one machine.** Stage 9 (read-only) and stage 10 (irreversible) both ran against
-  `amt-lab-01`, AMT 16.1.30, on 2026-07-31 (pipeline 208) and both passed: stage 9's
-  `AMT_MessageLog` iteration read all 205 records to completion with zero decode
-  errors, confirming the 21-byte layout against records a real ME actually wrote;
-  stage 10 archived those records, invoked `ClearLog`, and independently re-read the
-  log to confirm empty rather than trusting `ClearLog`'s own return value. `amt-lab-02`
-  (AMT 19.0.5) has never run either stage, so — unlike the other five modules — this
-  rests on one firmware generation, not two. See Tier 3 in
-  [`capability-matrix.md`](capability-matrix.md) for the full result and Tier 4 for
-  what machine-2 repeatability would still add.
+- **`amt_event_log` and `amt_log_clear` have now run against real hardware.** Stage 9
+  (read-only) and stage 10 (irreversible) both ran against `amt-lab-01`, AMT 16.1.30, on
+  2026-07-31 (pipeline 208) and both passed: stage 9's `AMT_MessageLog` iteration read
+  all 205 records to completion with zero decode errors, confirming the 21-byte layout
+  against records a real ME actually wrote; stage 10 archived those records, invoked
+  `ClearLog`, and independently re-read the log to confirm empty rather than trusting
+  `ClearLog`'s own return value. **Stage 9 has since passed on `amt-lab-02` (AMT 19.0.5,
+  110 records, pipeline 226) as well, so `amt_event_log` rests on two generations.**
+  Stage 10 has not run there, so `amt_log_clear` still rests on one. What no green run on
+  either machine covers is the **empty-slot padding**: only 16.1.30 has ever been read on
+  a freshly cleared log, which is the state that produced issue #105, so whether 19.0.5
+  pads freed record slots at all is unmeasured, and no source describes the behaviour.
+  See Tier 3 in [`capability-matrix.md`](capability-matrix.md) for the full result and
+  Tier 4 for what machine-2 repeatability would still add.
+- **A post-clear read does *not* serve deleted records, and that was tested rather than
+  assumed.** The over-count in issue #105 was first read as firmware serving records
+  `ClearLog` had deleted, which would have made every post-clear `amt_event_log` read
+  untrustworthy and the stage-10 confirmation re-read meaningless. **Zero** of the 205
+  records the clear archived appear in the read that followed it; the extra entries were
+  all-zero padding for freed slots. `amt_log_clear` therefore carries no "post-clear
+  reads are unreliable" warning, because that claim is disproven, not merely
+  unsubstantiated. See [`capability-matrix.md`](capability-matrix.md), "The hypothesis
+  that `GetRecords` serves records `ClearLog` deleted — tested and refuted".
 - **Stage 11 found that AMT 16.1.30 refuses `amt_power`'s sleep and hibernate actions
   outright.** The same 2026-07-31 run issued `sleep-light`, `sleep-deep` and
   `hibernate` against `amt-lab-01` for the first time any hardware stage had issued
