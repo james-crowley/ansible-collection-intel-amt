@@ -38,3 +38,7 @@ htmlcov/
 
 # Agent worktrees created by Claude Code. Never part of the collection.
 .claude/worktrees/
+
+# ansible-lint materialises this to make the checkout resolvable as its own
+# collection (the same symlink trick the CI lint job does). Never part of the source.
+.ansible/
