@@ -1,0 +1,105 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Issue #103: the input class neither of the two crashes it reports was ever
+# exercised by anything -- "a summary task is only exercised on the path the
+# run actually takes, so the paths it does not take are untested by
+# construction". This playbook is that missing path: it drives the real task
+# logic in _qualify_readonly_hardware_summary.yml (factored out of
+# qualify_readonly.yml for exactly this reason) against a synthetic `amt_hw`
+# shaped like an amt_info OLDER than 0.6.0 -- `amt.hardware` carries all six
+# fact groups, but `operation` has no `hardware_reads` key at all. No real
+# firmware, no mock server, no network: this is local-only and safe to run
+# anywhere, unlike every other file in this directory.
+#
+# What "pass" means here is specific and worth stating: this fixture is
+# SUPPOSED to fail the "Require the read outcomes and the fact values to
+# agree" assertion (reads | length == 6 is false against an empty reads), and
+# that is a correct, honest report that the summary cannot cross-check an
+# amt_info this old. The defect issue #103 found and this test pins is that,
+# before the `| default({}, true)` fix, the whole block raised out of the
+# template engine on the "operation.hardware_reads" subscript BEFORE that
+# assertion -- or any of the ones after it, including the one written to name
+# this exact case -- ever ran. So this test does not assert "no failure"; it
+# asserts the failure is the graceful, expected assertion (whose message it
+# checks for) and not a Jinja/AttributeError-shaped crash.
+#
+# Run directly:
+#   ansible-playbook tests/hardware/test_qualify_readonly_legacy_shape.yml -v
+
+- name: "Issue #103: exercise the hardware summary against an amt_info-older-than-0.6.0 shape"
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  vars:
+    amt_output_dir: "{{ playbook_dir }}/output"
+    # amt.hardware carries all six documented fact groups -- this fixture is
+    # not testing the "wrong key set" guard above it, only the
+    # hardware_reads-shaped crash below it -- while `operation` is missing
+    # `hardware_reads` entirely, which is precisely what "amt_info older than
+    # 0.6.0" means in every comment in this directory that names that case.
+    amt_hw:
+      amt:
+        hardware:
+          chassis: {manufacturer: "Test Corp", serial_number: "CHASSIS-1"}
+          baseboard: {manufacturer: "Test Corp", serial_number: null}
+          processors: []
+          chips: []
+          memory: []
+          storage: []
+      operation:
+        wsman_requests_estimated: 3
+
+  tasks:
+    - name: Ensure the evidence output directory exists (the included tasks write to it)
+      ansible.builtin.file:
+        path: "{{ amt_output_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Drive the real hardware-summary task logic against the legacy-shape fixture
+      block:
+        - name: Include the production task file under test
+          ansible.builtin.include_tasks: _qualify_readonly_hardware_summary.yml
+        - name: Fail this test -- the fixture must not pass cleanly
+          ansible.builtin.fail:
+            msg: >-
+              The legacy-shape fixture (no operation.hardware_reads) passed the
+              hardware summary cleanly. That is wrong either way: either the
+              fixture stopped exercising the case this test exists for, or the
+              "Require the read outcomes and the fact values to agree"
+              assertion stopped requiring reads | length == 6.
+      rescue:
+        - name: Require the failure to be the expected, graceful assertion -- not a template crash
+          ansible.builtin.assert:
+            that:
+              # The graceful outcome: default({}, true) turned the missing key
+              # into an ordinary "reads | length == 6" assertion failure, whose
+              # fail_msg is the one this exact task defines.
+              - ansible_failed_result.msg is defined
+              - "'operation.hardware_reads disagrees with amt.hardware' in ansible_failed_result.msg"
+              # The crash this test exists to catch a regression of: before the
+              # #103 fix, `reads: "{{ amt_hw.operation.hardware_reads }}"` with
+              # no default raised out of the template engine, and Ansible's
+              # own message for that shape names the missing attribute rather
+              # than this task's fail_msg.
+              - "'has no attribute' not in ansible_failed_result.msg"
+              - "'is undefined' not in ansible_failed_result.msg"
+            fail_msg: >-
+              Got a failure, but not the expected one. This is the exact
+              regression issue #103 fixed: an undefaulted
+              amt_hw.operation.hardware_reads subscript crashes the whole
+              block before any assertion -- including this one -- gets to
+              report anything. ansible_failed_result.msg={{ ansible_failed_result.msg | default('(none)') }}
+            success_msg: >-
+              The legacy-shape fixture failed exactly where it should: the
+              read-outcomes-agree assertion reported a normal, diagnosable
+              mismatch rather than crashing the template engine before any
+              assertion ran.
+
+    - name: Clean up the evidence file this run wrote
+      ansible.builtin.file:
+        path: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_hardware_inventory.json"
+        state: absent
