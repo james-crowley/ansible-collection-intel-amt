@@ -277,6 +277,11 @@ _RECORD_STRUCT = struct.Struct(f"<IBBBBBBBBB{EVENT_DATA_SIZE}s")
 #: exact failure mode of the prior art.
 _TIMESTAMP_SENTINELS = frozenset({0x00000000, 0xFFFFFFFF})
 
+#: Hex of a record whose every byte is zero. An **empty record slot**, not a
+#: record -- see :func:`is_empty_record_slot` for the evidence and for why the
+#: test is this strict.
+_EMPTY_SLOT_HEX = bytes(RECORD_SIZE).hex()
+
 #: Errors that mean "this firmware does not have this class", as opposed to a
 #: transport or credential failure. Mirrors ``client.py``'s ``_DEGRADABLE_ERRORS``.
 _DEGRADABLE_ERRORS: tuple[type[AmtError], ...] = (ProtocolError, UnsupportedCapabilityError)
@@ -482,6 +487,45 @@ def decode_record(encoded: str) -> EventRecord:
     )
 
 
+def is_empty_record_slot(record: EventRecord) -> bool:
+    """Is this an **empty log slot** that ``GetRecords`` returned as if it were a record?
+
+    Measured on real firmware, not inferred. ``amt-lab-01`` (AMT 16.1.30, CircleCI
+    job 2976, evidence file ``amt-lab-01-qualify_event_log.json``) answered one
+    ``GetRecords`` call with 223 ``RecordArray`` elements while
+    ``CurrentNumberOfRecords`` said 18, and set ``NoMoreRecords``. The 223 collapse
+    to 13 distinct values: 18 real records (9 appearing once, 3 appearing three
+    times), followed by **one all-zero record repeated 205 times**. 205 is the
+    number of slots a ``ClearLog`` earlier the same day had freed. Firmware's
+    counter was right and this collection's ``records_read`` was wrong: it counted
+    zero-filled padding as records (issue #105).
+
+    Zero of the 205 records that ``ClearLog`` archived appear in that read, so this
+    is **padding, not stale data** -- nothing deleted is being served. That mattered
+    enough to test, because the alternative would have needed a warning on
+    :mod:`amt_log_clear`.
+
+    **The test is deliberately strict: all 21 bytes zero, and nothing weaker.**
+
+    * Not ``timestamp == 0``. A record with a zero clock but a populated body is a
+      firmware RTC fault, which is a finding an operator wants to see, not
+      padding to discard. Those records are returned, with ``timestamp_utc: null``
+      (see :data:`_TIMESTAMP_SENTINELS`) so no time is claimed for them.
+    * Not "shorter or longer than 21 bytes and all zero". An unexpected record
+      length is itself a finding and no source describes what a longer record
+      holds, so an all-zero 25-byte record is kept and left visible.
+    * Never a record that failed to decode -- ``decode_error`` set means the bytes
+      were not understood, which is not the same as understanding them to be empty.
+
+    Nothing is lost by discarding a genuinely all-zero record even if some firmware
+    somewhere emits one on purpose: it names no time, no entity (0 is
+    ``Unspecified``), no severity (0 is ``unspecified``), no sensor and no event
+    data. It is indistinguishable from an empty slot because it carries no
+    information to distinguish it with.
+    """
+    return record.decode_error is None and record.raw_hex == _EMPTY_SLOT_HEX
+
+
 def _format_timestamp(timestamp: int) -> str | None:
     """Render the ``UINT32`` timestamp as an ISO-8601 UTC string, or ``None``.
 
@@ -558,6 +602,10 @@ class MessageLogRead:
       exist and were not fetched.
     * anything else -- the iteration ended abnormally and ``complete`` is
       ``False``. The records collected so far are still returned.
+
+    ``records`` holds only real records: zero-filled empty slots are excluded (see
+    :func:`is_empty_record_slot`) and counted in ``empty_slots`` instead, so the
+    padding is still reported rather than merely dropped.
     """
 
     properties: MessageLogProperties
@@ -567,6 +615,10 @@ class MessageLogRead:
     complete: bool
     stop_reason: str
     batches: int
+    #: How many all-zero empty slots ``GetRecords`` returned and this read excluded
+    #: from ``records``. Non-zero means firmware padded its response -- normal on a
+    #: log that was cleared and is refilling, and not a fault.
+    empty_slots: int = 0
 
 
 def get_log_properties(wsman: WsmanClient) -> MessageLogProperties:
@@ -689,6 +741,32 @@ def read_records(
     Never loops forever: an iteration whose identifier stops advancing while
     still claiming more records terminates with ``stop_reason ==
     "iteration_stalled"`` and ``complete == False``.
+
+    **Zero-filled empty slots are skipped, not counted, and do not stop the read.**
+    Firmware pads its ``RecordArray`` with all-zero 21-byte entries for slots a
+    previous ``ClearLog`` freed (:func:`is_empty_record_slot` records the
+    measurement). Those entries are excluded from ``records`` and tallied in
+    ``empty_slots``.
+
+    *Skipped* rather than treated as end-of-data, deliberately, and the observed
+    data does not settle it on its own. On ``amt-lab-01`` all 205 padding entries
+    were **contiguous and strictly trailing** -- eighteen real records, then 205
+    zeros, in one batch that firmware had already flagged ``NoMoreRecords``. So
+    stopping at the first zero would have been correct there and would have saved
+    exactly nothing: there was no second round trip to avoid. What it would risk is
+    the one failure this module exists not to have. Nothing in either source
+    describes this padding at all, so "padding is always trailing" rests on a single
+    firmware in a single state; if some generation interleaves a freed slot between
+    live records, stopping would silently discard every record after it and report a
+    complete read -- which is the prior art's defect exactly. Skipping costs one
+    wasted decode per padded slot and can never lose a record.
+
+    ``max_records`` continues to bound the number of ``RecordArray`` elements
+    *consumed from firmware*, not the number of real records kept. Budgeting on kept
+    records instead would mean a firmware serving nothing but padding across
+    advancing identifiers never reaches the bound, leaving ``NoMoreRecords`` as the
+    only thing that could end the loop -- a new way to hang a play, which is the
+    thing ``max_records`` exists to prevent.
     """
     properties = get_log_properties(wsman)
     total_records = properties.current_number_of_records
@@ -706,13 +784,17 @@ def read_records(
         )
 
     records: list[EventRecord] = []
+    #: RecordArray elements taken from firmware, real records and padding alike.
+    #: This -- not len(records) -- is what max_records bounds; see the docstring.
+    consumed = 0
+    empty_slots = 0
     batches = 0
     stop_reason = "no_more_records"
     complete = True
     truncated = False
 
     while True:
-        if len(records) >= max_records:
+        if consumed >= max_records:
             stop_reason = "max_records"
             # Reaching here means firmware had *not* set NoMoreRecords -- that
             # check breaks out below, before control returns to the top of the
@@ -723,7 +805,7 @@ def read_records(
             complete = False
             break
 
-        remaining = max_records - len(records)
+        remaining = max_records - consumed
         output, return_value = _invoke_tolerating_return_values(
             wsman,
             "GetRecords",
@@ -747,8 +829,14 @@ def read_records(
             complete = False
             break
 
-        batch = _record_array(output)
-        records.extend(decode_record(item) for item in batch[:remaining])
+        batch = _record_array(output)[:remaining]
+        consumed += len(batch)
+        for item in batch:
+            record = decode_record(item)
+            if is_empty_record_slot(record):
+                empty_slots += 1
+                continue
+            records.append(record)
 
         if truthy(output.get("NoMoreRecords")):
             stop_reason = "no_more_records"
@@ -778,6 +866,7 @@ def read_records(
         complete=complete,
         stop_reason=stop_reason,
         batches=batches,
+        empty_slots=empty_slots,
     )
 
 

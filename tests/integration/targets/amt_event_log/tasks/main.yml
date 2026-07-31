@@ -26,6 +26,7 @@
     tls_ready_file: "{{ scratch_dir.path }}/wsman_tls_ready.json"
     empty_ready_file: "{{ scratch_dir.path }}/wsman_empty_ready.json"
     absent_ready_file: "{{ scratch_dir.path }}/wsman_absent_ready.json"
+    padded_ready_file: "{{ scratch_dir.path }}/wsman_padded_ready.json"
 
 - name: Start the plaintext mock WS-Man server
   ansible.builtin.shell: |
@@ -86,7 +87,28 @@
   changed_when: false
   delegate_to: localhost
 
-- name: Wait for all four mock servers to report ready
+# Issue #105, the state that only real hardware had ever produced: a log a ClearLog
+# freed slots in, which has only partially refilled. GetRecords pads its response with
+# zero-filled 21-byte records for the freed slots while CurrentNumberOfRecords counts
+# only the real ones -- amt-lab-01 (AMT 16.1.30) returned 223 elements for an 18-record
+# log. A start-up flag rather than something a task can do, because ClearLog through
+# this mock empties the records and the counter together, exactly as firmware's does:
+# no sequence of requests against a default server can make the two disagree.
+- name: Start a mock WS-Man server whose event log has freed, zero-filled record slots
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ padded_ready_file }} \
+      --message-log-empty-slots 5 \
+      > {{ scratch_dir.path }}/wsman_padded.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: padded_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Wait for all five mock servers to report ready
   ansible.builtin.wait_for:
     path: "{{ item }}"
     state: present
@@ -96,6 +118,7 @@
     - "{{ tls_ready_file }}"
     - "{{ empty_ready_file }}"
     - "{{ absent_ready_file }}"
+    - "{{ padded_ready_file }}"
   delegate_to: localhost
 
 - name: Read mock server connection info and pids
@@ -104,10 +127,12 @@
     tls_info: "{{ lookup('ansible.builtin.file', tls_ready_file) | from_json }}"
     empty_info: "{{ lookup('ansible.builtin.file', empty_ready_file) | from_json }}"
     absent_info: "{{ lookup('ansible.builtin.file', absent_ready_file) | from_json }}"
+    padded_info: "{{ lookup('ansible.builtin.file', padded_ready_file) | from_json }}"
     plain_pid: "{{ plain_start.stdout | trim }}"
     tls_pid: "{{ tls_start.stdout | trim }}"
     empty_pid: "{{ empty_start.stdout | trim }}"
     absent_pid: "{{ absent_start.stdout | trim }}"
+    padded_pid: "{{ padded_start.stdout | trim }}"
 
 - name: Exercise amt_event_log against the mock servers
   block:
@@ -344,6 +369,70 @@
           - empty_read.complete == true
           - empty_read.batches == 0
 
+    # Issue #105. The one thing the unit tests cannot do: run the whole module, over a
+    # socket, against a server whose CurrentNumberOfRecords and GetRecords array
+    # genuinely disagree the way amt-lab-01's did. This is the state that shipped the
+    # defect, and until the mock could serve it, nothing but hardware could catch it.
+    - name: Read an event log whose freed record slots are still zero-filled
+      james_crowley.intel_amt.amt_event_log:
+        host: 127.0.0.1
+        port: "{{ padded_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: padded_read
+
+    - name: Assert zero-filled slots are excluded from the records and counted separately
+      ansible.builtin.assert:
+        that:
+          - padded_read.records | length == 6
+          - padded_read.records_read == 6
+          - padded_read.empty_slots == 5
+          # The accounting that was self-inconsistent on real firmware, restored. This is
+          # the exact comparison the hardware qualification stage makes.
+          - padded_read.records_read <= padded_read.total_records
+          - padded_read.total_records == 6
+          # Not folded into the severity filter's counter: no filter was set here, and a
+          # caller reading filtered_out == 0 as "nothing else was dropped" must stay right.
+          - padded_read.filtered_out == 0
+          - padded_read.records | selectattr('raw_hex', 'equalto', '0' * 42) | list | length == 0
+        fail_msg: >-
+          amt_event_log returned {{ padded_read.records_read }} record(s) against
+          total_records={{ padded_read.total_records }} and
+          empty_slots={{ padded_read.empty_slots }}. On real firmware this read
+          223 against 18 (issue #105): the 205 extra entries were zero-filled empty
+          slots the module counted as records.
+
+    - name: Assert padding is not a fault and does not stop the iteration early
+      ansible.builtin.assert:
+        that:
+          - padded_read.changed == false
+          - padded_read.complete == true
+          - padded_read.truncated == false
+          - padded_read.stop_reason == 'no_more_records'
+          # 11 elements on the wire at the mock's batch size of 2. Three batches would
+          # mean the client stopped at the first zero-filled element and silently threw
+          # away everything after it -- which would satisfy every count above.
+          - padded_read.batches == 6
+        fail_msg: >-
+          A padded log must read to its end like any other. Got
+          batches={{ padded_read.batches }}, stop_reason={{ padded_read.stop_reason }},
+          complete={{ padded_read.complete }}.
+
+    - name: Assert every record the padded read kept still decoded cleanly
+      ansible.builtin.assert:
+        that:
+          - padded_read.records | selectattr('decode_error', 'none') | list | length == 6
+          - padded_read.records | map(attribute='timestamp') | select('equalto', 0) | list | length == 0
+          # The same records the unpadded server returns, and only those.
+          - padded_read.records | map(attribute='raw_base64') | sort == full_read.records | map(attribute='raw_base64') | sort
+        fail_msg: >-
+          The padded read must return exactly the real records, unchanged. Excluding
+          empty slots must not have excluded, reordered or damaged anything else.
+
     - name: Read from firmware with no AMT_MessageLog class at all
       james_crowley.intel_amt.amt_event_log:
         host: 127.0.0.1
@@ -415,6 +504,7 @@
         - "{{ tls_pid }}"
         - "{{ empty_pid }}"
         - "{{ absent_pid }}"
+        - "{{ padded_pid }}"
       delegate_to: localhost
       ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup; the assertions above are what must pass.
       changed_when: false

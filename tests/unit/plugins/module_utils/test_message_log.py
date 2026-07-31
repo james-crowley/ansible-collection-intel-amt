@@ -49,6 +49,14 @@ REAL_RECORD_AUTH_FAILURE = "Y8iYZf8GbwVoEP8mYaoKAAAAAAAA"
 #: "PCI resource configuration".
 REAL_RECORD_FIRMWARE_PROGRESS = "IgYBZf8PbwJoAf8iAEAHAAAAAAAA"
 
+#: An **empty record slot** as real firmware sends it: 21 zero bytes, base64. Copied
+#: verbatim from the ``raw_base64`` of the record that appears **205 times** in the
+#: 223-element read from ``amt-lab-01`` (AMT 16.1.30) captured as
+#: ``hardware-evidence/amt-lab-01-qualify_event_log.json`` on CircleCI job 2976 --
+#: the read whose ``CurrentNumberOfRecords`` was 18. Not constructed here; the string
+#: is the evidence.
+EMPTY_SLOT = "AAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
 
 def _encode(
     *,
@@ -590,6 +598,321 @@ class TestReadRecordsEmptyAndAbnormal:
         read = message_log.read_records(wsman)
         assert len(read.records) == 2
         assert read.complete is False
+
+
+class TestEmptyRecordSlots:
+    """``is_empty_record_slot`` -- the strict all-21-bytes-zero test, and its edges.
+
+    Anchored on the **real firmware padding string** ``amt-lab-01`` (AMT 16.1.30)
+    actually sent, taken verbatim from the evidence artifact
+    ``hardware-evidence/amt-lab-01-qualify_event_log.json`` on CircleCI job 2976,
+    where it appears 205 times in a 223-element ``RecordArray`` whose
+    ``CurrentNumberOfRecords`` was 18 (issue #105).
+
+    The point of these tests is the *strictness*, not the happy path. A looser test
+    -- ``timestamp == 0``, say -- would pass every assertion about padding while
+    quietly discarding a real event from a firmware with a faulty RTC, which is a
+    finding an operator needs rather than noise to swallow.
+    """
+
+    def test_the_padding_string_real_firmware_sent_is_recognised_as_a_slot(self):
+        record = message_log.decode_record(EMPTY_SLOT)
+        assert record.raw_hex == "00" * message_log.RECORD_SIZE
+        assert message_log.is_empty_record_slot(record) is True
+
+    def test_a_slot_still_decodes_and_still_carries_its_raw_bytes(self):
+        """Recognising a slot must not turn it into an undecodable record.
+
+        The classification is a *judgement about* a cleanly decoded record, not a
+        decode failure. If it were reported as ``decode_error`` instead, the hardware
+        stage's "every record decoded cleanly" assertion would start failing on a
+        cleared log -- and that assertion is about the 21-byte layout, which is not
+        what is wrong here.
+        """
+        record = message_log.decode_record(EMPTY_SLOT)
+        assert record.decode_error is None
+        assert record.raw_base64 == EMPTY_SLOT
+        assert record.raw_length == 21
+        assert record.timestamp == 0
+        assert record.timestamp_utc is None
+
+    def test_a_zero_timestamp_with_a_populated_body_is_not_a_slot(self):
+        """The case the strict test exists for: an RTC fault on a real event.
+
+        Every other byte is populated, so this record says *something* -- a critical
+        event from the ME. Only its clock is wrong. Discarding it would hide a
+        firmware fault; keeping it with ``timestamp_utc: null`` reports both facts.
+        """
+        record = message_log.decode_record(_encode(timestamp=0, event_severity=16, entity=38, event_sensor_type=6))
+        assert message_log.is_empty_record_slot(record) is False
+        assert record.timestamp == 0
+        assert record.timestamp_utc is None
+        assert record.event_severity_text == "critical"
+
+    def test_a_record_that_is_zero_everywhere_but_one_byte_is_not_a_slot(self):
+        """One non-zero byte anywhere is enough. Checked at both ends of the struct."""
+        only_severity = message_log.decode_record(
+            _encode(
+                timestamp=0,
+                device_address=0,
+                event_sensor_type=0,
+                event_type=0,
+                event_offset=0,
+                event_source_type=0,
+                event_severity=2,
+                sensor_number=0,
+                entity=0,
+                event_data=bytes(8),
+            )
+        )
+        only_last_data_byte = message_log.decode_record(
+            _encode(
+                timestamp=0,
+                device_address=0,
+                event_sensor_type=0,
+                event_type=0,
+                event_offset=0,
+                event_source_type=0,
+                event_severity=0,
+                sensor_number=0,
+                entity=0,
+                event_data=bytes(7) + b"\x01",
+            )
+        )
+        assert message_log.is_empty_record_slot(only_severity) is False
+        assert message_log.is_empty_record_slot(only_last_data_byte) is False
+
+    @pytest.mark.parametrize("encoded", [REAL_RECORD_AUTH_FAILURE, REAL_RECORD_FIRMWARE_PROGRESS])
+    def test_a_real_firmware_record_is_never_a_slot(self, encoded):
+        assert message_log.is_empty_record_slot(message_log.decode_record(encoded)) is False
+
+    def test_an_all_zero_record_longer_than_21_bytes_is_not_a_slot(self):
+        """Strict means strict: an unexpected record length is itself a finding.
+
+        No source describes what a record longer than ``MaxRecordSize`` holds, so a
+        25-byte all-zero record is left visible rather than being assumed to be the
+        same padding the 21-byte one is.
+        """
+        record = message_log.decode_record(base64.b64encode(bytes(25)).decode("ascii"))
+        assert record.decode_error is None
+        assert record.raw_length == 25
+        assert message_log.is_empty_record_slot(record) is False
+
+    def test_an_all_zero_record_shorter_than_21_bytes_is_not_a_slot(self):
+        """Decided by length, not by ``decode_error``.
+
+        ``bytes(5)`` produces a 10-hex-character ``raw_hex``, which already cannot
+        equal the 42-character ``_EMPTY_SLOT_HEX`` -- so the ``raw_hex`` comparison
+        alone rejects this record. ``decode_error`` being set is incidental here: this
+        test still passes if the predicate's ``decode_error is None`` clause is
+        deleted, so it must not be read as coverage for that clause. See
+        ``test_a_failed_decode_that_happens_to_carry_all_zero_bytes_is_not_a_slot``
+        for a test that actually isolates it.
+        """
+        record = message_log.decode_record(base64.b64encode(bytes(5)).decode("ascii"))
+        assert record.decode_error is not None
+        assert message_log.is_empty_record_slot(record) is False
+
+    def test_an_undecodable_record_is_never_a_slot(self):
+        """Decided by ``raw_hex``, not by ``decode_error`` -- despite the name.
+
+        Neither ``"not base64!!"`` nor ``""`` ever produces a ``raw_hex`` at all (both
+        fail before the bytes are even decoded), so ``raw_hex == _EMPTY_SLOT_HEX`` is
+        already ``False`` and decides both cases on its own. This reads as "not
+        readable is not the same as read-and-empty", but it does not actually exercise
+        that distinction in the predicate -- it would pass unchanged if
+        ``is_empty_record_slot`` were simplified to the ``raw_hex`` comparison alone.
+        See ``test_a_failed_decode_that_happens_to_carry_all_zero_bytes_is_not_a_slot``
+        for the test that isolates the ``decode_error`` clause itself.
+        """
+        assert message_log.is_empty_record_slot(message_log.decode_record("not base64!!")) is False
+        assert message_log.is_empty_record_slot(message_log.decode_record("")) is False
+
+    def test_a_failed_decode_that_happens_to_carry_all_zero_bytes_is_not_a_slot(self):
+        """The one test that actually isolates the ``decode_error`` clause.
+
+        Every other case in this class -- including the two directly above -- fails to
+        decode *and* has a ``raw_hex`` that cannot equal ``_EMPTY_SLOT_HEX``, so the
+        byte comparison alone already decides them and the ``decode_error is None``
+        clause is never the deciding factor. That combination is not a coincidence:
+        ``decode_record`` has no path that produces ``decode_error`` set together with
+        21 all-zero bytes. Its only failure modes are bad base64 (no ``raw_hex`` at
+        all) and a record shorter than 21 bytes (a ``raw_hex`` too short to match); 21
+        zero bytes always decode cleanly. **This state is not reachable through
+        ``decode_record`` today** -- it is constructed directly on the dataclass
+        because no input can be handed to ``decode_record`` to reach it.
+
+        The guard is tested anyway because it is cheap, deliberate insurance against a
+        future decode that could fail on a 21-byte input (a checksum, a reserved-bits
+        check, anything not implemented today) while still reading as all zeros. A
+        future reader who notices the clause is unreachable and is tempted to delete
+        it as dead code should see this test and understand why it is being kept
+        honest instead: is_empty_record_slot must say **False**. Padding is a
+        *judgement about a clean decode*; a decode failure is a different finding
+        regardless of what the bytes look like, and folding the two together is
+        exactly the kind of silent record loss issue #105 exists to prevent. Deleting
+        the ``record.decode_error is None`` clause from the predicate makes this test
+        fail without changing a single byte of input -- unlike the two tests above it.
+        """
+        record = message_log.EventRecord(
+            raw_base64=EMPTY_SLOT,
+            raw_hex=message_log._EMPTY_SLOT_HEX,
+            raw_length=message_log.RECORD_SIZE,
+            decode_error="record failed a check decode_record does not perform today",
+        )
+        assert message_log.is_empty_record_slot(record) is False
+
+
+class TestReadRecordsEmptySlots:
+    """Issue #105: the iteration must not count zero-filled slots as records.
+
+    ``TestEmptyRecordSlots`` covers the predicate. These cover where it is *applied*
+    -- the accounting in ``read_records`` -- because the defect was never in the
+    decode. The decode read those 205 records perfectly; it was the counting that
+    was wrong.
+    """
+
+    def test_the_amt_lab_01_shape_reads_as_eighteen_records_not_two_hundred_and_twenty_three(self):
+        """The measured regression case, reproduced element for element.
+
+        18 real records then 205 identical zero slots, one batch,
+        ``NoMoreRecords`` set, ``CurrentNumberOfRecords`` 18 -- exactly what job
+        2976's evidence artifact holds. Before the fix this returned
+        ``records_read=223`` against ``total_records=18``, which is what the hardware
+        stage's accounting assertion caught.
+        """
+        wsman = FakeWsman(
+            instance={**LOG_INSTANCE, "CurrentNumberOfRecords": "18"},
+            responses={
+                "PositionToFirstRecord": [({"IterationIdentifier": "1"}, 0)],
+                "GetRecords": [(_batch([REAL_RECORD_AUTH_FAILURE] * 18 + [EMPTY_SLOT] * 205, next_identifier=224, no_more=True), 0)],
+            },
+        )
+        read = message_log.read_records(wsman)
+        assert len(read.records) == 18
+        assert read.empty_slots == 205
+        # Firmware's counter was right all along and is not "corrected" here.
+        assert read.total_records == 18
+        assert len(read.records) == read.total_records
+        # Padding is not a fault: nothing else about the read changes.
+        assert read.batches == 1
+        assert read.stop_reason == "no_more_records"
+        assert read.truncated is False
+        assert read.complete is True
+        assert all(not message_log.is_empty_record_slot(record) for record in read.records)
+
+    def test_a_real_record_after_a_slot_survives_because_slots_are_skipped_not_stopped(self):
+        """Skip-not-stop, stated as an assertion.
+
+        On the one firmware state ever observed the padding was contiguous and
+        trailing, so treating the first slot as end-of-data would also have worked
+        there. Nothing in either source describes the padding at all, so that
+        placement is not a rule -- and if some generation interleaves a freed slot,
+        stopping would silently drop every record after it and still report
+        ``complete: true``, which is the prior art's exact defect. This test is the
+        thing that would fail if someone "optimised" the skip into a break.
+        """
+        wsman = FakeWsman(
+            instance={**LOG_INSTANCE, "CurrentNumberOfRecords": "2"},
+            responses={
+                "PositionToFirstRecord": [({"IterationIdentifier": "1"}, 0)],
+                "GetRecords": [
+                    (_batch([EMPTY_SLOT, REAL_RECORD_AUTH_FAILURE, EMPTY_SLOT, REAL_RECORD_FIRMWARE_PROGRESS, EMPTY_SLOT], next_identifier=6, no_more=True), 0)
+                ],
+            },
+        )
+        read = message_log.read_records(wsman)
+        assert [record.raw_base64 for record in read.records] == [REAL_RECORD_AUTH_FAILURE, REAL_RECORD_FIRMWARE_PROGRESS]
+        assert read.empty_slots == 3
+        assert read.complete is True
+
+    def test_a_batch_of_nothing_but_slots_does_not_end_the_iteration(self):
+        """A wholly-empty batch must not be read as "the log is finished".
+
+        Same failure as above one level up: if the batch's emptiness ended the read,
+        the records in the *next* batch would be lost and the result would still
+        claim to be complete.
+        """
+        wsman = FakeWsman(
+            instance={**LOG_INSTANCE, "CurrentNumberOfRecords": "1"},
+            responses={
+                "PositionToFirstRecord": [({"IterationIdentifier": "1"}, 0)],
+                "GetRecords": [
+                    (_batch([EMPTY_SLOT, EMPTY_SLOT], next_identifier=3, no_more=False), 0),
+                    (_batch([REAL_RECORD_AUTH_FAILURE], next_identifier=4, no_more=True), 0),
+                ],
+            },
+        )
+        read = message_log.read_records(wsman)
+        assert read.batches == 2
+        assert len(read.records) == 1
+        assert read.empty_slots == 2
+        assert read.stop_reason == "no_more_records"
+
+    def test_max_records_still_bounds_a_read_that_is_all_padding(self):
+        """The hang guard. ``max_records`` counts elements consumed, not records kept.
+
+        Firmware here keeps advancing its identifier and keeps returning nothing but
+        padding, without ever setting ``NoMoreRecords``. If the budget were spent
+        only on *kept* records it would never be reached, and the loop's only exit
+        would be a ``NoMoreRecords`` this firmware never sends -- a new way to hang a
+        play, which is the exact thing ``max_records`` exists to prevent.
+
+        Only two batches are queued, so a loop that did not stop at the bound fails
+        loudly (``FakeWsman`` raises on an unexpected invoke) rather than spinning.
+        """
+        wsman = FakeWsman(
+            instance={**LOG_INSTANCE, "CurrentNumberOfRecords": "0"},
+            responses={
+                "PositionToFirstRecord": [({"IterationIdentifier": "1"}, 0)],
+                "GetRecords": [
+                    (_batch([EMPTY_SLOT, EMPTY_SLOT], next_identifier=3, no_more=False), 0),
+                    (_batch([EMPTY_SLOT, EMPTY_SLOT], next_identifier=5, no_more=False), 0),
+                ],
+            },
+        )
+        read = message_log.read_records(wsman, max_records=4)
+        assert read.records == []
+        assert read.empty_slots == 4
+        assert read.batches == 2
+        assert read.stop_reason == "max_records"
+        assert read.truncated is True
+        assert read.complete is False
+
+    def test_padding_does_not_consume_the_budget_a_caller_meant_for_records(self):
+        """A budget spent on padding still yields every real record in reach of it.
+
+        ``max_records=4`` against a batch of two slots and two records: the read must
+        come back with both records, not with "two slots and one record".
+        """
+        wsman = FakeWsman(
+            instance={**LOG_INSTANCE, "CurrentNumberOfRecords": "2"},
+            responses={
+                "PositionToFirstRecord": [({"IterationIdentifier": "1"}, 0)],
+                "GetRecords": [(_batch([EMPTY_SLOT, EMPTY_SLOT, REAL_RECORD_AUTH_FAILURE, REAL_RECORD_FIRMWARE_PROGRESS], next_identifier=5, no_more=True), 0)],
+            },
+        )
+        read = message_log.read_records(wsman, max_records=4)
+        assert len(read.records) == 2
+        assert read.empty_slots == 2
+        assert read.truncated is False
+
+    def test_empty_slots_is_zero_on_a_log_firmware_did_not_pad(self):
+        """The control. ``amt-lab-02`` (AMT 19.0.5) read cleanly in the same CI run."""
+        wsman = FakeWsman(
+            instance=LOG_INSTANCE,
+            responses={
+                "PositionToFirstRecord": [({"IterationIdentifier": "1"}, 0)],
+                "GetRecords": [(_batch([REAL_RECORD_AUTH_FAILURE, REAL_RECORD_FIRMWARE_PROGRESS], next_identifier=3, no_more=True), 0)],
+            },
+        )
+        read = message_log.read_records(wsman)
+        assert read.empty_slots == 0
+        assert len(read.records) == 2
+
+    def test_an_empty_log_reports_no_slots(self):
+        wsman = FakeWsman(instance={**LOG_INSTANCE, "CurrentNumberOfRecords": "0"}, responses={"PositionToFirstRecord": [({}, 2)]})
+        assert message_log.read_records(wsman).empty_slots == 0
 
 
 class TestFilterBySeverity:

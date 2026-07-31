@@ -113,6 +113,7 @@ import sys
 import tempfile
 import threading
 import uuid
+from base64 import b64encode
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from xml.etree import ElementTree as ET
@@ -369,6 +370,18 @@ DEFAULT_MESSAGE_LOG_RECORDS: tuple[str, ...] = (
     "IgYBZf8PbwJoAf8iAEAHAAAAAAAA",
 )
 
+#: One **empty record slot**: 21 zero bytes, base64-encoded, exactly as real firmware
+#: pads a ``GetRecords`` response.
+#:
+#: Derived, not measured: this is ``b64encode(bytes(21))``, the same primitive
+#: ``message_log._EMPTY_SLOT_HEX`` is built from. Separately *confirmed* to match what
+#: real firmware sent -- ``amt-lab-01`` (AMT 16.1.30, CircleCI job 2976) answered one
+#: ``GetRecords`` call with 223 ``RecordArray`` elements while ``CurrentNumberOfRecords``
+#: reported 18 and ``NoMoreRecords`` was already set. The 223 hold 18 real records
+#: followed by *this exact string* repeated 205 times -- one per record slot a
+#: ``ClearLog`` earlier the same day had freed. See ``message_log.is_empty_record_slot``.
+EMPTY_MESSAGE_LOG_SLOT = b64encode(bytes(21)).decode("ascii")
+
 #: How many records this mock returns from one ``GetRecords`` call, regardless of
 #: the client's ``MaxReadRecords``. Deliberately smaller than
 #: ``DEFAULT_MESSAGE_LOG_RECORDS`` so that following the iteration to completion is
@@ -490,6 +503,13 @@ class AmtState:
     #: ClearLog empties this list and a later Get observes CurrentNumberOfRecords 0,
     #: which is what makes the clear module's before/after receipt testable end to end.
     message_log_records: list[str] = field(default_factory=lambda: list(DEFAULT_MESSAGE_LOG_RECORDS))
+    #: How many zero-filled **empty record slots** GetRecords pads its response with,
+    #: after the real records. See EMPTY_MESSAGE_LOG_SLOT for the firmware measurement
+    #: this reproduces. Deliberately NOT counted in CurrentNumberOfRecords: the whole
+    #: point of the state is that the container counter and the returned array
+    #: disagree, and a mock that kept them consistent is exactly why nothing here
+    #: caught issue #105.
+    message_log_empty_slots: int = 0
     #: Set False to make both Get and Enumerate of AMT_MessageLog fault, standing in
     #: for firmware that does not implement the event log at all.
     message_log_present: bool = True
@@ -1071,6 +1091,13 @@ def _get_message_log(state: AmtState) -> dict[str, object]:
     * ``MaxNumberOfRecords`` is ``390`` there, which is where this collection's
       ``MAX_READ_RECORDS`` and default ``max_records`` come from.
 
+    ``CurrentNumberOfRecords`` counts ``state.message_log_records`` and **nothing
+    else** -- specifically not ``state.message_log_empty_slots``, which
+    ``GetRecords`` does serve. That asymmetry is the point, not an oversight: it is
+    what real firmware does (``amt-lab-01`` reported 18 while returning 223 entries)
+    and reproducing it is the only way this mock can produce the state that issue
+    #105's defect needed.
+
     Deliberately served for a ``Get`` carrying **no** ``SelectorSet``, because that
     is what the fixture is a response to, and because the instance has no
     ``InstanceID`` property from which a selector could be built. This class is
@@ -1324,6 +1351,28 @@ def _method_request_redirection_state_change(state: AmtState, body_elem: ET.Elem
     return 0, ""
 
 
+def _message_log_served_records(state: AmtState) -> list[str]:
+    """What ``GetRecords`` actually puts on the wire: the real records, then the padding.
+
+    Padding goes **after** the real records because that is where firmware put it --
+    on ``amt-lab-01`` the 205 zero slots were contiguous and strictly trailing, all
+    18 real records first (CircleCI job 2976). No source describes this padding at
+    all, so no other placement is served here: a mock that interleaved slots would be
+    asserting a firmware behaviour nobody has observed. The interleaved case is
+    covered where it can be constructed honestly rather than served as firmware --
+    against a fake transport in
+    ``tests/unit/plugins/module_utils/test_message_log.py``.
+
+    Note what this does *not* touch: ``_get_message_log``'s
+    ``CurrentNumberOfRecords`` still counts ``state.message_log_records`` only. The
+    disagreement between that counter and the length of this list is the entire state
+    under test.
+    """
+    if state.message_log_empty_slots <= 0:
+        return list(state.message_log_records)
+    return list(state.message_log_records) + [EMPTY_MESSAGE_LOG_SLOT] * state.message_log_empty_slots
+
+
 def _method_position_to_first_record(state: AmtState, _body_elem: ET.Element | None) -> tuple[int, str]:
     """``AMT_MessageLog.PositionToFirstRecord`` -- establish an iteration.
 
@@ -1337,8 +1386,13 @@ def _method_position_to_first_record(state: AmtState, _body_elem: ET.Element | N
     An empty log answers ``ReturnValue`` 2 ("No record exists"), **not** 3: that is
     ``GetRecords``' value for the same condition. A client that only handles one of
     the two must fail here rather than in production.
+
+    Keyed on ``_message_log_served_records`` rather than on ``message_log_records``,
+    so this method and ``GetRecords`` can never contradict each other: a
+    ``PositionToFirstRecord`` answering "no record exists" while ``GetRecords`` would
+    hand back padding is an internally inconsistent endpoint no firmware could be.
     """
-    if not state.message_log_records:
+    if not _message_log_served_records(state):
         return POSITION_TO_FIRST_RECORD_NO_RECORDS, "<r:IterationIdentifier>1</r:IterationIdentifier>"
     return 0, "<r:IterationIdentifier>1</r:IterationIdentifier>"
 
@@ -1365,8 +1419,16 @@ def _method_get_records(state: AmtState, body_elem: ET.Element | None) -> tuple[
     what MeshCentral does and what this collection does. This mock deliberately
     does not reproduce the fixture's unexplained value, because doing so would bake
     an arithmetic no client should rely on into the only place it could be relied on.
+
+    What is served is ``_message_log_served_records`` -- the real records **plus**
+    however many zero-filled empty slots ``state.message_log_empty_slots`` asks for.
+    Every position here, including ``NoMoreRecords``, is computed against that list
+    and not against ``message_log_records``, because on real firmware the padding is
+    genuinely part of the array ``GetRecords`` returns while being absent from
+    ``CurrentNumberOfRecords``.
     """
-    if not state.message_log_records:
+    served = _message_log_served_records(state)
+    if not served:
         return GET_RECORDS_NO_RECORDS, "<r:IterationIdentifier>1</r:IterationIdentifier><r:NoMoreRecords>true</r:NoMoreRecords>"
 
     identifier = 1
@@ -1385,12 +1447,12 @@ def _method_get_records(state: AmtState, body_elem: ET.Element | None) -> tuple[
             return 2, ""
 
     start = identifier - 1
-    if start < 0 or start >= len(state.message_log_records):
+    if start < 0 or start >= len(served):
         return 2, ""  # "Invalid record pointed"
 
-    batch = state.message_log_records[start : start + max_read]
+    batch = served[start : start + max_read]
     next_identifier = identifier + len(batch)
-    no_more = next_identifier > len(state.message_log_records)
+    no_more = next_identifier > len(served)
     records_xml = "".join(f"<r:RecordArray>{escape(record)}</r:RecordArray>" for record in batch)
     extra = f"<r:IterationIdentifier>{next_identifier}</r:IterationIdentifier><r:NoMoreRecords>{'true' if no_more else 'false'}</r:NoMoreRecords>{records_xml}"
     return 0, extra

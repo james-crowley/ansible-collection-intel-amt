@@ -139,11 +139,18 @@ EXAMPLES = r"""
 
 RETURN = r"""
 records:
-  description: >-
-    The decoded records, in the order firmware returned them. Note that AMT
-    normally stores the event log B(newest first), so RV(records[0]) is usually the
-    most recent event -- compare RV(records[].timestamp) rather than relying on
-    position.
+  description:
+    - >-
+      The decoded records, in the order firmware returned them. Note that AMT
+      normally stores the event log B(newest first), so RV(records[0]) is usually the
+      most recent event -- compare RV(records[].timestamp) rather than relying on
+      position.
+    - >-
+      Zero-filled empty record slots are excluded and counted in RV(empty_slots)
+      instead. A record whose timestamp is V(0) but whose other fields are populated
+      is B(not) a slot and is returned -- a zero clock on a real event is a firmware
+      RTC fault worth seeing, and it renders RV(records[].timestamp_utc) as V(null)
+      rather than being discarded.
   type: list
   elements: dict
   returned: always
@@ -228,9 +235,37 @@ total_records:
   type: int
   returned: always
 records_read:
-  description: How many records were actually read from firmware, before RV(filtered_out) was applied.
+  description:
+    - >-
+      How many records were actually read from firmware, before RV(filtered_out) was
+      applied. Always equal to the length of RV(records).
+    - >-
+      Zero-filled empty slots are B(not) counted here and are not present in
+      RV(records) -- see RV(empty_slots). Before that exclusion existed this count
+      could exceed RV(total_records), which made the RV(records_read) versus
+      RV(total_records) comparison this module documents unusable on a log that had
+      been cleared and was refilling.
   type: int
   returned: always
+empty_slots:
+  description:
+    - >-
+      How many all-zero 21-byte C(RecordArray) entries firmware returned that this
+      read excluded from RV(records). V(0) on a log firmware did not pad.
+    - >-
+      Firmware pads its C(GetRecords) response with zero-filled entries for record
+      slots a previous C(ClearLog) freed. They are empty slots, not records: no
+      timestamp, no entity, no severity, no event data. One real AMT 16.1.30 endpoint
+      returned 223 entries for an 18-record log, 205 of them identical all-zero
+      padding.
+    - >-
+      Reported rather than merely dropped, so the padding is visible. A non-zero
+      value is normal for a recently cleared log and is B(not) a fault. Notably it is
+      also not evidence that deleted records are being served -- the padding entries
+      are all zero and contain nothing that was in the log before the clear.
+  type: int
+  returned: always
+  version_added: 0.8.0
 filtered_out:
   description: How many read records the O(severity) filter removed. V(0) when O(severity) is unset.
   type: int
@@ -399,6 +434,7 @@ def build_result(read: message_log.MessageLogRead, severities: list[str] | None,
         "records": [dataclasses.asdict(record) for record in kept],
         "total_records": read.total_records,
         "records_read": len(read.records),
+        "empty_slots": read.empty_slots,
         "filtered_out": len(read.records) - len(kept),
         "truncated": read.truncated,
         "complete": read.complete,

@@ -77,6 +77,7 @@ def _read(
     complete: bool = True,
     stop_reason: str = "no_more_records",
     batches: int = 1,
+    empty_slots: int = 0,
 ) -> message_log.MessageLogRead:
     return message_log.MessageLogRead(
         properties=_properties(total),
@@ -86,6 +87,7 @@ def _read(
         complete=complete,
         stop_reason=stop_reason,
         batches=batches,
+        empty_slots=empty_slots,
     )
 
 
@@ -335,6 +337,26 @@ class TestBuildResult:
         result = amt_event_log.build_result(read, ["critical"], "192.0.2.10:16993", None)
         assert result["records_read"] == 3
         assert result["filtered_out"] + len(result["records"]) == result["records_read"]
+
+    def test_empty_slots_is_reported_separately_from_the_severity_filter(self):
+        """Issue #105: padding and filtering are different losses and get different counters.
+
+        ``filtered_out`` is the operator's own severity filter. If padding were folded
+        into it, a caller reading ``filtered_out == 0`` to mean "nothing was excluded
+        from this read" -- which is exactly what the hardware stage's accounting
+        assertion does -- would be told the wrong thing.
+        """
+        read = _read([CRITICAL_RECORD, MONITOR_RECORD], total=2, empty_slots=205)
+        result = amt_event_log.build_result(read, None, "192.0.2.10:16993", None)
+        assert result["empty_slots"] == 205
+        assert result["records_read"] == 2
+        assert result["filtered_out"] == 0
+        # The self-consistency the hardware stage asserts, restored.
+        assert result["records_read"] <= result["total_records"]
+
+    def test_empty_slots_is_zero_when_firmware_did_not_pad(self):
+        result = amt_event_log.build_result(_read([CRITICAL_RECORD]), None, "192.0.2.10:16993", None)
+        assert result["empty_slots"] == 0
 
     def test_tls_fingerprint_is_carried_into_the_receipt(self):
         read = _read([CRITICAL_RECORD])

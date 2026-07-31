@@ -42,7 +42,14 @@ a client that gives up on the first fault. `--baseboard-serial` is one level nar
 again -- not which classes a firmware implements but whether it fills in one property of
 one class, and if not, whether it omits the element or sends it empty. Those two are
 indistinguishable in the parsed facts and are what issue #84 turns on, so both are
-served here rather than reasoned about. All are start-up flags
+served here rather than reasoned about. `--message-log-empty-slots` is state again rather
+than capability, and belongs here for the same reason `--empty-message-log` does, only
+more so: it is a log that a `ClearLog` freed slots in and that has only partially
+refilled, and *no* sequence of requests against this mock can produce it, because
+`ClearLog` here empties the records and the counter together the way firmware's does. The
+defining property of the state is that `CurrentNumberOfRecords` and the `GetRecords` array
+disagree, and only a server that starts that way can have it. Real firmware does: issue
+#105. All are start-up flags
 rather than a control channel -- a
 target that needs them starts a second mock process configured that way, which keeps
 every running server's behaviour fixed for its whole lifetime and therefore keeps a
@@ -93,6 +100,17 @@ def _parse_args() -> argparse.Namespace:
         "--empty-message-log",
         action="store_true",
         help="Serve an AMT_MessageLog that exists but holds no records (PositionToFirstRecord returns 2)",
+    )
+    parser.add_argument(
+        "--message-log-empty-slots",
+        type=int,
+        default=0,
+        help=(
+            "Pad the GetRecords response with N zero-filled empty record slots after the "
+            "real records, WITHOUT counting them in CurrentNumberOfRecords -- the state "
+            "real firmware serves after a ClearLog has freed slots the log has not refilled "
+            "yet (issue #105)"
+        ),
     )
     parser.add_argument(
         "--amt10-no-enumerate",
@@ -201,6 +219,13 @@ def main() -> None:
         server.state.baseboard_serial_number = ""
     elif args.baseboard_serial == "absent":
         server.state.baseboard_serial_number = None
+    # How many freed-but-not-yet-refilled record slots this firmware's GetRecords pads
+    # its response with. State rather than capability, and not reachable by anything a
+    # client does: ClearLog through this mock empties both the records and (as real
+    # firmware's counter does) the count, so no sequence of requests against a
+    # default server can produce a counter and an array that disagree. It has to be
+    # how the endpoint starts.
+    server.state.message_log_empty_slots = args.message_log_empty_slots
     if args.empty_message_log:
         # An event log that exists but is empty. Distinct from --no-message-log:
         # "the class is absent" is an unsupported_capability, while "the log holds
