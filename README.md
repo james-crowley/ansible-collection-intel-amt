@@ -81,12 +81,18 @@ reference this implementation is built against.
 **Pre-release, and hardware-qualified on two machines — for five of the seven
 modules.** `amt_info`, `amt_power`, `amt_boot`, `amt_redirection` and `amt_media`,
 plus the bare-metal install role, have been exercised end to end against real Intel
-AMT firmware, on a self-hosted CircleCI runner inside the lab network, through all
+AMT firmware, on a self-hosted CircleCI runner inside the lab network, through
 **eight** qualification stages: read-only facts, an identity cross-check,
 check-mode plans, attended power on/off, IDE-R media attach and boot, a writable
-image, native one-time PXE, and an idempotent re-probe. (Stage 2 is the
-cross-check and has no playbook of its own, which is why eight stages run as
-seven playbooks.)
+image, native one-time PXE, and an idempotent re-probe.
+
+The staged plan itself now runs to **twelve stages across eleven playbooks**
+(stage 2 is a human cross-check with no playbook of its own). Stages 9-12 are
+authored and verified against the mock WS-Man server but have not yet run against
+real hardware — see [`tests/hardware/README.md`](tests/hardware/README.md) for
+the full plan and [`tests/hardware/PREFLIGHT.md`](tests/hardware/PREFLIGHT.md)
+for the pre-flight brief required before approving stages 10-12: one is
+irreversible, and the other two can leave a machine needing a physical hand.
 
 All eight stages have now completed on **`amt-lab-01`, AMT 16.1.30** (2026-07-28)
 and on **`amt-lab-02`, AMT 19.0.5** (2026-07-29) — so power control, IDE-R media,
@@ -99,8 +105,10 @@ worth of evidence — named from a third party's AMT 10.0.56 dump, read back
 populated here on 16.1.30 and 19.0.5.
 
 **`amt_event_log` and `amt_log_clear` are the two exceptions, and they are not
-hardware-qualified at all.** Neither has ever touched real AMT firmware — no
-qualification stage covers either one. They are unit- and mock-tested only, with
+hardware-qualified yet.** Neither has ever touched real AMT firmware. A
+qualification stage now covers each one — stage 9 (read-only) for `amt_event_log`,
+stage 10 (irreversible) for `amt_log_clear` — but neither has actually run against
+real hardware as of this writing, so they remain unit- and mock-tested only, with
 their wire format taken from a captured firmware fixture and MeshCentral rather
 than from an endpoint this collection has read. See
 [`docs/amt_event_log.md`](docs/amt_event_log.md),
