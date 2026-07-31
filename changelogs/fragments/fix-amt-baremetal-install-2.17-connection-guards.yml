@@ -1,68 +1,69 @@
+---
 bugfixes:
-  - amt_baremetal_install role - fix ``tasks/validate.yml`` silently accepting an
+  - 'amt_baremetal_install role - fix ``tasks/validate.yml`` silently accepting an
     empty-string ``amt_baremetal_install_password`` or ``amt_baremetal_install_tls_fingerprint``
     as though it were present, by checking ``is truthy`` instead of ``is not none``
     (matching what ``amt_baremetal_install_host`` already did). This is version-independent
-    hardening, not a workaround for one ansible-core version: an empty string is never
-    a real credential or a real fingerprint pin on *any* core, and ``is not none`` only
-    ever refuses a genuine Python ``None``. It happened to matter in practice on
-    ansible-core <=2.18, where a quoted scalar template evaluating to Jinja's ``None``
-    is stringified by finalize before Ansible's ``convert_data`` step gets a chance to
-    evaluate it back -- dicts, lists and booleans round-trip, a bare ``None`` does not
-    -- so ``amt_password``/``amt_tls_fingerprint`` left unset resolved to ``""`` there,
-    which ``is not none`` waved through. The fingerprint half is the one that matters
-    most: this collection's trust model requires an explicit pin whenever
-    ``amt_baremetal_install_use_tls`` is true, and that enforcement did not fire on
-    those cores, leaving the role willing to proceed over TLS with no pin at all
-    (https://github.com/james-crowley/ansible-collection-intel-amt/issues/87).
-  - amt_baremetal_install role - fix the role being unusable on stock AMT ports
-    (16992/16993 WS-Man, 16994/16995 IDE-R) on ansible-core <=2.18 whenever
-    ``amt_port``/``amt_media_port`` were left unset -- the common case for anyone not
-    aiming at a non-default port. The same empty-string-instead-of-``None`` divergence
-    described above hit ``amt_baremetal_install_port``/``amt_baremetal_install_media_port``
-    harder, because those two are ``type: int`` at the module boundary: an empty string
-    is not "unset" there, it is a type error ("argument 'port' is of type <class 'str'>
-    and we were unable to convert to int"), raised before any connection was attempted.
-    Fixed at the six places ``tasks/probe.yml``, ``tasks/arm_boot.yml``, ``tasks/reset.yml``,
-    ``tasks/observe.yml`` and ``tasks/attach_media.yml`` (both its ports) pass these as a
-    module ``port`` parameter, with ``| default(omit, true)`` -- the ``true`` second
-    argument is what makes the filter replace any falsy value (``None`` *or* ``""``),
-    not only Jinja's ``Undefined``, which is what actually closes the gap on <=2.18.
-    Deliberately not fixed by making ``amt_baremetal_install_port``/``_media_port``
-    themselves default to ``omit`` in ``defaults/main.yml``: that was the first attempt,
-    and it round-trips fine at a module-parameter boundary but not as a stored role
-    variable -- on ansible-core >=2.19, native Jinja templating preserves the actual
-    ``_OmitType`` sentinel *object* rather than a harmless placeholder string, and this
-    collection's own ``amt_baremetal_install_role`` integration target's diagnostic dump
-    serialises every resolved connection variable with ``to_nice_json``, which cannot
-    serialise that object at all ("Object of type '_OmitType' is not JSON serializable").
-    Confining the conversion to the six call sites means the sentinel is created and
-    consumed within one task's own argument templating and never becomes a variable
-    value anything else can observe, forward, or serialise.
-  - tests/integration/targets/amt_baremetal_install_role - harden ``tasks/main.yml``'s
-    own ``is none`` assertions on ``run_state``/``power_action`` to ``is falsy``. Both are
-    built in ``files/nested_play.yml`` from the same quoted-scalar
-    ``"{{ var | default(none) }}"`` shape the two bugfixes above exist to fix, so on
-    ansible-core <=2.18 a scenario that correctly refused before ever setting either
-    variable dumped ``""``, not ``null`` -- and ``is none`` against ``""`` is false, so
-    those assertions would have quietly stopped proving anything on that core rather
-    than failing loudly. Also adds a regression scenario (18) that binds a mock WS-Man
-    server to the exact plaintext default port (``module_utils/tls.py``'s
-    ``DEFAULT_PLAINTEXT_PORT``, 16992) and runs the role with no port ever specified
-    anywhere, so it can only reach ``reset_confirmed=true`` if every one of the four
-    module calls that carry a port independently resolved the omitted value to that
-    same live endpoint; it also pins the exact pre-fix failure text ("cannot be
-    converted to an int") so a regression here is never mistaken for something else.
+    hardening, not a workaround for one ansible-core version -- an empty string is
+    never a real credential or a real fingerprint pin on *any* core, and ``is not
+    none`` only ever refuses a genuine Python ``None``. It happened to matter in
+    practice on ansible-core <=2.18, where a quoted scalar template evaluating to
+    Jinja''s ``None`` is stringified by finalize before Ansible''s ``convert_data``
+    step gets a chance to evaluate it back -- dicts, lists and booleans round-trip,
+    a bare ``None`` does not -- so ``amt_password``/``amt_tls_fingerprint`` left
+    unset resolved to ``""`` there, which ``is not none`` waved through. The fingerprint
+    half is the one that matters most -- this collection''s trust model requires
+    an explicit pin whenever ``amt_baremetal_install_use_tls`` is true, and that
+    enforcement did not fire on those cores, leaving the role willing to proceed
+    over TLS with no pin at all (https://github.com/james-crowley/ansible-collection-intel-amt/issues/87).'
+  - 'amt_baremetal_install role - fix the role being unusable on stock AMT ports
+    (16992/16993 WS-Man, 16994/16995 IDE-R) on ansible-core <=2.18 whenever ``amt_port``/``amt_media_port``
+    were left unset -- the common case for anyone not aiming at a non-default port.
+    The same empty-string-instead-of-``None`` divergence described above hit ``amt_baremetal_install_port``/``amt_baremetal_install_media_port``
+    harder, because those two are ``type: int`` at the module boundary -- an empty
+    string is not "unset" there, it is a type error ("argument ''port'' is of type
+    <class ''str''> and we were unable to convert to int"), raised before any connection
+    was attempted. Fixed at the six places ``tasks/probe.yml``, ``tasks/arm_boot.yml``,
+    ``tasks/reset.yml``, ``tasks/observe.yml`` and ``tasks/attach_media.yml`` (both
+    its ports) pass these as a module ``port`` parameter, with ``| default(omit,
+    true)`` -- the ``true`` second argument is what makes the filter replace any
+    falsy value (``None`` *or* ``""``), not only Jinja''s ``Undefined``, which is
+    what actually closes the gap on <=2.18. Deliberately not fixed by making ``amt_baremetal_install_port``/``_media_port``
+    themselves default to ``omit`` in ``defaults/main.yml``, even though that was
+    the first attempt here -- it round-trips fine at a module-parameter boundary
+    but not as a stored role variable. On ansible-core >=2.19, native Jinja templating
+    instead preserves the actual ``_OmitType`` sentinel *object* rather than a harmless
+    placeholder string, and this collection''s own ``amt_baremetal_install_role``
+    integration target''s diagnostic dump serialises every resolved connection variable
+    with ``to_nice_json``, which cannot serialise that object at all ("Object of
+    type ''_OmitType'' is not JSON serializable"). Confining the conversion to the
+    six call sites means the sentinel is created and consumed within one task''s
+    own argument templating and never becomes a variable value anything else can
+    observe, forward, or serialise.'
+  - 'tests/integration/targets/amt_baremetal_install_role - harden ``tasks/main.yml``''s
+    own ``is none`` assertions on ``run_state``/``power_action`` to ``is falsy``.
+    Both are built in ``files/nested_play.yml`` from the same quoted-scalar ``"{{
+    var | default(none) }}"`` shape the two bugfixes above exist to fix, so on ansible-core
+    <=2.18 a scenario that correctly refused before ever setting either variable
+    dumped ``""``, not ``null`` -- and ``is none`` against ``""`` is false, so those
+    assertions would have quietly stopped proving anything on that core rather than
+    failing loudly. Also adds a regression scenario that binds a mock WS-Man server
+    to the exact plaintext default port (``module_utils/tls.py``''s ``DEFAULT_PLAINTEXT_PORT``,
+    16992) and runs the role with no port ever specified anywhere, so it can only
+    reach ``reset_confirmed=true`` if every one of the four module calls that carry
+    a port independently resolved the omitted value to that same live endpoint;
+    it also pins the exact pre-fix failure text ("cannot be converted to an int")
+    so a regression here is never mistaken for something else.'
 known_issues:
-  - amt_baremetal_install role - on ansible-core <=2.18, every connection variable this
-    role resolves from an unset ``amt_*`` inventory variable (``amt_baremetal_install_host``,
+  - 'amt_baremetal_install role - on ansible-core <=2.18, every connection variable
+    this role resolves from an unset ``amt_*`` inventory variable (``amt_baremetal_install_host``,
     ``_port``, ``_password``, ``_media_port`` and ``_tls_fingerprint``) is the empty
-    string, not ``None`` -- a consequence of how that ansible-core range round-trips a
-    Jinja ``None`` through a quoted scalar template, not something this role can change
-    from inside a role default. Every place in this role that checks one of these
-    treats ``""`` and ``None`` alike (``is truthy``/``is falsy`` in ``tasks/validate.yml``,
+    string, not ``None`` -- a consequence of how that ansible-core range round-trips
+    a Jinja ``None`` through a quoted scalar template, not something this role can
+    change from inside a role default. Every place in this role that checks one
+    of these treats ``""`` and ``None`` alike (``is truthy``/``is falsy`` in ``tasks/validate.yml``,
     ``| default(omit, true)`` at the module-parameter call sites), so this has no
-    behavioural effect on the role itself as of this release. It matters only to a
-    caller or downstream automation that reads these variables directly: ``is none``/
-    ``is not none`` against any of them will behave differently across ansible-core
-    versions, and ``is truthy``/``is falsy`` should be used instead.
+    behavioural effect on the role itself as of this release. It matters only to
+    a caller or downstream automation that reads these variables directly -- ``is
+    none``/``is not none`` against any of them will behave differently across ansible-core
+    versions, and ``is truthy``/``is falsy`` should be used instead.'

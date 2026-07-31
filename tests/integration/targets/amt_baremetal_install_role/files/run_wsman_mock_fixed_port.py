@@ -82,7 +82,7 @@ def main() -> None:
     tmp_path.write_text(json.dumps({"pid": os.getpid(), "port": server.port, "cert_fingerprint": server.cert_fingerprint}))
     os.replace(tmp_path, ready_path)
 
-    def _stop(signum: int, frame: object) -> None:  # noqa: ARG001
+    def _stop(*_args: object) -> None:
         server.stop()
         sys.exit(0)
 
