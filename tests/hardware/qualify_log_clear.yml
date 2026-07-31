@@ -1,0 +1,277 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Hardware qualification stage 10 (see README.md): amt_log_clear. IRREVERSIBLE --
+# clearing the Intel AMT event log destroys the firmware's only record of its own
+# history, permanently. There is no undo and no firmware-side archive (see
+# amt_log_clear's own DOCUMENTATION).
+#
+# MUST run after stage 9 (qualify_event_log.yml) has qualified the read path on this
+# machine at least once. That is not merely a suggestion here: this playbook performs
+# its own read, archives it to disk, and only THEN clears -- so the precondition is
+# self-enforcing rather than assumed. What stage 9 buys ahead of this one is confidence
+# that a read on this specific firmware generation behaves the way this collection
+# expects (iteration completes, records decode, timestamps decode) *before* the one
+# chance to read whatever is currently in the log is spent.
+#
+# WHAT THIS STAGE CAN AND CANNOT PROVE -- read this before approving it:
+#
+#   - "ClearLog is accepted and the log reads back empty afterwards, on real
+#     firmware": PROVEN. Both the container property (records_after, from
+#     amt_log_clear itself) and an independent amt_event_log re-read are checked --
+#     two different WS-Man calls, not one call's self-report taken on faith.
+#   - "nothing of value was lost without a copy": PROVEN, but only as far as this
+#     collection's own decode goes. The archive this stage writes BEFORE clearing
+#     carries every record's raw_base64/raw_hex alongside the decode, so even a
+#     record this collection cannot decode is preserved -- see amt_event_log's own
+#     "raw bytes are not negotiable" contract. What is proven is "we kept everything
+#     WS-Man handed back", not "we understood everything WS-Man handed back".
+#   - This does NOT establish that ClearLog is safe to run on a log this collection
+#     has never read at all. If stage 9 was skipped, or run against a different
+#     machine than this one, the "MUST run after 3" ordering in the task list this
+#     stage was designed against has been violated by the approver, not by this
+#     playbook -- see PREFLIGHT.md before approving.
+#
+# Wired into CircleCI as the hardware-log-clear job, behind its own approval gate,
+# downstream of hardware-pxe (see .circleci/config.yml) -- but still only ever one
+# host at a time, attended. See tests/hardware/PREFLIGHT.md for the full pre-flight
+# brief: what this does, what it is looking for, expected outcome, failure modes and
+# the state they leave the machine in, recovery, and blast radius.
+#
+# amt_qualify_attended (default true) gates the interactive pauses below, for the same
+# reason as every other stage 4-7-style playbook: ansible.builtin.pause blocks on
+# stdin, which CircleCI's machine executor cannot supply, and the
+# hardware-log-clear-approval job is CI's actual human checkpoint.
+#
+# Run manually, one host at a time, attended:
+#
+#   ansible-playbook tests/hardware/qualify_log_clear.yml \
+#     -i tests/hardware/inventory.yml -l <single-host>
+
+- name: "Hardware qualification stage 10: amt_log_clear -- irreversible"
+  hosts: amt_targets
+  serial: 1
+  gather_facts: false
+  connection: local
+  vars:
+    amt_output_dir: "{{ playbook_dir }}/output"
+
+  pre_tasks:
+    - name: Refuse to run against more than one host at a time
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+        fail_msg: "This stage destroys real firmware event history and must run one machine at a time. Re-run with -l <single-host>."
+
+    - name: Pause for the operator to confirm they understand this is irreversible
+      ansible.builtin.pause:
+        prompt: >-
+          About to permanently clear the AMT event log on {{ inventory_hostname }}
+          ({{ amt_host }}). This destroys firmware event history with no undo and no
+          firmware-side archive. A full read is archived to this stage's own evidence
+          file BEFORE anything is cleared -- see tests/hardware/PREFLIGHT.md for exactly
+          what that does and does not protect. Press enter to continue, or Ctrl-C then A
+          to abort
+      when: amt_qualify_attended | default(true) | bool
+
+  tasks:
+    - name: Read, archive, then clear the event log
+      block:
+        # Step 1: read. Same call stage 9 makes, so the two are directly comparable --
+        # a decode failure here is not "expected" just because this stage's job is to
+        # clear, not to validate the read.
+        - name: Archive-read the event log before touching anything
+          james_crowley.intel_amt.amt_event_log:
+            host: "{{ amt_host }}"
+            username: "{{ amt_username }}"
+            password: "{{ amt_password }}"
+            tls_fingerprint: "{{ amt_tls_fingerprint }}"
+          delegate_to: localhost
+          no_log: true
+          register: amt_log_clear_archive
+
+        - name: Require the archive read to have actually completed
+          ansible.builtin.assert:
+            that:
+              - not amt_log_clear_archive.changed
+              - amt_log_clear_archive.complete
+            fail_msg: >-
+              The pre-clear archive read did not complete cleanly for {{ inventory_hostname }}
+              (complete={{ amt_log_clear_archive.complete }}, stop_reason={{ amt_log_clear_archive.stop_reason }}).
+              Refusing to clear a log this stage could not read all the way through --
+              an incomplete read is not a durable archive.
+
+        - name: Ensure the evidence output directory exists
+          ansible.builtin.file:
+            path: "{{ amt_output_dir }}"
+            state: directory
+            mode: "0700"
+          delegate_to: localhost
+
+        # Written and fsynced to disk (copy is synchronous) BEFORE the clear task
+        # below runs at all -- this ordering is the actual safety property "assert
+        # records were captured" buys, not a check on whether total_records happens
+        # to be non-zero. A machine with a genuinely empty log has nothing to lose
+        # and must not be blocked from qualifying this stage.
+        - name: Record the pre-clear archive -- this is the only durable copy that will exist
+          ansible.builtin.copy:
+            content: "{{ amt_log_clear_archive | to_nice_json }}\n"
+            dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_log_clear-archive.json"
+            mode: "0600"
+          delegate_to: localhost
+          register: amt_log_clear_archive_file
+
+        - name: Require the archive to actually be on disk before proceeding
+          ansible.builtin.stat:
+            path: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_log_clear-archive.json"
+          delegate_to: localhost
+          register: amt_log_clear_archive_stat
+
+        - name: Refuse to clear unless the archive file is confirmed written and non-empty
+          ansible.builtin.assert:
+            that:
+              - amt_log_clear_archive_stat.stat.exists
+              - amt_log_clear_archive_stat.stat.size > 0
+            fail_msg: >-
+              The pre-clear archive for {{ inventory_hostname }} does not exist on disk
+              (or is empty) immediately before the destructive step. Refusing to clear --
+              this is the one check standing between "irreversible" and "irreversible and
+              unrecorded".
+
+        - name: Report what is about to be destroyed
+          ansible.builtin.debug:
+            msg: >-
+              Archived {{ amt_log_clear_archive.total_records }} record(s) for
+              {{ inventory_hostname }} to
+              {{ amt_output_dir }}/{{ inventory_hostname }}-qualify_log_clear-archive.json.
+              {{ 'The log is genuinely empty -- there is nothing to lose.'
+                 if (amt_log_clear_archive.total_records | default(0)) == 0
+                 else 'Clearing below will permanently destroy these ' + (amt_log_clear_archive.total_records | string) + ' record(s).' }}
+
+        - name: Pause immediately before the irreversible clear
+          ansible.builtin.pause:
+            prompt: >-
+              Archive confirmed written to disk. About to call amt_log_clear against
+              {{ inventory_hostname }}, which cannot be undone. Press enter to clear, or
+              Ctrl-C then A to abort -- the archive above is already safe either way
+          when: amt_qualify_attended | default(true) | bool
+
+        # confirm_destructive is hardcoded true here, not exposed as an operator-supplied
+        # var -- the same convention qualify_media_attach.yml and qualify_pxe.yml use for
+        # amt_baremetal_install_confirm_destructive. This playbook's own name, the pauses
+        # above, and the approval gate in front of the CI job ARE the confirmation; a
+        # second flag an operator has to also remember to set would be redundant with
+        # controls that already exist, not an additional one.
+        - name: Clear the event log
+          james_crowley.intel_amt.amt_log_clear:
+            host: "{{ amt_host }}"
+            username: "{{ amt_username }}"
+            password: "{{ amt_password }}"
+            tls_fingerprint: "{{ amt_tls_fingerprint }}"
+            confirm_destructive: true
+          delegate_to: localhost
+          no_log: true
+          register: amt_log_clear_result
+
+        # amt_log_clear is convergent on an already-empty log (see its own
+        # DOCUMENTATION): when records_before is 0, nothing is sent, cleared is
+        # false, and records_after stays null -- null there means "no clear was
+        # sent", not "unknown state". Requiring records_after == 0 unconditionally
+        # would fail this exact legitimate, no-op outcome. The postcondition that
+        # actually matters is "empty either way": either this call cleared it, or
+        # it was already empty going in.
+        - name: Require the log to be empty after this task, one way or another
+          ansible.builtin.assert:
+            that:
+              - amt_log_clear_result.records_after == 0 or amt_log_clear_result.records_before == 0
+            fail_msg: >-
+              amt_log_clear left {{ inventory_hostname }} in neither expected postcondition:
+              records_before={{ amt_log_clear_result.records_before }},
+              records_after={{ amt_log_clear_result.records_after }},
+              cleared={{ amt_log_clear_result.cleared }}. Either the log was already empty
+              (records_before == 0) or the clear actually emptied it (records_after == 0) --
+              neither held here. Do not trust ClearLog's ReturnValue-0 acceptance alone on
+              this firmware; see PREFLIGHT.md's failure-modes section.
+            success_msg: >-
+              {{ 'Log was already empty before this run (records_before=0); nothing needed clearing.'
+                 if amt_log_clear_result.records_before == 0
+                 else 'ClearLog accepted and records_after confirms the log is now empty.' }}
+
+        # Step 2 of the postcondition: an INDEPENDENT re-read via amt_event_log,
+        # not merely amt_log_clear's own records_after (which reads the AMT_MessageLog
+        # container property, a different WS-Man call than GetRecords). Two different
+        # calls agreeing is worth more than trusting either alone -- exactly the
+        # cross-check stage 1b's own history (see qualify_readonly.yml) shows this
+        # collection needed once already.
+        - name: Independently re-read the event log via amt_event_log
+          james_crowley.intel_amt.amt_event_log:
+            host: "{{ amt_host }}"
+            username: "{{ amt_username }}"
+            password: "{{ amt_password }}"
+            tls_fingerprint: "{{ amt_tls_fingerprint }}"
+          delegate_to: localhost
+          no_log: true
+          register: amt_log_clear_reread
+
+        - name: Require the independent re-read to also report empty
+          ansible.builtin.assert:
+            that:
+              - amt_log_clear_reread.total_records is none or amt_log_clear_reread.total_records == 0
+              - amt_log_clear_reread.records | length == 0
+              - amt_log_clear_reread.stop_reason in ['no_record_exists', 'no_record_exists_in_log']
+            fail_msg: >-
+              amt_log_clear reported the log cleared, but the independent amt_event_log
+              re-read on {{ inventory_hostname }} disagrees: total_records={{ amt_log_clear_reread.total_records }},
+              records_read={{ amt_log_clear_reread.records_read }}, stop_reason={{ amt_log_clear_reread.stop_reason }}.
+              Two different WS-Man calls disagreeing about the same state is a real
+              finding, not a flake -- investigate before qualifying this stage as passed.
+            success_msg: >-
+              Independent re-read confirms the log is empty on {{ inventory_hostname }}
+              (stop_reason={{ amt_log_clear_reread.stop_reason }}) -- agrees with
+              amt_log_clear's own records_after.
+
+        - name: Record the clear-and-reread evidence for this target
+          ansible.builtin.copy:
+            content: "{{ {'clear': amt_log_clear_result, 're_read_after_clear': amt_log_clear_reread} | to_nice_json }}\n"
+            dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_log_clear.json"
+            mode: "0600"
+          delegate_to: localhost
+      rescue:
+        - name: Report the redacted failure detail
+          ansible.builtin.debug:
+            msg:
+              error_class: "{{ ansible_failed_result.error_class | default('(none reported)') }}"
+              endpoint: "{{ ansible_failed_result.endpoint | default('(none reported)') }}"
+              operation: "{{ ansible_failed_result.operation | default('(none reported)') }}"
+              message: "{{ ansible_failed_result.msg | default('(no message)') }}"
+              diagnostic: "{{ ansible_failed_result.diagnostic | default('(none)') }}"
+
+        - name: Fail with the error class and a pointer to the pre-flight brief
+          ansible.builtin.fail:
+            msg: >-
+              qualify_log_clear.yml failed against {{ inventory_hostname }} with
+              error_class={{ ansible_failed_result.error_class | default('unknown') }}.
+              See the redacted detail above and tests/hardware/PREFLIGHT.md's
+              "amt_log_clear" section for what state this can leave the machine in and
+              how to recover. If the failure happened before "Clear the event log" ran,
+              nothing was destroyed -- the archive task above is the line that matters.
+
+    - name: Ensure the evidence output directory exists (again, for the reminder below)
+      ansible.builtin.file:
+        path: "{{ amt_output_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+
+  post_tasks:
+    - name: Remind the operator what this stage did and did not prove
+      ansible.builtin.debug:
+        msg: >-
+          Event log cleared on {{ inventory_hostname }} and confirmed empty by two
+          independent reads. This does NOT mean every record this collection could not
+          decode was harmless -- see the archive file
+          ({{ inventory_hostname }}-qualify_log_clear-archive.json) for the raw bytes of
+          everything that existed immediately before the clear. Nothing about the
+          machine's reachability or boot configuration was touched by this stage.

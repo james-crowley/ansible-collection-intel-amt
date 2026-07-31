@@ -90,6 +90,27 @@ EVIDENCE: dict[str, Any] = {
     },
     "write_status": {"session_id": 7, "bytes_read": 4096, "bytes_written": 0, "writable": True},
     "boot_settings": {"AMT_BootSettingData": {"BIOSPause": False, "BootMediaIndex": 0, "UseSOL": False}},
+    # 0.5.0 hardware inventory: serials and asset tags are the single most identifying
+    # value AMT reports, and match no pattern -- see _IDENTIFYING_KEYS.
+    "hardware": {
+        "chassis": {"manufacturer": "Example Corp", "model": "ThinkStation P3 Tiny", "serial_number": "PF3ABCDE", "asset_tag": "LAB-INV-0042"},
+        "baseboard": {"manufacturer": "Example Corp", "board_serial": "MB-77XZQ9"},
+    },
+    # amt_media devices, exercised by the stage 5/6 evidence: the resolved backing
+    # image path spells out the lab runner's account and workspace layout.
+    "devices": {
+        "cdrom": {"path": "/home/jane/lab/ipxe-test.iso", "writable": False, "size": 1048576, "bytes_read": 4096, "bytes_written": 0},
+    },
+    # amt_event_log: a decoded record, its raw bytes (never redacted -- see
+    # _EXEMPT_KEYS), and a description carrying the truncated watchdog GUID.
+    "records": [
+        {
+            "raw_base64": "Y8iYZf8GbwVoEP8mYaoKAAAAAAAA",
+            "raw_hex": "63c89865ff066f0568108f26aa0a0a00000000000",
+            "decode_error": None,
+            "description": "Agent watchdog 1a2b3c4d-5e6f-... changed to Expired",
+        }
+    ],
     "operation": {
         "schema": "intel-amt-operation/v1",
         "action": "get_facts",
@@ -118,7 +139,12 @@ PRESERVED_VALUES: tuple[Any, ...] = (
     "sx_ac",
     "ok",
     "on",
+    "Example Corp",
+    "ThinkStation P3 Tiny",
 )
+
+#: The record's raw bytes, which must survive byte-for-byte -- see _EXEMPT_KEYS.
+_RAW_RECORD_BYTES: tuple[str, str] = ("Y8iYZf8GbwVoEP8mYaoKAAAAAAAA", "63c89865ff066f0568108f26aa0a0a00000000000")
 
 
 def _all_strings(value: Any) -> list[str]:
@@ -176,6 +202,136 @@ def test_amt_hostname_value_is_redacted_by_key(redactor: Any) -> None:
 
 def test_a_bare_label_under_a_non_identifying_key_is_left_alone(redactor: Any) -> None:
     assert redactor.redact_value({"enabled_state_text": "enabled"}) == {"enabled_state_text": "enabled"}
+
+
+# --- 0.5.0 inventory: serial numbers and asset tags, by key ----------------
+#
+# These categories shipped in af440d6 (#82) with no test coverage of their own --
+# the full-document tests below happened to exercise them indirectly, but nothing
+# asserted the key -> category mapping directly, which is exactly the kind of gap a
+# rename or a typo in _IDENTIFYING_KEYS would sail through.
+
+
+@pytest.mark.parametrize(
+    ("key", "category"),
+    [
+        ("serial_number", "serial"),
+        ("serialnumber", "serial"),
+        ("serial", "serial"),
+        ("board_serial", "serial"),
+        ("chassis_serial", "serial"),
+        ("asset_tag", "asset_tag"),
+        ("assettag", "asset_tag"),
+        ("sku", "asset_tag"),
+        ("sku_number", "asset_tag"),
+    ],
+)
+def test_serial_and_asset_tag_keys_are_redacted(redactor: Any, key: str, category: str) -> None:
+    """A serial or asset tag is an arbitrary alphanumeric string -- indistinguishable
+    from a firmware version or part number by pattern -- so only the key catches it.
+    """
+    result = redactor.redact_value({key: "7JX2WK3"})
+    assert result == {key: f"<redacted-{category}-1>"}
+
+
+def test_a_value_that_looks_like_a_serial_is_left_alone_under_a_non_identifying_key(redactor: Any) -> None:
+    """The same string under model/manufacturer -- not a serial key -- must survive:
+    over-redaction by pattern is not possible here (serials match no pattern), but a
+    key-set drift that widened past the documented list would show up here first.
+    """
+    assert redactor.redact_value({"model": "7JX2WK3"}) == {"model": "7JX2WK3"}
+
+
+# --- local filesystem paths, by key ------------------------------------------
+#
+# amt_media's devices.<slot>.path is the resolved backing image on the lab runner's
+# filesystem, which spells out the account the job runs as. Paths match no general
+# pattern -- the FQDN rule explicitly rejects anything ending in a filename label,
+# which is exactly the shape of an image path -- so, like serials, only the key
+# catches this.
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["path", "iso_path", "image_path", "answer_image_path", "cdrom", "floppy", "allowed_directory", "runtime_dir", "state_file"],
+)
+def test_path_keys_are_redacted(redactor: Any, key: str) -> None:
+    result = redactor.redact_value({key: "/home/jane/lab/ipxe-test.iso"})
+    assert result == {key: "<redacted-path-1>"}
+
+
+def test_a_path_appearing_under_a_non_path_key_is_left_alone(redactor: Any) -> None:
+    """Confirms the path categories are matched by key, not by looking path-shaped --
+    a bare pattern match here would mean every tests/hardware/*.md reference in a
+    prose note is also at risk, which test_filenames_and_standards_domains_are_not_redacted
+    below depends on NOT happening.
+    """
+    assert redactor.redact_value({"note": "/home/jane/lab/ipxe-test.iso"}) == {"note": "/home/jane/lab/ipxe-test.iso"}
+
+
+def test_the_same_path_in_two_slots_is_recognisably_the_same_file(redactor: Any) -> None:
+    """cdrom and floppy holding the SAME image must map to the same token -- that is
+    the fact a reviewer needs from the pseudonym, since the path category exists
+    specifically because the real name cannot be shown.
+    """
+    result = redactor.redact_value({"cdrom": "/home/jane/shared.iso", "floppy": "/home/jane/shared.iso"})
+    assert result == {"cdrom": "<redacted-path-1>", "floppy": "<redacted-path-1>"}
+
+
+# --- amt_event_log's truncated agent-watchdog GUID --------------------------
+
+
+def test_the_truncated_watchdog_guid_in_a_description_is_redacted(redactor: Any) -> None:
+    text = "Agent watchdog 1a2b3c4d-5e6f-... changed to Expired"
+    result = redactor.redact_text(text)
+    assert result == "Agent watchdog <redacted-partial_uuid-1>-... changed to Expired"
+    assert redactor.distinct == {"partial_uuid": 1}
+
+
+def test_the_partial_uuid_pattern_does_not_fire_without_the_ellipsis_marker(redactor: Any) -> None:
+    """Only records/description renders the truncated "-..." form -- a real,
+    complete UUID prefix followed by more hex digits must stay claimed by the
+    ordinary dashed-UUID pattern instead.
+    """
+    assert redactor.redact_text("4c4c4544-0037-4a10-8055-b3c04f463433") == "<redacted-uuid-1>"
+
+
+# --- amt_event_log raw record bytes: exempt by key, never by pattern --------
+#
+# raw_hex/raw_base64 must survive completely untouched even when a malformed or
+# truncated record happens to render at a length indistinguishable from a category
+# this script redacts elsewhere -- see _EXEMPT_KEYS's own comment for why a decode
+# this collection has never checked against firmware cannot afford to lose its raw
+# bytes to a coincidence of length.
+
+
+def test_raw_hex_and_raw_base64_survive_even_when_uuid_shaped(redactor: Any) -> None:
+    """32 hex characters is exactly what a truncated 16-byte record renders as, and
+    is indistinguishable from a compact UUID to the pattern that catches those. The
+    same string under a non-exempt key proves this is the exemption doing the work,
+    not the pattern failing to match.
+    """
+    thirty_two_hex = "4c4c454400374a108055b3c04f4634aa"[:32]
+    result = redactor.redact_value({"raw_hex": thirty_two_hex, "raw_base64": thirty_two_hex, "uuid_compact": thirty_two_hex})
+    assert result["raw_hex"] == thirty_two_hex
+    assert result["raw_base64"] == thirty_two_hex
+    assert result["uuid_compact"] == "<redacted-uuid-1>"
+
+
+def test_raw_hex_survives_even_when_digest_shaped(redactor: Any) -> None:
+    """64 hex characters -- a truncated 32-byte record -- is exactly what the
+    64-hex digest pattern matches."""
+    sixty_four_hex = "ab" * 32
+    result = redactor.redact_value({"raw_hex": sixty_four_hex, "image_digest": sixty_four_hex})
+    assert result["raw_hex"] == sixty_four_hex
+    assert result["image_digest"] == "<redacted-digest-1>"
+
+
+def test_raw_hex_is_matched_case_insensitively(redactor: Any) -> None:
+    """The exemption is keyed on the lowercase form, matching every other
+    key lookup in this script (_IDENTIFYING_KEYS.get(key.lower()))."""
+    result = redactor.redact_value({"RAW_HEX": "ab" * 32})
+    assert result == {"RAW_HEX": "ab" * 32}
 
 
 def test_keys_are_never_rewritten(redactor: Any) -> None:
@@ -316,6 +472,13 @@ def test_a_full_evidence_document_keeps_every_preserved_value(redactor: Any) -> 
     assert result["network"]["link_policy"] == [1, 14, 16]
     assert result["system_state"]["operational_status"] == [2]
     assert result["system_state"]["enabled_state"] == 2
+    # The raw record bytes survive byte-for-byte, even though this record's own
+    # cdrom/device evidence elsewhere in the same document is being actively
+    # redacted -- proving the exemption is scoped to the key, not a blanket
+    # "records are special" carve-out.
+    for raw in _RAW_RECORD_BYTES:
+        assert raw in strings, f"{raw!r} (a record's raw bytes) should have survived redaction untouched"
+    assert result["records"][0]["decode_error"] is None
 
 
 def test_a_full_evidence_document_leaves_no_identifying_value_behind(redactor: Any) -> None:
@@ -333,6 +496,11 @@ def test_a_full_evidence_document_leaves_no_identifying_value_behind(redactor: A
         "mgmt.lab.example.invalid",
         "amt-fixture-1",
         "ab" * 32,
+        "PF3ABCDE",
+        "LAB-INV-0042",
+        "MB-77XZQ9",
+        "/home/jane/lab/ipxe-test.iso",
+        "1a2b3c4d-5e6f",
     ):
         assert leaked not in serialised, f"{leaked!r} survived redaction"
 
@@ -384,6 +552,30 @@ def test_redacting_twice_is_a_no_op(tmp_path: Path) -> None:
     assert second.distinct == {}
 
 
+def test_redacting_twice_is_a_no_op_for_underscored_category_names(redactor: Any) -> None:
+    """Regression coverage for the specific bug _TOKEN_RE's docstring describes:
+    without the underscore in its character class, ``asset_tag`` -- redacted by
+    key, not by pattern -- did not match the "already a token" check, so a
+    second pass treated ``<redacted-asset_tag-1>`` as an unredacted value under
+    an identifying key and redacted it again.
+
+    A single already-redacted value is not enough to expose this by comparing
+    text: re-minting a token that is the first thing this category has seen
+    happens, by construction, to produce token number 1 again -- the same text
+    comes out the other side purely by coincidence of ordering, not because
+    nothing was touched. ``again.distinct`` is what actually tells the two
+    cases apart: it must stay empty, because a second pass over an
+    already-redacted file has nothing left to redact.
+    """
+    once = redactor.redact_value({"asset_tag": "LAB-INV-0042"})
+    assert once == {"asset_tag": "<redacted-asset_tag-1>"}
+
+    again = redact_evidence.Redactor()
+    twice = again.redact_value(once)
+    assert twice == once, "a second pass renamed an already-redacted asset_tag token"
+    assert again.distinct == {}, "a second pass over an already-redacted asset_tag value redacted something 'new'"
+
+
 def test_main_walks_subdirectories_and_shares_tokens_across_files(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     output = tmp_path / "output"
     first = _write_evidence(output, "amt-fixture-1-qualify_readonly.json")
@@ -409,7 +601,7 @@ def test_main_prints_a_per_category_summary(tmp_path: Path, capsys: pytest.Captu
 
     out = capsys.readouterr().out
     assert "1 JSON file(s) rewritten" in out
-    for category in ("ipv4", "ipv6", "mac", "uuid", "fingerprint", "digest", "fqdn", "hostname"):
+    for category in ("ipv4", "ipv6", "mac", "uuid", "partial_uuid", "fingerprint", "digest", "fqdn", "hostname", "serial", "asset_tag", "path"):
         assert f"  {category}: " in out, f"summary is missing a {category} line"
 
 

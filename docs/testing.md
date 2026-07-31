@@ -272,6 +272,10 @@ That document cites each run by workflow and job; this list is about interpreter
   both machines with the 0.5.0 hardware-inventory code, which every earlier run
   predated, and it is the sole evidence for the inventory rows in Tier 3.
 
+None of the runs above cover stages 9-12 (added afterwards) at all -- "all eight" in
+each bullet means all eight that existed on that date, not all twelve that exist now.
+See "Qualification order" below.
+
 Machine 2's run **clears GHSA-w8p5-mx5w-cpqj [HIGH] for the lab runner**: the 2.17
 line it previously used is EOL and permanently affected, and the runner is now
 demonstrably executing on 2.18.18, the first release carrying the fix.
@@ -290,16 +294,16 @@ environment, never the repository. Commit only an `.example` file.
 
 ### Qualification order
 
-**Eight numbered stages.** Run them in order and never in parallel; each is a gate
-on the next. Stage 2 is the odd one out: it has **no playbook of its own**, because
-it is a human cross-check performed on the output of stage 1's playbook
-(`qualify_readonly.yml`). That is why CI runs seven playbooks across eight stages.
+**Twelve numbered stages across eleven playbooks.** Run them in order and never in
+parallel; each is a gate on the next. Stage 2 is the odd one out: it has **no
+playbook of its own**, because it is a human cross-check performed on the output of
+stage 1's playbook (`qualify_readonly.yml`).
 
 1. Read-only `amt_info` against each target. Since 0.5.0 the same playbook also runs
    **stage 1b**, a second read-only `amt_info` call with
    `gather_subset: [config, hardware]` for the inventory subsets, with its own
-   evidence file. It is numbered `1b` rather than `9` because it is read-only and
-   gates nothing, so the eight numbered stages above are still eight.
+   evidence file. It is numbered `1b` rather than a new top-level number because it
+   is read-only and gates nothing, so it does not need one of its own.
 2. Compare the reported facts against an independent power probe and reviewed
    BIOS inventory — this is what catches an inventory/reality mismatch before it
    becomes a reset of the wrong machine. **No playbook**: `qualify_readonly.yml`
@@ -317,8 +321,32 @@ it is a human cross-check performed on the output of stage 1's playbook
 7. One-time firmware PXE, only after DHCP/boot-service and NIC prerequisites are
    separately proven.
 8. Idempotent re-probe.
+9. Read-only `amt_event_log`: follows the `GetRecords` iteration to completion and
+   checks that every record returned decodes cleanly under the 21-byte layout this
+   collection assumes, with a specific check against the wrong-byte-order failure
+   mode for the little-endian timestamp. Shares stage 1/3/8's approval gate rather
+   than earning its own, because a read is not a mutation.
+10. `amt_log_clear` — **irreversible**. Reads and archives the log to disk, confirms
+    the archive is actually there, only then clears, then independently re-reads to
+    confirm empty. Own approval gate. **Read
+    [`PREFLIGHT.md`](../tests/hardware/PREFLIGHT.md) before approving.**
+11. Sleep-light, sleep-deep, hibernate. Every attempt is classified
+    `confirmed_transition` / `os_did_not_transition` / `firmware_refused`, since
+    whether the target OS supports or enables a given ACPI state is outside AMT's
+    control; only a failure to restore back to `on` is fatal. Own approval gate. See
+    [`PREFLIGHT.md`](../tests/hardware/PREFLIGHT.md).
+12. Wake-while-powered-off: power off, then attempt to reach and wake the endpoint
+    over WS-Man while it reports off. The last stage in the chain, own approval
+    gate. **There is no channel available in CI that independently confirms the
+    host is genuinely, physically off** — see
+    [`PREFLIGHT.md`](../tests/hardware/PREFLIGHT.md) for exactly what a run of this
+    stage does and does not establish.
 
-**Qualify one machine through all eight stages first.** A second machine proves
+**Stages 9-12 are authored and verified against the mock WS-Man server, but as of
+this writing have not yet run against real hardware** — see "What the recorded
+qualifications ran on" above, none of which cover them.
+
+**Qualify one machine through all twelve stages first.** A second machine proves
 repeatability. Never cut both over to a new stage at once — if a firmware quirk
 bricks a boot configuration, you want a known-good machine to compare against.
 
@@ -346,18 +374,23 @@ Being explicit, because the gap matters:
   misunderstanding between implementation and mock passes both.
 - Real firmware differs across AMT generations and SKUs. Anything version
   dependent is unverified until step 1 runs on that generation.
-- **Nothing in the hardware tier covers `amt_event_log` or `amt_log_clear`.** Five
-  of the collection's seven modules are hardware-qualified; those two are not, on
-  any generation. The eight stages predate both modules and none was extended to
-  reach them, so their `AMT_MessageLog` iteration, record decode and `ClearLog`
-  invocation rest entirely on the unit and mock tiers plus a captured firmware
-  fixture. See Tier 4 in [`capability-matrix.md`](capability-matrix.md).
+- **`amt_event_log` and `amt_log_clear` now have a hardware stage each (9 and 10),
+  but neither has actually run against real hardware yet.** Five of the
+  collection's seven modules are hardware-qualified; those two are not, on any
+  generation. Stages 9 and 10 are authored and verified against the mock WS-Man
+  server, so the gap that used to be "no stage reaches these modules at all" is
+  closed on paper -- but until stage 10 in particular actually runs (it is
+  irreversible; see [`PREFLIGHT.md`](../tests/hardware/PREFLIGHT.md)), their
+  `AMT_MessageLog` iteration, record decode and `ClearLog` invocation still rest
+  entirely on the unit and mock tiers plus a captured firmware fixture. See Tier 4
+  in [`capability-matrix.md`](capability-matrix.md).
 
 This collection is protocol-complete, test-covered, and **hardware-qualified on two
-machines for five of its seven modules** — precisely: **all eight stages against AMT
-16.1.30 (`amt-lab-01`, 2026-07-28) and all eight against AMT 19.0.5 (`amt-lab-02`,
-2026-07-29)**, each run limited to the machine it qualified (`hardware-limit`), so
-neither touched the other.
+machines for five of its seven modules** — precisely: **all eight (of the stages
+that existed at the time) against AMT 16.1.30 (`amt-lab-01`, 2026-07-28) and all
+eight against AMT 19.0.5 (`amt-lab-02`, 2026-07-29)**, each run limited to the
+machine it qualified (`hardware-limit`), so neither touched the other. Stages 9-12
+did not exist yet and are not part of either run — see "Qualification order" above.
 A read-only re-run against machine 1 on 2026-07-29 then read that machine with
 v0.2.0's fact code, which closed the last coverage difference between the two:
 `amt_info`'s network and system-state facts are now confirmed populated on both

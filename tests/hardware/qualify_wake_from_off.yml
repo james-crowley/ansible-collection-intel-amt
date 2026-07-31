@@ -1,0 +1,271 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Hardware qualification stage 12 (see README.md, last stage in the chain): power the
+# machine off, then attempt to reach it and wake it over WS-Man while it reports off.
+#
+# WHY THIS STAGE EXISTS: both lab machines report link_policy 14 (available on Sx AC) and
+# wake_on_lan_capable=true, and one has MEBx configured "ON in S0, ME Wake in S3, S4-5". All
+# of that is CONFIGURATION -- what the machine is set up to do -- not a MEASUREMENT of what it
+# actually does. No stage before this one has ever powered a machine off, and then tried to
+# reach it. Stage 4 (qualify_power.yml) issues off immediately followed by a restore, with no
+# attempt to talk to the endpoint in between -- so its own off-and-restore was only ever
+# *consistent* with a reachable-while-off endpoint, never evidence of one, because nothing
+# confirmed the machine was actually off in the interval.
+#
+# READ THIS BEFORE APPROVING -- WHAT THIS STAGE DOES AND DOES NOT ESTABLISH:
+#
+#   What it measures: whether WS-Man queries issued AFTER an `off` request answer, and
+#   whether AMT accepts and acts on a subsequent `on` request while it is itself reporting
+#   `off`. Both are real, independent-of-this-collection's-own-history measurements the
+#   first time this stage runs.
+#
+#   What it does NOT establish, and this is the honest limit stated plainly rather than
+#   glossed over: THERE IS NO CHANNEL AVAILABLE TO THIS PLAYBOOK, RUNNING IN CI, THAT
+#   INDEPENDENTLY CONFIRMS THE HOST IS GENUINELY POWERED OFF. "AMT reports off" is AMT's own
+#   self-report -- the very same state machine this stage exists to test -- not an
+#   observation from outside it. This collection has no IPMI/BMC/PDU integration, no host-OS
+#   agent, and no camera; the only independent signal that could exist is a HUMAN physically
+#   watching the machine or its KVM console during an attended run, which is why the
+#   attended pause below asks for exactly that, and why the evidence file records whether an
+#   operator attestation was actually captured. When amt_qualify_attended=false (every CI
+#   run), that pause -- and the only independent check this stage can obtain -- does not
+#   happen, and the evidence says so explicitly. A CI run of this stage establishes "AMT
+#   self-reports off, and WS-Man answered anyway" -- a real, useful data point about this
+#   collection and this firmware -- and nothing more.
+#
+# The owner has explicitly accepted the risk of stranding a machine here: recovery is a
+# physical reset, and that is a known, accepted possibility, not a defect. See
+# tests/hardware/PREFLIGHT.md before approving.
+#
+# Wired into CircleCI as the hardware-wake-from-off job, LAST in the chain, behind its own
+# approval gate, downstream of hardware-sleep-hibernate (see .circleci/config.yml).
+#
+# Run manually, one host at a time, attended (attended is what makes the operator
+# attestation below meaningful at all):
+#
+#   ansible-playbook tests/hardware/qualify_wake_from_off.yml \
+#     -i tests/hardware/inventory.yml -l <single-host>
+
+- name: "Hardware qualification stage 12: wake-while-powered-off (last stage)"
+  hosts: amt_targets
+  serial: 1
+  gather_facts: false
+  connection: local
+  vars:
+    amt_output_dir: "{{ playbook_dir }}/output"
+    amt_wake_observe_retries: 5
+    amt_wake_observe_delay: 10
+    amt_wake_reachability_probe_count: 3
+    amt_wake_reachability_probe_delay: 5
+
+  tasks:
+    - name: Refuse to run against more than one host at a time
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+        fail_msg: "This stage powers off real hardware and must run one machine at a time. Re-run with -l <single-host>."
+
+    - name: Query power state before anything
+      james_crowley.intel_amt.amt_power:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+        state: query
+      delegate_to: localhost
+      no_log: true
+      register: amt_wake_before
+
+    - name: Refuse to continue unless the machine is currently on
+      ansible.builtin.assert:
+        that:
+          - ((amt_wake_before.previous_state | default({})).normalized | default('')) == 'on'
+        fail_msg: >-
+          {{ inventory_hostname }} is reporting power state
+          '{{ amt_wake_before.previous_state.normalized }}', not 'on'. Refusing to continue --
+          this stage needs a known starting state to make "did it actually come back" a
+          meaningful question afterwards.
+
+    - name: Pause for the operator to prepare an independent, physical confirmation of off
+      ansible.builtin.pause:
+        prompt: >-
+          About to power off {{ inventory_hostname }} ({{ amt_host }}) and then attempt to
+          reach it over WS-Man while it reports off. THIS IS THE ONLY INDEPENDENT CONFIRMATION
+          THIS STAGE CAN EVER OBTAIN that the machine is genuinely off -- nothing in CI can
+          verify it. Have the KVM console open, or be physically at the machine watching for
+          fans/lights to actually stop, before continuing. Press enter once ready
+      register: amt_wake_ready_pause
+      when: amt_qualify_attended | default(true) | bool
+
+    - name: Power off
+      james_crowley.intel_amt.amt_power:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+        state: "off"
+      delegate_to: localhost
+      no_log: true
+      register: amt_wake_off_request
+
+    # AMT's own self-report that it is off -- not an independent confirmation (see this
+    # file's header), but still a real precondition: probing reachability against a machine
+    # that never even reports off would not be testing what this stage exists to test.
+    - name: Bounded probe confirming AMT itself reports off
+      james_crowley.intel_amt.amt_power:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+        state: query
+      delegate_to: localhost
+      no_log: true
+      register: amt_wake_off_confirm
+      until: (amt_wake_off_confirm.previous_state | default({})).normalized | default('') == 'off'
+      retries: "{{ amt_wake_observe_retries }}"
+      delay: "{{ amt_wake_observe_delay }}"
+      failed_when: false
+
+    - name: Require AMT to self-report off before probing reachability
+      ansible.builtin.assert:
+        that:
+          - ((amt_wake_off_confirm.previous_state | default({})).normalized | default('')) == 'off'
+        fail_msg: >-
+          AMT never self-reported {{ inventory_hostname }} as off within
+          {{ amt_wake_observe_retries }} retries after the off request. Whatever this stage
+          measures next would not be "reachability while off" -- stopping here rather than
+          probing a machine that, by its own report, never actually went off. Attempting to
+          restore 'on' below regardless.
+
+    - name: Pause for the operator to physically confirm the machine is actually off
+      ansible.builtin.pause:
+        prompt: >-
+          AMT reports {{ inventory_hostname }} as off. If you are physically at the machine or
+          watching KVM, type exactly `confirmed-off` if you have independently observed it
+          genuinely powered down (fans stopped, no lights, KVM session dropped) -- anything
+          else is recorded as-is and treated as "not independently confirmed". Press enter
+          alone to skip
+      register: amt_wake_operator_attestation
+      when: amt_qualify_attended | default(true) | bool
+
+    # The actual measurement this stage exists to make: independent, fresh WS-Man queries
+    # issued while AMT reports the machine off. Several attempts with a delay between them,
+    # not one -- a single lucky/unlucky request would not distinguish "reachable" from "raced
+    # a brief window before the link actually dropped".
+    - name: Probe WS-Man reachability while the machine reports off
+      james_crowley.intel_amt.amt_power:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+        state: query
+      delegate_to: localhost
+      no_log: true
+      register: amt_wake_reachability_probe
+      failed_when: false
+      loop: "{{ range(0, amt_wake_reachability_probe_count | int) | list }}"
+      loop_control:
+        pause: "{{ amt_wake_reachability_probe_delay }}"
+
+    - name: Report reachability-while-off plainly
+      ansible.builtin.debug:
+        msg: >-
+          {{ amt_wake_reachability_probe.results
+             | selectattr('failed', 'false')
+             | list | length }} of {{ amt_wake_reachability_probe_count }} independent WS-Man
+          queries answered while {{ inventory_hostname }} reported off. This measures whether
+          the AMT/WS-Man plane stayed reachable, NOT whether the host is genuinely off --
+          see this playbook's header.
+
+    # The other half of "wake": issue `on` while the machine reports off, and confirm it
+    # actually lands. Unlike sleep/hibernate's three-way classification, `on` is a base
+    # capability already exercised by stage 4 -- a failure here is a real regression to
+    # investigate, not an ambiguous OS-support question, so this fails loudly rather than
+    # being triaged.
+    - name: Issue a power-on request while the machine reports off
+      james_crowley.intel_amt.amt_power:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+        state: "on"
+      delegate_to: localhost
+      no_log: true
+      register: amt_wake_on_request
+
+    - name: Independently confirm the machine actually came back on
+      james_crowley.intel_amt.amt_power:
+        host: "{{ amt_host }}"
+        username: "{{ amt_username }}"
+        password: "{{ amt_password }}"
+        tls_fingerprint: "{{ amt_tls_fingerprint }}"
+        state: query
+      delegate_to: localhost
+      no_log: true
+      register: amt_wake_restore_confirm
+      until: (amt_wake_restore_confirm.previous_state | default({})).normalized | default('') == 'on'
+      retries: "{{ amt_wake_observe_retries }}"
+      delay: "{{ amt_wake_observe_delay }}"
+      failed_when: false
+
+    - name: Report whether the wake actually landed
+      ansible.builtin.assert:
+        that:
+          - ((amt_wake_restore_confirm.previous_state | default({})).normalized | default('')) == 'on'
+        fail_msg: >-
+          {{ inventory_hostname }} did not come back to power state 'on' after an explicit
+          power-on request issued while it reported off, within {{ amt_wake_observe_retries }}
+          retries. The machine may be stranded off -- see
+          tests/hardware/PREFLIGHT.md#wake-while-powered-off for physical recovery steps. The
+          owner has accepted this as a known possible outcome of running this stage.
+        success_msg: >-
+          {{ inventory_hostname }} came back to power state 'on' after an explicit power-on
+          request issued while it reported off -- the wake request itself was accepted and acted
+          on, in addition to WS-Man having stayed reachable throughout.
+
+    - name: Ensure the evidence output directory exists
+      ansible.builtin.file:
+        path: "{{ amt_output_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+
+    - name: Record evidence for this target
+      ansible.builtin.copy:
+        content: >-
+          {{ {'before': amt_wake_before.previous_state,
+              'off_confirmed_by_amt': amt_wake_off_confirm.previous_state,
+              'operator_attestation': (amt_wake_operator_attestation.user_input
+                                        if (amt_wake_operator_attestation is defined and amt_wake_operator_attestation is not skipped)
+                                        else None),
+              'reachability_probes_while_off': amt_wake_reachability_probe.results
+                                                 | selectattr('failed', 'false') | map(attribute='previous_state') | list,
+              'reachability_probe_failures': amt_wake_reachability_probe.results
+                                               | selectattr('failed', 'true') | map(attribute='msg') | list,
+              'wake_request_accepted': amt_wake_on_request.changed,
+              'restored_to': amt_wake_restore_confirm.previous_state,
+              'note': "off_confirmed_by_amt is AMT's own self-report, not an independent "
+                      + "confirmation of genuine power-off. operator_attestation is null on "
+                      + "every CI run (amt_qualify_attended=false skips the pause that could "
+                      + "capture it) -- only an attended run can populate it. See this "
+                      + "playbook's header for exactly what reachability_probes_while_off "
+                      + "does and does not establish."}
+             | to_nice_json }}
+        dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_wake_from_off.json"
+        mode: "0600"
+      delegate_to: localhost
+
+  post_tasks:
+    - name: Remind the operator what this stage did and did not prove
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: measured whether WS-Man stayed reachable while AMT reported
+          off, and whether an explicit power-on request issued in that state was accepted and
+          acted on. This does NOT prove the host was genuinely, physically off -- only an
+          attended run with an operator's own eyes on the machine or its KVM console can supply
+          that, and this run's operator_attestation field in the evidence file says whether that
+          happened. Configuration (link_policy, wake_on_lan_capable, MEBx Wake settings) was
+          never the question this stage answers; a real measurement now is.

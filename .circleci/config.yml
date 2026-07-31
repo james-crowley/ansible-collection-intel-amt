@@ -631,7 +631,13 @@ jobs:
   # builds, which matters if this repository is ever made public.
   #
   # This job is READ-ONLY and check-mode only. It never mutates power or boot
-  # state: it runs stages 1, 3 and 8 only.
+  # state: it runs stages 1, 3, 8 and 9. Stage 9 (qualify_event_log.yml) belongs
+  # here for the same reason 1/3/8 do -- a GetRecords iteration is a read, exactly
+  # like amt_info -- so it shares this job's single hardware-approval gate rather
+  # than earning one of its own. amt_log_clear (stage 10, below) is the mutating
+  # half of the same module pair and is NOT here: it gets its own job and its own
+  # approval, downstream of every stage 4-7 job, precisely so a read-only run can
+  # never be mistaken for having exercised the irreversible clear too.
   #
   # The destructive stages ARE wired into CI, contrary to what this comment used
   # to say. Stages 4-7 run as four separate jobs defined below -- hardware-power,
@@ -642,7 +648,9 @@ jobs:
   # the approval before it, and each approval requires the preceding hardware job
   # to have passed, so reaching native PXE takes five separate human approvals and
   # cannot skip a rung. Deliberately not one approval covering all four -- an
-  # operator approving a power cycle has not thereby approved a reimage.
+  # operator approving a power cycle has not thereby approved a reimage. Stages
+  # 10-12 (log-clear, sleep/hibernate, wake-from-off) extend the SAME chain past
+  # hardware-pxe, each behind its own approval in turn -- see those jobs below.
   #
   # So "run deliberately by a human" is still true and is what the approval gates
   # enforce; "not wired into CI" was simply stale. See the per-job comments below
@@ -689,6 +697,12 @@ jobs:
           command: |
             . .venv/bin/activate
             ansible-playbook tests/hardware/qualify_idempotent_reprobe.yml \
+              -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -v
+      - run:
+          name: "Stage 9: read-only amt_event_log"
+          command: |
+            . .venv/bin/activate
+            ansible-playbook tests/hardware/qualify_event_log.yml \
               -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -v
       - redact-hardware-evidence
       - store_artifacts:
@@ -848,6 +862,130 @@ jobs:
               -e amt_qualify_attended=false \
               -e amt_pxe_prereqs_confirmed=<< pipeline.parameters.pxe-prereqs-confirmed >> \
               -v
+      - redact-hardware-evidence
+      - store_artifacts:
+          # Runs on failure too -- a failed stage is exactly when the evidence
+          # matters, and note-recovery-path-on-failure below already tells the
+          # operator it was published. Safe because redact-hardware-evidence
+          # above also runs when: always, so nothing unredacted is ever stored.
+          path: tests/hardware/output
+          destination: hardware-evidence
+          when: always
+      - remove-lab-inventory
+      - note-recovery-path-on-failure
+
+  # -------------------------------------------------------------------------
+  # Hardware-in-the-loop, stage 10 (tests/hardware/qualify_log_clear.yml): amt_log_clear.
+  # IRREVERSIBLE -- see the playbook's own header and tests/hardware/PREFLIGHT.md before
+  # approving this job. Escalates past hardware-pxe behind its own approval gate, the same
+  # "stage 4-7 treatment" every prior mutating job gets: its own dedicated approval job
+  # (hardware-log-clear-approval), amt_qualify_attended=false so the interactive pauses that
+  # would otherwise block on stdin are skipped -- the approval gate is this job's actual
+  # human checkpoint, and the approver is expected to have read PREFLIGHT.md first.
+  #
+  # This does NOT run right after hardware-tests (which is where stage 9's read lives). It
+  # is deliberately downstream of every existing mutating stage instead, so approving it
+  # never has to be rushed ahead of the other four escalations -- amt_log_clear's own
+  # precondition (read, archive to disk, only then clear) is what actually enforces "stage 9
+  # ran on this machine first", not this job's position in the chain.
+  hardware-log-clear:
+    machine: true
+    resource_class: crowley/amt-runner
+    steps:
+      - checkout
+      - verify-lab-credentials
+      - install-lab-ansible-venv
+      - render-lab-inventory
+      - export-hardware-limit
+      - run:
+          name: "Stage 10: amt_log_clear -- irreversible (unattended in CI; the approval gate is the human checkpoint)"
+          command: |
+            . .venv/bin/activate
+            ansible-playbook tests/hardware/qualify_log_clear.yml \
+              -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -e amt_qualify_attended=false -v
+      - redact-hardware-evidence
+      - store_artifacts:
+          # Runs on failure too -- a failed stage is exactly when the evidence
+          # matters, and note-recovery-path-on-failure below already tells the
+          # operator it was published. Safe because redact-hardware-evidence
+          # above also runs when: always, so nothing unredacted is ever stored.
+          path: tests/hardware/output
+          destination: hardware-evidence
+          when: always
+      - remove-lab-inventory
+      - note-recovery-path-on-failure
+
+  # -------------------------------------------------------------------------
+  # Hardware-in-the-loop, stage 11 (tests/hardware/qualify_sleep_hibernate.yml): sleep-light,
+  # sleep-deep, hibernate. Escalates past hardware-log-clear behind its own approval gate.
+  #
+  # IMPORTANT: a green run here does not mean every ACPI state was actually entered. Sleep and
+  # hibernate depend on the TARGET OPERATING SYSTEM supporting and enabling the corresponding
+  # ACPI state -- AMT can only ask the platform to transition, not force it. The playbook
+  # classifies each state's outcome three ways (confirmed_transition, os_did_not_transition,
+  # firmware_refused) precisely so "the OS didn't support it" is never conflated with "this
+  # collection is broken" -- see the playbook's own header and tests/hardware/PREFLIGHT.md
+  # before approving this job. What this job DOES guarantee every run, regardless of outcome:
+  # the machine is restored to 'on' and that restore is independently confirmed -- a failure to
+  # converge back to 'on' is the one thing this stage always treats as fatal.
+  hardware-sleep-hibernate:
+    machine: true
+    resource_class: crowley/amt-runner
+    steps:
+      - checkout
+      - verify-lab-credentials
+      - install-lab-ansible-venv
+      - render-lab-inventory
+      - export-hardware-limit
+      - run:
+          name: "Stage 11: sleep-light, sleep-deep, hibernate (unattended in CI; the approval gate is the human checkpoint)"
+          command: |
+            . .venv/bin/activate
+            ansible-playbook tests/hardware/qualify_sleep_hibernate.yml \
+              -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -e amt_qualify_attended=false -v
+      - redact-hardware-evidence
+      - store_artifacts:
+          # Runs on failure too -- a failed stage is exactly when the evidence
+          # matters, and note-recovery-path-on-failure below already tells the
+          # operator it was published. Safe because redact-hardware-evidence
+          # above also runs when: always, so nothing unredacted is ever stored.
+          path: tests/hardware/output
+          destination: hardware-evidence
+          when: always
+      - remove-lab-inventory
+      - note-recovery-path-on-failure
+
+  # -------------------------------------------------------------------------
+  # Hardware-in-the-loop, stage 12 (tests/hardware/qualify_wake_from_off.yml):
+  # wake-while-powered-off. LAST job in the chain, behind its own approval gate,
+  # downstream of hardware-sleep-hibernate.
+  #
+  # READ tests/hardware/PREFLIGHT.md before approving this one specifically. In
+  # short: this powers the machine off and then tries to reach and wake it over
+  # WS-Man. Unattended in CI, there is no independent confirmation available that
+  # the host was ever genuinely powered off -- "AMT reports off" is that same
+  # state machine's own self-report, not an outside observation. What a green run
+  # here DOES establish: WS-Man kept answering while AMT reported off, and an
+  # explicit power-on request issued in that state was accepted and landed. The
+  # owner has explicitly accepted the risk of a stranded machine needing a
+  # physical reset -- see PREFLIGHT.md's recovery steps -- so this job's failure
+  # output is written to say exactly what state the machine was left in rather
+  # than being watered down to avoid that risk.
+  hardware-wake-from-off:
+    machine: true
+    resource_class: crowley/amt-runner
+    steps:
+      - checkout
+      - verify-lab-credentials
+      - install-lab-ansible-venv
+      - render-lab-inventory
+      - export-hardware-limit
+      - run:
+          name: "Stage 12: wake-while-powered-off (unattended in CI; the approval gate is the human checkpoint)"
+          command: |
+            . .venv/bin/activate
+            ansible-playbook tests/hardware/qualify_wake_from_off.yml \
+              -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -e amt_qualify_attended=false -v
       - redact-hardware-evidence
       - store_artifacts:
           # Runs on failure too -- a failed stage is exactly when the evidence
@@ -1099,6 +1237,63 @@ workflows:
               only: main
       - hardware-pxe:
           requires: [hardware-pxe-approval]
+          context: amt-lab-runner
+          filters:
+            branches:
+              only: main
+
+      # -----------------------------------------------------------------------
+      # Stage 10: amt_log_clear, irreversible. Extends the SAME linear chain past
+      # hardware-pxe, behind its own approval -- see tests/hardware/PREFLIGHT.md before
+      # approving this one specifically; it destroys firmware event history permanently.
+      - hardware-log-clear-approval:
+          type: approval
+          requires: [hardware-pxe]
+          filters:
+            branches:
+              only: main
+      - hardware-log-clear:
+          requires: [hardware-log-clear-approval]
+          context: amt-lab-runner
+          filters:
+            branches:
+              only: main
+
+      # -----------------------------------------------------------------------
+      # Stage 11: sleep-light, sleep-deep, hibernate. Extends the chain past
+      # hardware-log-clear, behind its own approval -- see tests/hardware/PREFLIGHT.md
+      # before approving: a green run does not mean every ACPI state was actually
+      # entered, only that this stage correctly told an OS/firmware limitation apart
+      # from a defect here, and always restored the machine to 'on'.
+      - hardware-sleep-hibernate-approval:
+          type: approval
+          requires: [hardware-log-clear]
+          filters:
+            branches:
+              only: main
+      - hardware-sleep-hibernate:
+          requires: [hardware-sleep-hibernate-approval]
+          context: amt-lab-runner
+          filters:
+            branches:
+              only: main
+
+      # -----------------------------------------------------------------------
+      # Stage 12: wake-while-powered-off. LAST stage in the chain, behind its own
+      # approval -- read tests/hardware/PREFLIGHT.md before approving this one. A
+      # green run does not prove the host was ever genuinely, physically off;
+      # only an attended run with a human watching the machine or its KVM console
+      # can supply that. What it does prove: WS-Man stayed reachable while AMT
+      # reported off, and an explicit power-on request issued in that state was
+      # accepted and landed.
+      - hardware-wake-from-off-approval:
+          type: approval
+          requires: [hardware-sleep-hibernate]
+          filters:
+            branches:
+              only: main
+      - hardware-wake-from-off:
+          requires: [hardware-wake-from-off-approval]
           context: amt-lab-runner
           filters:
             branches:

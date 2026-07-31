@@ -38,6 +38,7 @@
     amt_baremetal_install_boot_provider: ider_cdrom
     amt_baremetal_install_iso_path: "{{ amt_test_iso_path }}"
     amt_baremetal_install_wait_for_handoff: false
+    amt_output_dir: "{{ playbook_dir }}/output"
 
   pre_tasks:
     - name: Refuse to run against more than one host at a time
@@ -91,6 +92,45 @@
               manual KVM/MEBx recovery path.
 
   post_tasks:
+    # This stage exercises IDE-R attach and boot hand-off -- the collection's flagship
+    # capability and the only Tier 3 claim that used to rest solely on an operator's
+    # visual confirmation over KVM/console, with nothing recorded. It passes in CI and
+    # has passed on both lab machines (see README.md), but until this task existed there
+    # was no artifact a reviewer could open afterwards to see any of that: not the
+    # session that got attached, not which one-time boot device got armed, not what
+    # power transition actually fired. Every value below is already-parsed module
+    # output, matching every other stage's evidence file, not raw WS-Man.
+    - name: Ensure the evidence output directory exists
+      ansible.builtin.file:
+        path: "{{ amt_output_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+
+    - name: Record evidence for this target
+      ansible.builtin.copy:
+        content: >-
+          {{ {'media_attach': {'session_id': amt_baremetal_install_media_attach_result.session_id,
+                                'session_state': amt_baremetal_install_media_attach_result.session_state,
+                                'devices': amt_baremetal_install_media_attach_result.devices,
+                                'bytes_read': amt_baremetal_install_media_attach_result.bytes_read,
+                                'bytes_written': amt_baremetal_install_media_attach_result.bytes_written,
+                                'operation': amt_baremetal_install_media_attach_result.operation},
+              'boot_armed': amt_baremetal_install_boot_result.operation.observed,
+              'power_action': {'requested': amt_baremetal_install_power_action,
+                                'previous_state': amt_baremetal_install_reset_result.previous_state,
+                                'operation': amt_baremetal_install_reset_result.operation},
+              'observed_after_reset': amt_baremetal_install_observe_result.previous_state,
+              'note': "media_attach.devices/bytes_* are amt_media's own report that the ISO was
+                       accepted and attached; observed_after_reset is amt_power's postcondition
+                       probe. Neither one can see the screen -- boot hand-off itself is confirmed
+                       visually, over KVM/console, not by this file. See this playbook's post_tasks
+                       debug message and README.md."}
+             | to_nice_json }}
+        dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_media_attach.json"
+        mode: "0600"
+      delegate_to: localhost
+
     - name: Remind the operator to visually confirm boot hand-off
       ansible.builtin.debug:
         msg: >-

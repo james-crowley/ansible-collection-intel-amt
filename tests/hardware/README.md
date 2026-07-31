@@ -24,7 +24,7 @@ which fires on an ordinary push:
 
 `hardware-tests` runs on a self-hosted machine runner inside the lab network
 (`resource_class: crowley/amt-runner`), behind `hardware-approval`, and
-invokes the three **non-mutating** stages below:
+invokes the four **non-mutating** stages below:
 
 ```yaml
 - run:
@@ -36,6 +36,9 @@ invokes the three **non-mutating** stages below:
 - run:
     name: "Stage 8: idempotent re-probe"
     command: ansible-playbook tests/hardware/qualify_idempotent_reprobe.yml -i tests/hardware/inventory.yml -v
+- run:
+    name: "Stage 9: read-only amt_event_log"
+    command: ansible-playbook tests/hardware/qualify_event_log.yml -i tests/hardware/inventory.yml -v
 ```
 
 Stages 4-7 -- the mutating ones -- are wired into CI too, as four separate
@@ -55,6 +58,16 @@ to do by hand. Stage 7's job additionally reads the `pxe-prereqs-confirmed`
 pipeline parameter (default `false`) into `amt_pxe_prereqs_confirmed`, so that
 attestation has to be set deliberately on the pipeline trigger, not assumed.
 
+The same escalating, own-gate-per-stage pattern continues past stage 7:
+`hardware-log-clear` (stage 10), `hardware-sleep-hibernate` (stage 11), and
+`hardware-wake-from-off` (stage 12, last in the chain) each sit behind their
+own approval job, downstream of the one before. **Read
+[`PREFLIGHT.md`](PREFLIGHT.md) before approving any of these three** -- stage
+10 is irreversible, and stages 11-12 can leave a machine needing a physical
+hand to bring back. Stage 9 has no approval of its own; it runs as a fourth
+step inside `hardware-tests` above, for the same reason stages 1/3/8 do -- a
+read is not a mutation.
+
 Stages 5 and 6 need small local media files that must never be committed
 (`.gitignore` blocks `*.iso`/`*.img`); their jobs run
 [`make-test-media.sh`](make-test-media.sh) first to provision a small
@@ -67,10 +80,11 @@ image, entirely inside the workspace. Run it yourself for a manual run too:
 # to pick up, or pass them directly with -e amt_test_iso_path=... / -e amt_test_image_path=...
 ```
 
-None of this weakens what stages 4-7 running unattended in CI can actually
-prove -- see each job's own comment in `.circleci/config.yml` and each
-playbook's own header comment for the exact, honest scope of what a green run
-does and does not establish. In particular: stage 6 (`hardware-writable`)
+None of this weakens what stages 4-7 -- or 10-12 -- running unattended in CI
+can actually prove -- see each job's own comment in `.circleci/config.yml`,
+each playbook's own header comment, and (for 10-12) `PREFLIGHT.md` for the
+exact, honest scope of what a green run does and does not establish. In
+particular: stage 6 (`hardware-writable`)
 will always observe `bytes_written=0` when run unattended, because nothing is
 booted on the target to issue a write -- that is documented as a legitimate
 outcome, not a failure. Stage 7 (`hardware-pxe`) cannot verify netboot itself
@@ -96,11 +110,11 @@ is redacted first -- see below.
 
 ## Evidence redaction
 
-Six of the stage playbooks have a task that writes JSON evidence into
-`tests/hardware/output/` (stage 3's does not actually produce a file in CI -- see
-"Verified on real evidence" below), and CI publishes that directory as the
-`hardware-evidence` artifact. Those values come from firmware, so they describe a
-real machine on a real network.
+Every stage playbook now has a task that writes JSON evidence into
+`tests/hardware/output/` -- stage 5 and stages 9-12 are the additions that made this
+universal; see "Verified on real evidence" below for a historical run from before that
+was true. CI publishes the whole directory as the `hardware-evidence` artifact. Those
+values come from firmware, so they describe a real machine on a real network.
 
 [`redact-evidence.py`](redact-evidence.py) rewrites every `.json` file in that
 directory in place, and every `hardware-*` job runs it via the shared
@@ -119,8 +133,8 @@ happens to be configured today. A previous history rewrite deliberately removed
 exactly this class of data from the repository; leaking it through CI artifacts
 would defeat that work.
 
-It runs at the CI layer, once, rather than inside each playbook. Six write sites
-are six chances to forget, and a seventh playbook added later would leak by
+It runs at the CI layer, once, rather than inside each playbook. Eleven write sites
+are eleven chances to forget, and a twelfth playbook added later would leak by
 default. The right place to fix it is where the data leaves the machine.
 
 ### What is redacted
@@ -230,15 +244,26 @@ leak this script exists to prevent.
 
 ## The staged plan, and why it never runs in parallel
 
-**What the stages do not cover: `amt_event_log` and `amt_log_clear`.** These stages
-exercise five of the collection's seven modules. Both event-log modules were added
-after the plan below was written and no stage was extended to reach them, so neither
-has ever run against real firmware. A read-only `amt_event_log` stage would be a
-natural addition to stage 1; an `amt_log_clear` stage destroys the very evidence the
-other stages produce and would need its own approval gate alongside stages 4-7. Until
-one exists, do not read a green hardware run as saying anything about either module.
+**The `amt_event_log`/`amt_log_clear` gap is closed, on paper.** Stages 1-8 predate
+both event-log modules, and until stage 9 was added neither had ever run against real
+firmware. Stage 9 (`qualify_event_log.yml`) is the read-only half, wired into the
+existing `hardware-tests` job precisely because a read is non-destructive exactly like
+`amt_info`'s. Stage 10 (`qualify_log_clear.yml`) is the destructive half, behind its
+own approval gate downstream of every prior mutating stage, and performs its own
+read-archive-verify sequence immediately before the irreversible call rather than
+trusting an earlier stage's run to still be current. **Both stages are authored and
+verified against the mock WS-Man server; as of this writing, neither has yet been run
+against real firmware** -- see [`PREFLIGHT.md`](PREFLIGHT.md) before approving stage 10
+specifically, and do not read this paragraph as a claim that either module is now
+hardware-qualified.
 
-There are **eight numbered stages** and **seven playbooks**: stage 2 has no
+Stages 11 and 12 close two further gaps the original eight stages never reached: `amt_power`'s
+sleep-light/sleep-deep/hibernate states (stage 4 covers only on/off), and whether the
+endpoint can actually be reached and woken over WS-Man while genuinely powered off
+(no earlier stage ever tried). Both are likewise authored, mock-verified, and awaiting
+a real hardware run.
+
+There are **twelve numbered stages** and **eleven playbooks**: stage 2 has no
 playbook of its own, because it is a human cross-check performed on stage 1's
 output rather than anything Ansible can assert unaided. Each stage is a gate on
 the next. They run in this order, and **never in parallel** -- a failure at stage
@@ -255,6 +280,10 @@ cosmetic:
 | 6 | `qualify_writable_image.yml` | Yes | The device is accepted, attached, and presented writable; a non-zero `bytes_written` (needs something booted on the target to write) is cross-checked against the on-disk checksum. `bytes_written=0` is expected without that and is **not** a failure -- see the playbook header |
 | 7 | `qualify_pxe.yml` | Yes | One-time PXE arms and reads back armed; the reset is issued and the endpoint recovers; `AMT_BootSettingData` is not left drifted by the reset. Does **not** verify netboot itself succeeds (depends on DHCP/boot-service infrastructure) or read back AMT's internal one-shot role bit -- see the playbook header |
 | 8 | `qualify_idempotent_reprobe.yml` | No | No session or state was left quietly drifting after everything above |
+| 9 | `qualify_event_log.yml` | No | Whether real firmware accepts this collection's `GetRecords` iteration as issued, and whether the 21-byte record layout and little-endian timestamp decode correctly against records a real ME actually wrote |
+| 10 | `qualify_log_clear.yml` | Yes -- **irreversible** | Whether `ClearLog` is accepted and the log reads back empty by two independent reads, after archiving whatever it held to disk first. See [`PREFLIGHT.md`](PREFLIGHT.md) |
+| 11 | `qualify_sleep_hibernate.yml` | Yes | Whether AMT accepts and can act on sleep-light/sleep-deep/hibernate, with the outcome classified so an unsupporting OS is never conflated with a defect here. See [`PREFLIGHT.md`](PREFLIGHT.md) |
+| 12 | `qualify_wake_from_off.yml` | Yes | Whether WS-Man stays reachable, and a power-on request lands, while the endpoint reports itself off. See [`PREFLIGHT.md`](PREFLIGHT.md) for exactly what this does and does not establish about the host being *genuinely* off |
 
 **Stage 2 is the one that matters most and is easiest to skip.** It is not
 testing AMT or this collection -- it is testing whether `inventory.yml` and
@@ -284,9 +313,18 @@ a PXE/DHCP boot service actually exists on the target's network -- that has
 to be proven independently first, or stage 7 just strands the machine at a
 PXE ROM prompt.
 
+Stage 9 is read-only and shares stage 1/3/8's `hardware-tests` gate rather than
+earning its own. Stages 10 through 12 are, like 4-7, progressively more
+disruptive, attended in the same sense, and each behind its own approval gate
+-- but unlike 4-7, **read
+[`PREFLIGHT.md`](PREFLIGHT.md) before approving any of the three**: stage 10
+is irreversible, and stages 11-12 can leave a machine needing a physical hand
+to bring back. PREFLIGHT.md is written specifically for the moment right
+before you click approve, not as background reading.
+
 ## Qualify one machine first
 
-Qualify exactly one machine through all eight stages before running any
+Qualify exactly one machine through all twelve stages before running any
 stage against a second. A second machine then proves **repeatability** --
 that the first machine's success was not a fluke of that specific firmware
 build or lab-network quirk. Never cut both machines over to a new stage at
@@ -302,6 +340,11 @@ Stated precisely, because which run established what still matters:
 | `amt-lab-01` | AMT 16.1.30 | **All eight** (1, 2, 3, 4, 5, 6, 7, 8) | 2026-07-28 |
 | `amt-lab-02` | AMT 19.0.5 | **All eight** (1, 2, 3, 4, 5, 6, 7, 8) | 2026-07-29 |
 | `amt-lab-01` | AMT 16.1.30 | Read-only re-run (1, 3, 8), nothing mutated | 2026-07-29 |
+
+**"All eight" above means all eight that existed at the time.** Stages 9-12 were
+added after both of these runs and neither machine has gone through any of them
+yet -- see the previous section for what each closes and
+[`PREFLIGHT.md`](PREFLIGHT.md) before approving 10-12 on either machine.
 
 Machine 2 cleared its four mutating approvals on 2026-07-29, so power control,
 IDE-R media, the writable-image path and native PXE are reproduced on a second
@@ -325,11 +368,15 @@ One result from that re-run is worth reading before you trust a remote power-on:
 correction: through 0.3.0 this collection decoded `14` as `s0_dc` and reported
 `false` here, from a value table that was wrong (see
 [`docs/capability-matrix.md`](../../docs/capability-matrix.md) Tier 1). Whether
-either machine can actually be reached over WS-Man while off is still **untested** --
-no stage powers a machine off, confirms it, and then tries to reach it -- so if
-stage 4 or a real power-on ever fails on a genuinely off machine, the link policy is
-no longer the first thing to suspect on these two, but nothing here demonstrates
-that a wake works either. It is Tier 4 in
+either machine can actually be reached over WS-Man while off is still **untested
+against real hardware** -- stage 12 (`qualify_wake_from_off.yml`) now exists
+specifically to make that measurement and has been verified against the mock
+WS-Man server, but as of this writing has not yet been run against either lab
+machine. Even once it has, read its own header and
+[`PREFLIGHT.md`](PREFLIGHT.md) for the honest limit on what it can establish
+from CI: "AMT self-reports off" is not the same as "the host is genuinely,
+physically off", and only an attended run with a human watching the machine
+supplies the latter. It is Tier 4 in
 [`docs/capability-matrix.md`](../../docs/capability-matrix.md).
 
 Stage 2's automatic comparison is also live now: `amt_expected_uuid` is recorded
