@@ -875,6 +875,47 @@ jobs:
       - note-recovery-path-on-failure
 
   # -------------------------------------------------------------------------
+  # Hardware-in-the-loop, stage 10 (tests/hardware/qualify_log_clear.yml): amt_log_clear.
+  # IRREVERSIBLE -- see the playbook's own header and tests/hardware/PREFLIGHT.md before
+  # approving this job. Escalates past hardware-pxe behind its own approval gate, the same
+  # "stage 4-7 treatment" every prior mutating job gets: its own dedicated approval job
+  # (hardware-log-clear-approval), amt_qualify_attended=false so the interactive pauses that
+  # would otherwise block on stdin are skipped -- the approval gate is this job's actual
+  # human checkpoint, and the approver is expected to have read PREFLIGHT.md first.
+  #
+  # This does NOT run right after hardware-tests (which is where stage 9's read lives). It
+  # is deliberately downstream of every existing mutating stage instead, so approving it
+  # never has to be rushed ahead of the other four escalations -- amt_log_clear's own
+  # precondition (read, archive to disk, only then clear) is what actually enforces "stage 9
+  # ran on this machine first", not this job's position in the chain.
+  hardware-log-clear:
+    machine: true
+    resource_class: crowley/amt-runner
+    steps:
+      - checkout
+      - verify-lab-credentials
+      - install-lab-ansible-venv
+      - render-lab-inventory
+      - export-hardware-limit
+      - run:
+          name: "Stage 10: amt_log_clear -- irreversible (unattended in CI; the approval gate is the human checkpoint)"
+          command: |
+            . .venv/bin/activate
+            ansible-playbook tests/hardware/qualify_log_clear.yml \
+              -i tests/hardware/inventory.yml ${ANSIBLE_LIMIT_FLAG} -e amt_qualify_attended=false -v
+      - redact-hardware-evidence
+      - store_artifacts:
+          # Runs on failure too -- a failed stage is exactly when the evidence
+          # matters, and note-recovery-path-on-failure below already tells the
+          # operator it was published. Safe because redact-hardware-evidence
+          # above also runs when: always, so nothing unredacted is ever stored.
+          path: tests/hardware/output
+          destination: hardware-evidence
+          when: always
+      - remove-lab-inventory
+      - note-recovery-path-on-failure
+
+  # -------------------------------------------------------------------------
   publish:
     executor:
       name: python
@@ -1113,6 +1154,23 @@ workflows:
               only: main
       - hardware-pxe:
           requires: [hardware-pxe-approval]
+          context: amt-lab-runner
+          filters:
+            branches:
+              only: main
+
+      # -----------------------------------------------------------------------
+      # Stage 10: amt_log_clear, irreversible. Extends the SAME linear chain past
+      # hardware-pxe, behind its own approval -- see tests/hardware/PREFLIGHT.md before
+      # approving this one specifically; it destroys firmware event history permanently.
+      - hardware-log-clear-approval:
+          type: approval
+          requires: [hardware-pxe]
+          filters:
+            branches:
+              only: main
+      - hardware-log-clear:
+          requires: [hardware-log-clear-approval]
           context: amt-lab-runner
           filters:
             branches:
