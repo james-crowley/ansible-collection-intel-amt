@@ -75,14 +75,28 @@ set -euo pipefail
 # it) rather than `is none`/`is not none` -- "" is falsy exactly like None, so
 # the check does not care which one it got.
 #
-# roles/amt_baremetal_install/defaults/main.yml:28/34/89 (port, ca_path,
-# media_port) are the ACTUAL, currently-unfixed defect issue #87 tracks: these
-# are optional/tunable values where None is supposed to mean "let the module
-# apply its own default", and port/media_port feed a typed `int` argspec that
-# cannot convert "". These three entries are deliberately temporary. #87's own
-# fix replaces `default(None)` with `default(omit)` on these lines, at which
-# point they stop matching this script's pattern at all and these entries
-# become inert. Remove them when #87 lands rather than leaving dead weight.
+# roles/amt_baremetal_install/defaults/main.yml:34 (ca_path) matches the pattern
+# but is NOT a defect, for the same reason as host above: every consumer tests it
+# truthily, so "" and None are indistinguishable to all of them --
+# tls.py:164 `if ca_path and tls_fingerprint:`, tls.py:188 `if self.ca_path:`,
+# amt_media.py:487 `if params.get("ca_path"):`. Permanent entry. It is
+# deliberately NOT being converted to `default(omit)`: changing production code
+# to satisfy a lint annotation is the wrong direction, and the annotation is
+# what was wrong.
+#
+# roles/amt_baremetal_install/defaults/main.yml:28/89 (port, media_port) are the
+# ACTUAL, currently-unfixed defect issue #87 tracks: optional values where None
+# is supposed to mean "let the module apply its own default", feeding a typed
+# `int` argspec that cannot convert "". These two entries are deliberately
+# temporary -- #87's fix replaces `default(None)` with `default(omit)` on both,
+# at which point they stop matching this script's pattern and the entries become
+# inert. Remove those two when #87 lands rather than leaving dead weight.
+#
+# The general rule, worth stating once because it is the crux of this whole bug
+# family: `| default(none)` in a quoted scalar is a defect only when something
+# downstream distinguishes "" from None. A typed argspec (`int`) does. So does
+# `is none`/`is not none`. A truthy test does not. Four of these six lines are
+# safe for exactly that reason.
 ALLOWLIST='
 roles/amt_baremetal_install/defaults/main.yml:27
 roles/amt_baremetal_install/defaults/main.yml:28
