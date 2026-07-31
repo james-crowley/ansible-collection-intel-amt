@@ -248,8 +248,9 @@ every job log records which one actually ran. `python3.14` is deliberately not a
 candidate: ansible-core 2.18 does not support it.
 
 **What the recorded qualifications ran on.** The Tier 3 evidence in
-`docs/capability-matrix.md` comes from three runs across two environments, and no
-record is retroactively edited — each states the environment its own run used:
+`docs/capability-matrix.md` comes from four runs across two environments, and no
+record is retroactively edited — each states the environment its own run used.
+That document cites each run by workflow and job; this list is about interpreters:
 
 - **Machine 1 (AMT 16.1.30), 2026-07-28** — all eight stages, on Python 3.10 with
   ansible-core 2.17.
@@ -265,6 +266,11 @@ record is retroactively edited — each states the environment its own run used:
   requested. Its purpose was narrow: read machine 1 with v0.2.0's fact code, which
   its 2026-07-28 evidence predated. Machine 1's mutating result therefore still
   rests on the 2026-07-28 run, in the environment recorded for it above.
+- **Both machines, 2026-07-30** — the read-only stages only (1, 1b, 3, 8), with no
+  `hardware-limit` set, on the same ansible-core 2.18.18 lab virtualenv. Nothing was
+  mutated and none of the stage 4-7 approvals were requested. Its purpose was to read
+  both machines with the 0.5.0 hardware-inventory code, which every earlier run
+  predated, and it is the sole evidence for the inventory rows in Tier 3.
 
 Machine 2's run **clears GHSA-w8p5-mx5w-cpqj [HIGH] for the lab runner**: the 2.17
 line it previously used is EOL and permanently affected, and the runner is now
@@ -289,7 +295,11 @@ on the next. Stage 2 is the odd one out: it has **no playbook of its own**, beca
 it is a human cross-check performed on the output of stage 1's playbook
 (`qualify_readonly.yml`). That is why CI runs seven playbooks across eight stages.
 
-1. Read-only `amt_info` against each target.
+1. Read-only `amt_info` against each target. Since 0.5.0 the same playbook also runs
+   **stage 1b**, a second read-only `amt_info` call with
+   `gather_subset: [config, hardware]` for the inventory subsets, with its own
+   evidence file. It is numbered `1b` rather than `9` because it is read-only and
+   gates nothing, so the eight numbered stages above are still eight.
 2. Compare the reported facts against an independent power probe and reviewed
    BIOS inventory — this is what catches an inventory/reality mismatch before it
    becomes a reset of the wrong machine. **No playbook**: `qualify_readonly.yml`

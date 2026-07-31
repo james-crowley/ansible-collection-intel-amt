@@ -24,7 +24,9 @@ implying a higher tier than it earns:
    2026-07-29, which closed the last difference in coverage between the two runs:
    `amt_info`'s network and system-state facts have now come back populated on
    **both** generations, so this tier no longer has to state that particular
-   claim per generation.
+   claim per generation. A fourth run, 2026-07-30, read **both** machines with the
+   0.5.0 hardware-inventory code and moved that inventory's classes and shapes into
+   this tier as well. All four runs are cited by workflow and job below.
 4. **Still unproven** — a short, specific list, kept honest.
 
 The collection is no longer "hardware-unverified". Hardware qualification found
@@ -428,27 +430,54 @@ about this.
 
 Two machines have now each completed **all eight** stages, on the lab's self-hosted
 CircleCI runner (`crowley/amt-runner`), with TLS pinned to each endpoint's own
-reviewed leaf certificate. Three runs contributed, on different dates and in
+reviewed leaf certificate. **Four** runs contributed, on different dates and in
 different runner environments, and each is recorded as itself rather than averaged
-into one:
+into one. Every one now carries the identifiers needed to go and look at it — see
+"Two limits on how far Tier 3 can be audited" below for what those identifiers do and
+do not let a reader check:
 
 - **`amt-lab-01` (machine 1), AMT 16.1.30** — all eight stages, 2026-07-28, on
-  Python 3.10 with ansible-core 2.17.
+  Python 3.10 (3.10.12) with ansible-core 2.17, against collection 0.1.0.
+  `hardware` workflow `6ced8630-58e3-44d0-bfdc-68f8d2f47a7a`; jobs
+  `hardware-tests` `e01e14b5-e1ae-4003-919b-e3b99fea3c11` (stages 1, 2, 3, 8),
+  `hardware-power` `a01cda9b-565c-424e-b812-0536b0a14194` (4),
+  `hardware-media` `a3e56c2c-e301-41ea-b726-2fb304fa1aa9` (5),
+  `hardware-writable` `23113b0c-1090-4a9b-9412-9fb74e2bc528` (6),
+  `hardware-pxe` `6315a506-db04-4809-807b-1c8c6b32424d` (7), all succeeded. This run
+  predates the `hardware-limit` parameter; it reached only machine 1 because the lab
+  inventory held one endpoint at the time, which the job's own
+  "Credentials present for 1 endpoint(s)" step records.
 - **`amt-lab-02` (machine 2), AMT 19.0.5** — all eight stages, 2026-07-29, on
   Python 3.12.13 with ansible-core 2.18.18. That run was deliberately limited to
   machine 2 (`hardware-limit=amt-lab-02`); machine 1 was not touched by it.
+  CircleCI **pipeline #93**, `hardware` workflow
+  `6b0b30d8-0956-4017-9b37-b8dd4d62db63`; jobs `hardware-tests`
+  `97cf1c8d-8615-46bf-b33e-b1c3f91d54d3` (stages 1, 2, 3, 8), `hardware-power`
+  `5767a536-5ed3-46cd-aa82-993972fe53f0` (4), `hardware-media`
+  `8c4e4a51-2082-489a-843d-fa32bfc9a13e` (5), `hardware-writable`
+  `988a4327-10ca-4252-8c38-9ff5d9b7d281` (6), `hardware-pxe`
+  `310385c9-0916-4863-947f-52428ec895a5` (7), all succeeded.
 - **`amt-lab-01` (machine 1) again, read-only stages only** — stages 1, 3 and 8,
   2026-07-29, limited to machine 1 (`hardware-limit=amt-lab-01`), on the
   ansible-core 2.18.18 lab virtualenv every hardware job now builds. Nothing was
   mutated: this run existed to read machine 1 with the v0.2.0 fact code, which its
   2026-07-28 evidence predated. Machine 1's mutating result stands on the
-  2026-07-28 run and was not re-established here.
+  2026-07-28 run and was not re-established here. `hardware` workflow
+  `3756bbcd-3867-458a-83a2-648ee03bffdf`, job `hardware-tests`
+  `7a33fe92-99d8-44c0-bcd5-53248f409df4`, succeeded. **That workflow is still on
+  hold** at `hardware-power-approval` and so reports as unfinished; the read-only job
+  it is cited for completed and its artifacts were uploaded.
 - **Both machines, read-only stages only** — stages 1, 1b, 3 and 8, 2026-07-30,
-  CircleCI pipeline 167, job UUID `65ddc061-b273-4777-8c51-174a48e74402`, on the
-  ansible-core 2.18.18 lab virtualenv. Nothing was mutated. This run existed to read
-  both machines with the 0.5.0 hardware-inventory code, which every earlier run
-  predated, and it is the sole evidence for the inventory subsection at the end of
-  this tier.
+  against collection 0.5.0, on the ansible-core 2.18.18 lab virtualenv. Nothing was
+  mutated. This run existed to read both machines with the 0.5.0 hardware-inventory
+  code, which every earlier run predated, and it is the sole evidence for the
+  inventory subsection at the end of this tier. CircleCI **pipeline 167**, `hardware`
+  workflow `aa1af1c2-6069-47bc-b5f6-de4a9c273399`, job `hardware-tests`
+  `65ddc061-b273-4777-8c51-174a48e74402`, succeeded. **That workflow's overall
+  outcome reads `canceled`**, because the four mutating approvals were never given and
+  were cancelled hours later; the read-only job cited here succeeded, and no mutating
+  job in it ever started. A reader checking the citation will see the cancelled
+  workflow first, which is why it is stated here rather than left to surprise them.
 
 So power control, IDE-R media, the writable-image path and native one-time PXE are
 verified on **two machines across two firmware generations**, not one — and
@@ -566,9 +595,11 @@ fact groups came back populated on both machines**.
 `65ddc061-b273-4777-8c51-174a48e74402`), artifacts
 `hardware-evidence/amt-lab-01-qualify_hardware_inventory.json` and
 `hardware-evidence/amt-lab-02-qualify_hardware_inventory.json`. Both post-redaction, per
-`tests/hardware/redact-evidence.py`. This row cites its run because Tier 3 rows that
-cite no run ID are a tracked shortcoming of this document, and adding another would make
-it worse.
+`tests/hardware/redact-evidence.py`. This row was the first in this tier to cite its
+run, added because Tier 3 rows citing no run ID were a tracked shortcoming and adding
+another would have made it worse. The other three runs have since been recovered and are
+cited in the run list at the top of this tier; this row keeps its own citation because it
+is the only claim in the document resting on a single run.
 
 | Fact group | Class | Verb | 16.1.30 (machine 1) | 19.0.5 (machine 2) |
 |---|---|---|---|---|
@@ -691,13 +722,32 @@ other stage emits a JSON artifact. Stage 3's evidence gap was found and fixed
 (`check_mode: false`, since the playbook runs under `--check` by design); stage 5's is
 still open, and is tracked in Tier 4.
 
-**No Tier 3 row cites a specific run.** The dates, machines and firmware versions
-above are accurate, but there is no pipeline number, workflow URL or artifact digest
-anywhere in this document, so a reader cannot go and check. That is a gap in this
-document rather than in the evidence — the runs exist and their artifacts are
-redacted-and-publishable since `tests/hardware/redact-evidence.py` landed — but until
-run identifiers are recorded here, Tier 3 asks for more trust than the rest of the
-table does.
+**Every Tier 3 row now cites a run, but not to the same depth.** This entry used to
+read "no Tier 3 row cites a specific run" — accurate when written, and the reason it
+was written is that dates and machine names alone leave a reader nothing to go and
+check. What is recorded now, and what still is not:
+
+- **Every stage row is citeable**, but through the run list at the top of this tier
+  rather than in the row itself. The stage table names machines and outcomes; the run
+  list names the workflow and the individual job each stage ran as, so "stage 6 on
+  machine 2" resolves to one job UUID. The rows are not repeated with their own
+  citations because a stage row that named its own job would have to name two — one
+  per machine — and the run list already distinguishes them by date.
+- **Pipeline numbers exist for two of the four runs**, #93 and 167. For machine 1's
+  2026-07-28 qualification and its 2026-07-29 read-only re-run, the workflow and job
+  UUIDs were recovered and are recorded above, but the pipeline number was not: the
+  API surface used to recover them returns run, workflow and job UUIDs and does not
+  expose the pipeline number, and no commit message recorded it at the time. Those two
+  runs are therefore cited by UUID and date only. **No pipeline number has been
+  inferred from ordering** — sequence would make one easy to guess and a guessed
+  identifier is worse than an absent one in a document whose purpose is this.
+- **No artifact digest is recorded anywhere.** The inventory subsection below names its
+  two artifact paths, and every stage but 5 uploads a JSON artifact under
+  `hardware-evidence`, redacted by `tests/hardware/redact-evidence.py`. But nothing
+  here fixes *which* bytes those artifacts held, so a reader can confirm that a run
+  happened and that an artifact exists without being able to confirm that the artifact
+  they fetch is the one this document read. That is the part of the original complaint
+  that is still open.
 
 ## Tier 4: Still unproven
 
