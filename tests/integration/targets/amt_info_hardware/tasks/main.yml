@@ -30,6 +30,8 @@
     full_ready_file: "{{ scratch_dir.path }}/wsman_full_ready.json"
     no_hw_ready_file: "{{ scratch_dir.path }}/wsman_no_hw_ready.json"
     get_faults_ready_file: "{{ scratch_dir.path }}/wsman_get_faults_ready.json"
+    no_serial_ready_file: "{{ scratch_dir.path }}/wsman_no_board_serial_ready.json"
+    empty_serial_ready_file: "{{ scratch_dir.path }}/wsman_empty_board_serial_ready.json"
 
 - name: Start the fully-populated mock WS-Man server
   ansible.builtin.shell: |
@@ -82,7 +84,45 @@
   changed_when: false
   delegate_to: localhost
 
-- name: Wait for all three mock servers to report ready
+# Two more endpoints, differing from the fully-populated one in a single property:
+# whether CIM_Card fills in SerialNumber, and if not, how it declines to. Both are
+# firmware properties rather than anything a client does, so both are start-up
+# flags on their own process, like every other firmware variation this target
+# exercises.
+#
+# Two servers rather than one because the two shapes are the whole point. Both
+# render amt.hardware.baseboard.serial_number null and are indistinguishable in the
+# facts -- that indistinguishability is issue #84 -- so a single endpoint could not
+# demonstrate that the census separates them.
+- name: Start a mock WS-Man server whose CIM_Card omits SerialNumber entirely
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ no_serial_ready_file }} \
+      --baseboard-serial absent \
+      > {{ scratch_dir.path }}/wsman_no_board_serial.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: no_serial_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Start a mock WS-Man server whose CIM_Card sends an empty SerialNumber
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ empty_serial_ready_file }} \
+      --baseboard-serial empty \
+      > {{ scratch_dir.path }}/wsman_empty_board_serial.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: empty_serial_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Wait for all five mock servers to report ready
   ansible.builtin.wait_for:
     path: "{{ item }}"
     state: present
@@ -91,6 +131,8 @@
     - "{{ full_ready_file }}"
     - "{{ no_hw_ready_file }}"
     - "{{ get_faults_ready_file }}"
+    - "{{ no_serial_ready_file }}"
+    - "{{ empty_serial_ready_file }}"
   delegate_to: localhost
 
 - name: Read mock server connection info and pids
@@ -98,9 +140,13 @@
     full_info: "{{ lookup('ansible.builtin.file', full_ready_file) | from_json }}"
     no_hw_info: "{{ lookup('ansible.builtin.file', no_hw_ready_file) | from_json }}"
     get_faults_info: "{{ lookup('ansible.builtin.file', get_faults_ready_file) | from_json }}"
+    no_serial_info: "{{ lookup('ansible.builtin.file', no_serial_ready_file) | from_json }}"
+    empty_serial_info: "{{ lookup('ansible.builtin.file', empty_serial_ready_file) | from_json }}"
     full_pid: "{{ full_start.stdout | trim }}"
     no_hw_pid: "{{ no_hw_start.stdout | trim }}"
     get_faults_pid: "{{ get_faults_start.stdout | trim }}"
+    no_serial_pid: "{{ no_serial_start.stdout | trim }}"
+    empty_serial_pid: "{{ empty_serial_start.stdout | trim }}"
 
 - name: Exercise amt_info's hardware inventory against the mock servers
   block:
@@ -618,6 +664,141 @@
           it" from "the class is not there at all". Both were true on this one endpoint for
           different classes, which is exactly the mixed case a single null cannot express.
 
+    # -- Issue #84: telling one null field from another ---------------------
+    #
+    # `operation.hardware_reads` diagnoses a whole CLASS. It cannot say anything
+    # about one null FIELD on a class that answered normally, and that is what
+    # `baseboard.serial_number` is on both lab machines: CIM_Card returns
+    # manufacturer, model and version, and no serial, on AMT 16.1.30 and 19.0.5
+    # alike. `optional_str` renders "element absent" and "element present but
+    # empty" identically, so nothing published so far could say which happened --
+    # and guessing is what the issue explicitly refuses to do.
+    #
+    # These two reads are the proof that the distinction now survives the whole
+    # path, over a real socket: same module, same null fact, two different censuses.
+    - name: Read from firmware whose CIM_Card omits SerialNumber entirely
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ no_serial_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        gather_subset:
+          - system
+      delegate_to: localhost
+      no_log: true
+      register: no_serial_read
+
+    - name: Read from firmware whose CIM_Card sends SerialNumber empty
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ empty_serial_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        gather_subset:
+          - system
+      delegate_to: localhost
+      no_log: true
+      register: empty_serial_read
+
+    - name: Assert both firmware shapes really do produce the identical null fact
+      ansible.builtin.assert:
+        that:
+          - no_serial_read.amt.hardware.baseboard.serial_number is none
+          - empty_serial_read.amt.hardware.baseboard.serial_number is none
+          # And the rest of the board still comes back on both, so this is one null
+          # field rather than a degraded class -- which is what makes it invisible
+          # to hardware_reads.outcome.
+          - no_serial_read.amt.hardware.baseboard.model == 'MOCK-BOARD-0000'
+          - empty_serial_read.amt.hardware.baseboard.model == 'MOCK-BOARD-0000'
+          - no_serial_read.operation.hardware_reads['CIM_Card'].outcome == 'read'
+          - empty_serial_read.operation.hardware_reads['CIM_Card'].outcome == 'read'
+        fail_msg: >-
+          The premise of this whole section is that these two firmware behaviours are
+          indistinguishable in the facts. If this assertion fails, they are not, and the
+          census below is answering a question that no longer exists.
+
+    - name: Assert the shape census separates the two, which the facts cannot
+      ansible.builtin.assert:
+        that:
+          - no_serial_read.operation.hardware_reads['CIM_Card'].property_shapes['SerialNumber'] == 'absent'
+          - empty_serial_read.operation.hardware_reads['CIM_Card'].property_shapes['SerialNumber'] == 'empty'
+          # The asymmetry issue #84 is actually about, in one receipt: the chassis
+          # serial arrived on the same endpoint that withheld the board serial.
+          - no_serial_read.operation.hardware_reads['CIM_Chassis'].property_shapes['SerialNumber'] == 'text'
+          - empty_serial_read.operation.hardware_reads['CIM_Chassis'].property_shapes['SerialNumber'] == 'text'
+        fail_msg: >-
+          The census must separate "firmware sent no such element" from "firmware sent it
+          empty". Those are the two candidate answers to issue #84, they render as the same
+          null, and a run that cannot tell them apart cannot close it.
+
+    - name: Assert the census reports shapes and never a property value
+      vars:
+        card_census: "{{ no_serial_read.operation.hardware_reads['CIM_Card'].property_shapes }}"
+        chassis_census: "{{ no_serial_read.operation.hardware_reads['CIM_Chassis'].property_shapes }}"
+      ansible.builtin.assert:
+        that:
+          # The entire safety argument for publishing this into a world-readable
+          # CI artifact. Asserted against the values this endpoint actually served,
+          # not against the shape vocabulary alone.
+          - card_census.values() | unique | sort | difference(['absent', 'empty', 'nested', 'repeated', 'text']) | length == 0
+          - "'MOCKCHASSIS0001' not in (chassis_census.values() | list)"
+          - "'MOCK-BOARD-0000' not in (card_census.values() | list)"
+          - no_serial_read.operation.hardware_reads['CIM_Card'].property_names_dropped == 0
+          - card_census['Model'] == 'text'
+          # OperationalStatus is a CIM array, and this endpoint reports exactly one
+          # value in it -- so it reads `text`, not `repeated`. Correct, and worth
+          # pinning rather than papering over: wsman._element_to_value() collapses a
+          # single repeated element to a bare string, which is why
+          # hardware._int_list() accepts both a string and a list as "array". The
+          # census reports the shape that reached the parser, not the shape the CIM
+          # schema declares, and conflating those would make it lie about which of
+          # them produced a null. `repeated` is exercised at the unit level, where an
+          # instance carrying two OperationalStatus values can be built directly.
+          - card_census['OperationalStatus'] == 'text'
+        fail_msg: >-
+          The census must publish names and shapes only. It is written into hardware evidence
+          that CI publishes with store_artifacts, so a property value reaching it is a leak of
+          exactly the kind tests/hardware/redact-evidence.py exists to prevent -- and one the
+          redactor cannot catch, because it deliberately never rewrites keys.
+
+    - name: Assert a property this collection never reads is still censused
+      ansible.builtin.assert:
+        that:
+          # CreationClassName is on the wire and is not a field of BaseboardInfo.
+          # "The board serial arrives under a property we do not look at" is a live
+          # hypothesis for #84, and this is the only place it would be visible.
+          - "'CreationClassName' in no_serial_read.operation.hardware_reads['CIM_Card'].property_shapes"
+          - no_serial_read.operation.hardware_reads['CIM_Card'].property_shapes['CreationClassName'] == 'text'
+        fail_msg: >-
+          The census must report what firmware sent, not only what this collection reads. A
+          census restricted to known fields could not reveal a serial arriving under an
+          unexpected property name.
+
+    # full_read is the `gather_subset: hardware` read from the fully-populated
+    # endpoint near the top of this target -- the only read here that touches all
+    # six classes, so the only one that can show the four multi-instance ones
+    # carrying no census. Asserting this against a `system`-only read would be
+    # vacuously true.
+    - name: Assert the multi-instance classes carry no census
+      vars:
+        all_reads: "{{ full_read.operation.hardware_reads }}"
+      ansible.builtin.assert:
+        that:
+          # Deliberate scope, asserted so it is a decision on record rather than an
+          # accident: a census is a statement about ONE instance, so a per-DIMM
+          # census would grow the receipt with the machine rather than the question.
+          - (all_reads | dict2items | selectattr('value.property_shapes', 'defined')
+             | rejectattr('value.property_shapes', 'none') | map(attribute='key') | sort)
+            == ['CIM_Card', 'CIM_Chassis']
+        fail_msg: >-
+          The census is scoped to the two single-instance identity-plate classes. If that
+          changed, the receipt size now scales with the number of DIMMs and disks in the
+          machine, and docs/amt_info.md says otherwise.
+
     # -- Fault injection ---------------------------------------------------
     - name: Fault injection -- a wrong password is refused before any inventory is returned
       james_crowley.intel_amt.amt_info:
@@ -658,6 +839,18 @@
 
     - name: Stop the Get-faulting mock WS-Man server
       ansible.builtin.command: "kill {{ get_faults_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
+      changed_when: false
+
+    - name: Stop the mock WS-Man server with no board serial
+      ansible.builtin.command: "kill {{ no_serial_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
+      changed_when: false
+
+    - name: Stop the mock WS-Man server with an empty board serial
+      ansible.builtin.command: "kill {{ empty_serial_pid }}"
       delegate_to: localhost
       ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup.
       changed_when: false

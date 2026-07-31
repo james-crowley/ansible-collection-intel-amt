@@ -1312,6 +1312,43 @@ class TestHardwareInventoryClassesAreServed:
         assert _find_text(root, "SerialNumber") == server.state.baseboard_serial_number
         assert server.state.baseboard_serial_number != server.state.chassis_serial_number
 
+    def test_an_absent_board_serial_omits_the_element_entirely(self, server):
+        """The firmware shape issue #84 is most likely to be: no element at all.
+
+        Asserted on the wire rather than through the client, because the whole
+        point of the census this supports is that an omitted element and an empty
+        one are different bytes -- and a mock that could not serve both would let
+        a census that conflated them pass.
+        """
+        server.state.baseboard_serial_number = None
+        root = ET.fromstring(_post(server, _get_xml(CIM_CARD)).content)  # noqa: S314
+
+        assert not _has_element(root, "SerialNumber")
+        # The rest of the class still answers: both lab machines return
+        # manufacturer, model and version from CIM_Card with no serial, so a mock
+        # that dropped the whole instance would be modelling a different firmware.
+        assert _find_text(root, "Model") == "MOCK-BOARD-0000"
+        assert _find_text(root, "Manufacturer") == "Mock Systems (example.invalid)"
+
+    def test_an_empty_board_serial_emits_the_element_with_no_text(self, server):
+        server.state.baseboard_serial_number = ""
+        root = ET.fromstring(_post(server, _get_xml(CIM_CARD)).content)  # noqa: S314
+
+        # Present, and distinguishable from the absent case above by presence
+        # alone -- ElementTree reports no text for <r:SerialNumber></r:SerialNumber>,
+        # which is why _has_element exists and _find_text cannot answer this.
+        assert _has_element(root, "SerialNumber")
+        assert not (_find_text(root, "SerialNumber") or "")
+
+    def test_the_two_null_producing_shapes_are_different_bytes_on_the_wire(self, server):
+        server.state.baseboard_serial_number = None
+        absent = _post(server, _get_xml(CIM_CARD)).content
+        server.state.baseboard_serial_number = ""
+        empty = _post(server, _get_xml(CIM_CARD)).content
+
+        assert b"SerialNumber" not in absent
+        assert b"SerialNumber" in empty
+
     @pytest.mark.parametrize("resource_uri", [CIM_CHASSIS, CIM_CARD], ids=["chassis", "card"])
     def test_the_singletons_answer_enumerate_as_well_as_get(self, server, resource_uri):
         # Both verbs are directly evidenced: responses/cim/chassis/ and
