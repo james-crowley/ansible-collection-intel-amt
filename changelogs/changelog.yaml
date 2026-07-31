@@ -1793,3 +1793,615 @@ releases:
     - release-summary.yml
     - withdraw-inventory-tier2-claim.yml
     release_date: '2026-07-30'
+  0.7.0:
+    changes:
+      bugfixes:
+      - 'CI - add C(scripts/check-default-none-template.sh), run in the lint job,
+        failing on a quoted scalar Jinja template whose entire value is C({{ ... |
+        default(none) }}) (or C(default(None))) -- the exact shape that renders as
+        the empty string rather than C(null) on ansible-core <= 2.18 (2.17 is this
+        collection''s declared floor). This is the third time that divergence has
+        caused a real defect (issue #80, the 0.6.0 qualification-summary bug, and
+        the role connection-guard weakening tracked as https://github.com/james-crowley/ansible-collection-intel-amt/issues/87),
+        so this is the regression guard for a fourth. It supports a documented per-line
+        opt-out: an inline C(# default-none-reviewed:) comment for a reviewed exception
+        in a file the reviewer can edit, or the script''s own allowlist for the handful
+        of existing, reviewed C(roles/amt_baremetal_install/defaults/main.yml) lines
+        this script''s introduction could not annotate inline. The legitimate case
+        looks like this: a required value with no viable C(default(omit)) alternative,
+        checked downstream with C(is truthy) rather than C(is none)/C(is not none)
+        -- V(is truthy) treats an empty string exactly like C(None), so the divergence
+        this script exists to catch does not matter there.'
+      - amt_baremetal_install role - fix ``tasks/validate.yml`` silently accepting
+        an empty-string ``amt_baremetal_install_password`` or ``amt_baremetal_install_tls_fingerprint``
+        as though it were present, by checking ``is truthy`` instead of ``is not none``
+        (matching what ``amt_baremetal_install_host`` already did). This is version-independent
+        hardening, not a workaround for one ansible-core version -- an empty string
+        is never a real credential or a real fingerprint pin on *any* core, and ``is
+        not none`` only ever refuses a genuine Python ``None``. It happened to matter
+        in practice on ansible-core <=2.18, where a quoted scalar template evaluating
+        to Jinja's ``None`` is stringified by finalize before Ansible's ``convert_data``
+        step gets a chance to evaluate it back -- dicts, lists and booleans round-trip,
+        a bare ``None`` does not -- so ``amt_password``/``amt_tls_fingerprint`` left
+        unset resolved to ``""`` there, which ``is not none`` waved through. The fingerprint
+        half is the one that matters most -- this collection's trust model requires
+        an explicit pin whenever ``amt_baremetal_install_use_tls`` is true, and that
+        enforcement did not fire on those cores, leaving the role willing to proceed
+        over TLS with no pin at all (https://github.com/james-crowley/ansible-collection-intel-amt/issues/87).
+      - 'amt_baremetal_install role - fix the role being unusable on stock AMT ports
+        (16992/16993 WS-Man, 16994/16995 IDE-R) on ansible-core <=2.18 whenever ``amt_port``/``amt_media_port``
+        were left unset -- the common case for anyone not aiming at a non-default
+        port. The same empty-string-instead-of-``None`` divergence described above
+        hit ``amt_baremetal_install_port``/``amt_baremetal_install_media_port`` harder,
+        because those two are ``type: int`` at the module boundary -- an empty string
+        is not "unset" there, it is a type error ("argument ''port'' is of type <class
+        ''str''> and we were unable to convert to int"), raised before any connection
+        was attempted. Fixed at the six places ``tasks/probe.yml``, ``tasks/arm_boot.yml``,
+        ``tasks/reset.yml``, ``tasks/observe.yml`` and ``tasks/attach_media.yml``
+        (both its ports) pass these as a module ``port`` parameter, with ``| default(omit,
+        true)`` -- the ``true`` second argument is what makes the filter replace any
+        falsy value (``None`` *or* ``""``), not only Jinja''s ``Undefined``, which
+        is what actually closes the gap on <=2.18. Deliberately not fixed by making
+        ``amt_baremetal_install_port``/``_media_port`` themselves default to ``omit``
+        in ``defaults/main.yml``, even though that was the first attempt here -- it
+        round-trips fine at a module-parameter boundary but not as a stored role variable.
+        On ansible-core >=2.19, native Jinja templating instead preserves the actual
+        ``_OmitType`` sentinel *object* rather than a harmless placeholder string,
+        and this collection''s own ``amt_baremetal_install_role`` integration target''s
+        diagnostic dump serialises every resolved connection variable with ``to_nice_json``,
+        which cannot serialise that object at all ("Object of type ''_OmitType'' is
+        not JSON serializable"). Confining the conversion to the six call sites means
+        the sentinel is created and consumed within one task''s own argument templating
+        and never becomes a variable value anything else can observe, forward, or
+        serialise.'
+      - docs/capability-matrix.md - correct the reconstruction of what the B(609)
+        measured, which was itself wrong in this project's favour. It had been described
+        as a whole-suite delta only (1078 to 1687), and therefore as claiming something
+        narrower than it measured when read as "609 tests covering the inventory".
+        Measuring the four inventory test files at the feature commit gives B(217
+        to 826) -- the same 609, because 0.5.0 added tests to no other file. So B(both
+        readings of the old number were true) and the update is drift and nothing
+        more. The 57 added since coincide the same way, all of them in those four
+        files and all from the C(operation.hardware_reads) follow-up. The subsection
+        now states B(what the number measures) as a definition a future editor has
+        to re-run or replace -- C(pytest --collect-only) over those four files minus
+        their pre-0.5.0 baseline of 217 -- because stating no measure is exactly how
+        the previous figure drifted into meaning something its arithmetic never claimed.
+      - docs/capability-matrix.md - correct the unit-test count from 1774 (was 1744).
+        The six pull requests merged on 2026-07-30/31 added 30 tests. The B(666) inventory
+        figure and its C(883 - 217) derivation are unchanged and were re-measured
+        rather than assumed -- every one of the 30 landed outside the four files that
+        figure counts. Branch coverage re-measured and unchanged at 93% over C(plugins/),
+        with C(media_session.py) 81% and C(ider.py) 92%.
+      - docs/capability-matrix.md - correct three counts that had drifted since they
+        were written. The unit-test figure said B(1687) and the suite collects B(1744);
+        branch coverage over C(plugins/) said B(92%) and is B(93%); and the hardware-inventory
+        subsection's B(609) is now B(666). All three were accurate when written --
+        1687 is exactly what the 0.5.0 inventory commit's own message records -- so
+        this is drift rather than error, and the existing "point measurement, not
+        a promise" framing is kept and now carries the date the measurement was taken
+        so the next reader can tell how stale it is.
+      - docs/capability-matrix.md - correct two claims that 0.5.0 and 0.6.0 left stale.
+        The untested-generation entry in Tier 4 said both lab generations had been
+        read with the B(v0.2.0 fact set), which no longer accounts for the 0.5.0 inventory
+        both have since returned. The closing Tier-3-to-Tier-1 section listed five
+        Tier 4 items and silently omitted the two that are about modules rather than
+        measurements -- C(amt_event_log)/C(amt_log_clear), and stage 5's missing evidence
+        file.
+      - 'docs/capability-matrix.md - stop the phrase "all eight stages" reading as
+        "all stages". It was accurate when written and is now ambiguous: stages 9-12
+        were added 2026-07-31, so eight was the whole suite on the dates cited and
+        is now eight of twelve. The dated claims are deliberately left as they were,
+        because they were true when measured; a note beside them says so, and says
+        plainly that nothing there covers event-log, log-clear, sleep/hibernate or
+        wake-from-off.'
+      - 'docs/capability-matrix.md / docs/testing.md - correct a false hardware-run
+        count. Three places said the Tier 3 evidence came from B(three) runs, which
+        predates the 2026-07-30 inventory run that the tier''s own bullet list and
+        stage table already included: the tier list in the introduction, the Tier
+        3 preamble, and the runner-Python section of the testing guide. All three
+        now say four.'
+      - 'docs/testing.md - the qualification order never mentioned B(stage 1b) at
+        all, even though the capability matrix gives it a row in the Tier 3 stage
+        table and cites it as the sole evidence for the inventory. It is now documented
+        where it actually lives -- inside C(qualify_readonly.yml), alongside stage
+        1 -- with why it is numbered C(1b) and not C(9): it is read-only and gates
+        nothing, so the eight numbered stages are still eight.'
+      - 'scripts/check-default-none-template.sh - key reviewed exceptions by B(name
+        rather than line number). The allowlist shipped keyed by C(path:line) and
+        went stale inside one pull request: adding a comment block to C(defaults/main.yml)
+        shifted every entry (27 to 73, 34 to 80, 89 to 145), so the guard failed on
+        exactly the lines it was meant to excuse. A line number is not an identity.
+        All six reviewed lines now carry an inline C(# default-none-reviewed:) marker
+        -- which the script''s own header already recommended -- so the reason sits
+        beside the line and cannot drift out of alignment. The allowlist is now empty
+        by design.'
+      - scripts/check-default-none-template.sh - stop matching the pattern inside
+        B(comments). This project documents the ``| default(none)`` hazard extensively,
+        and both C(roles/amt_baremetal_install/tasks/validate.yml) and the role's
+        integration target quote the offending shape verbatim in prose to explain
+        it. The guard flagged those comments, so writing the trap down tripped the
+        check that exists because of it -- which would have taught contributors to
+        stop writing it down.
+      - tests/hardware/qualify_media_attach.yml - stage 5 (C(hardware-media), IDE-R
+        attach) now writes an evidence file. It previously wrote none at all despite
+        being this collection's flagship capability and the only Tier 3 claim resting
+        entirely on an operator's visual confirmation over KVM/console. The new evidence
+        file records the attached session and device detail, the armed one-time boot
+        selection, the power transition actually issued, and the postcondition probe
+        taken after the reset -- all already-parsed module output, consistent with
+        every other stage.
+      - tests/hardware/qualify_readonly.yml - stop discarding C(operation.hardware_reads)
+        from the stage 1b evidence file. The task wrote only C(amt_hw.amt) (the facts),
+        dropping the per-class read receipt entirely -- so 0.6.0's headline hardware-inventory
+        diagnostic (outcome, error class, and which of C(Get)/C(Enumerate) answered,
+        per class) had no durable artifact, only a CI log line. Confirmed against
+        a real-firmware CI run (job 2106) that the field is exactly what makes a C(null)
+        fact group diagnosable rather than merely visible; it now survives in the
+        published evidence file.
+      - tests/hardware/qualify_readonly.yml - the stage 1b census guard names the
+        offending B(property names) in its failure message and never the values. One
+        of the things that check catches is a firmware value reaching the census,
+        and a message that dumped the census to prove it would print that value into
+        the job log -- a leak guard that leaks. CircleCI masks context values in log
+        output, and a serial number is not a context value; it comes from firmware.
+      - 'tests/hardware/redact-evidence.py - redact local filesystem paths (by key:
+        C(path), C(iso_path), C(image_path), C(cdrom), C(floppy), and related C(amt_media)/C(amt_baremetal_install)
+        option names) and the truncated agent-watchdog GUID C(amt_event_log) renders
+        into a record''s C(description) (by pattern). Both reach evidence artifacts
+        through modules this collection already ships; paths spell out the lab runner''s
+        account and workspace layout, and match no general pattern the same way a
+        serial number does not. Also fixes C(_TOKEN_RE)''s already-redacted-token
+        regex, which was missing the underscore needed to recognise C(asset_tag) and
+        the new C(partial_uuid) category, so a second redaction pass over an already-redacted
+        file re-redacted those two categories instead of leaving them alone. Finally,
+        exempts C(raw_hex)/C(raw_base64) from pattern matching entirely, by key, ahead
+        of any pattern: C(amt_event_log)''s own documentation calls preserving those
+        bytes non-negotiable, but a malformed or truncated record can render at exactly
+        32 or 64 hex characters -- indistinguishable by pattern from a compact UUID
+        or a SHA-256 digest -- and redacting a record''s raw bytes on that coincidence
+        would corrupt the one field the module exists to keep trustworthy.'
+      - 'tests/hardware/redact-evidence.py - stop censoring the per-property shape
+        census. The census is keyed by CIM property name, which puts the literal string
+        C(SerialNumber) in B(key) position, and C(serialnumber) is in C(_IDENTIFYING_KEYS)
+        -- so the script rewrote the B(shape) V(absent) to C(<redacted-serial-1>)
+        and the artifact stopped saying the one thing the census was added to say.
+        Observed, not hypothesised: that is what the first draft of this pair of changes
+        did, and a unit test now pins it. This is the third instance of B(over-redaction)
+        being the failure to guard against in this file, and the worst-behaved of
+        the three -- a reader would see a plausible token and have no way to know
+        a diagnostic had been destroyed, exactly as the C(raw_hex) and C(action) exemptions
+        already warn. The exemption is scoped two ways so it cannot become a hole,
+        and both are covered by a negative control: by B(container), only strings
+        directly inside a mapping under C(property_shapes), handled as a unit rather
+        than by threading a flag down the walk so the one-level scope is structural;
+        and by B(closed vocabulary), only the five shapes C(amt_info) can emit, so
+        a real serial (caught by key) or an address (caught by pattern) appearing
+        in census position is still redacted. The vocabulary duplicates C(hardware.PROPERTY_SHAPES)
+        rather than importing it, because this script is deliberately stdlib-only
+        and runs from the system C(python3) at a point in CI where the collection
+        may not be installed -- an import would make redaction depend on a successful
+        install -- and two tests pin the copies to each other and to a field C(ClassRead)
+        actually has.'
+      - 'tests/hardware/redact-evidence.py - stop redacting C(operation.action). Five
+        of the seven values a module can write are dotted (C(amt_event_log.read),
+        C(amt_log_clear.clear), C(amt_media.attach), C(amt_media.detach)), and a dotted
+        lowercase token is exactly what the C(fqdn) pattern matches -- C(amt_event_log)
+        reads as a label and C(.read) reads as a TLD. C(_is_dns_name) does not save
+        them, since it only rejects known public suffixes and filename labels. Observed
+        rather than hypothesised: the first real-firmware event-log run published
+        C("action": "<redacted-fqdn-2>") where the module had written C(amt_event_log.read),
+        so the artifact no longer recorded which operation produced it. This is the
+        same failure the file already guards C(raw_hex) against -- B(over-redaction
+        corrupting a field nobody would know had been corrupted) -- and it is worse
+        than a leak, because a reviewer cannot tell it happened. The value comes from
+        this collection''s own source and can never identify anything.'
+      - tests/hardware/redact-evidence.py - stop redacting the prose C(note) fields
+        the qualification playbooks write. Stage 5's note reads "media_attach.devices/bytes_*
+        are amt_media's own report...", and C(media_attach.devices) is a dotted lowercase
+        token, so the C(fqdn) pattern rewrote it to C(<redacted-fqdn-1>/bytes_*) --
+        the sentence explaining what the evidence means stopped naming the field it
+        was explaining. Second instance of the same family as the C(operation.action)
+        fix, and found the same way, by reading a published artifact rather than by
+        looking for it. C(_is_dns_name) exists partly to prevent this but works from
+        a fixed label list, so it only catches dotted words someone already anticipated.
+        The exemption is sound only because every note is a literal authored in this
+        repository, which is now enforced by C(test_no_hardware_note_is_templated)
+        -- that test is the exemption's precondition, and neither should be removed
+        without the other.
+      - tests/integration/targets/amt_baremetal_install_role - harden ``tasks/main.yml``'s
+        own ``is none`` assertions on ``run_state``/``power_action`` to ``is falsy``.
+        Both are built in ``files/nested_play.yml`` from the same quoted-scalar ``"{{
+        var | default(none) }}"`` shape the two bugfixes above exist to fix, so on
+        ansible-core <=2.18 a scenario that correctly refused before ever setting
+        either variable dumped ``""``, not ``null`` -- and ``is none`` against ``""``
+        is false, so those assertions would have quietly stopped proving anything
+        on that core rather than failing loudly. Also adds a regression scenario that
+        binds a mock WS-Man server to the exact plaintext default port (``module_utils/tls.py``'s
+        ``DEFAULT_PLAINTEXT_PORT``, 16992) and runs the role with no port ever specified
+        anywhere, so it can only reach ``reset_confirmed=true`` if every one of the
+        four module calls that carry a port independently resolved the omitted value
+        to that same live endpoint; it also pins the exact pre-fix failure text ("cannot
+        be converted to an int") so a regression here is never mistaken for something
+        else.
+      - 'tests/integration/targets/amt_baremetal_install_role - stop building the
+        nested play''s observation dump from per-key quoted C({{ ... | default(none)
+        }}) templates. On ansible-core <= 2.18 (2.17 is this collection''s declared
+        floor) a quoted scalar template that is only C({{ ... }}) is rendered by Jinja''s
+        finalize step to text, and Ansible''s C(convert_data) step does not evaluate
+        a bare C(None) back from that text -- so it arrived as the B(empty string),
+        not C(null). C(is none) in V(tasks/main.yml) then evaluated false against
+        a fan-out guard, a C(serial: 1) guard, and a resumability guard that had all
+        in fact fired correctly, and the failure message actively misdirected by claiming
+        the guard had not fired, with the nested output quoted in the same message
+        showing otherwise. The observation is now built as a single Jinja dict expression,
+        serialised with C(to_nice_json), so only the finished JSON text crosses the
+        template boundary and C(None) survives as C(null) on every supported ansible-core.
+        Also adds C(absent_value_canary), an observation key fed by a variable nothing
+        sets, asserted once per scenario in V(tasks/run_nested.yml) -- a regression
+        in how the dump is built now fails by name in the shared helper instead of
+        as a scenario claiming a destructive action''s safety guard did not fire.'
+      known_issues:
+      - amt_baremetal_install role - on ansible-core <=2.18, every connection variable
+        this role resolves from an unset ``amt_*`` inventory variable (``amt_baremetal_install_host``,
+        ``_port``, ``_password``, ``_media_port`` and ``_tls_fingerprint``) is the
+        empty string, not ``None`` -- a consequence of how that ansible-core range
+        round-trips a Jinja ``None`` through a quoted scalar template, not something
+        this role can change from inside a role default. Every place in this role
+        that checks one of these treats ``""`` and ``None`` alike (``is truthy``/``is
+        falsy`` in ``tasks/validate.yml``, ``| default(omit, true)`` at the module-parameter
+        call sites), so this has no behavioural effect on the role itself as of this
+        release. It matters only to a caller or downstream automation that reads these
+        variables directly -- ``is none``/``is not none`` against any of them will
+        behave differently across ansible-core versions, and ``is truthy``/``is falsy``
+        should be used instead.
+      - 'plugins/modules/amt_power.py - C(state=sleep-light), C(sleep-deep) and C(hibernate)
+        are refused outright by real firmware, on the one machine that has ever been
+        asked. Hardware qualification stage 11 (2026-07-31, C(amt-lab-01), AMT B(16.1.30),
+        CircleCI pipeline B(208), job C(hardware-sleep-hibernate) B(2576)) issued
+        all three actions against real firmware for the first time -- stage 4 had
+        only ever exercised C(on)/ C(off) -- and every one came back C(error_class=remote_operation)
+        (C(outcome=firmware_refused) in the qualification stage''s own three-way classification):
+        AMT rejected the request itself, before it ever reached the platform capable
+        of honouring or declining the ACPI transition. The machine was reported C(on)
+        before, during and after every attempt, and was left healthy. B(No code changed
+        and none is being changed here): the CIM codes (3, 4, 7) are correct per the
+        DMTF/C(go-wsman-messages) mapping this collection already verified in Tier
+        1 of C(docs/capability-matrix.md), and this is a firmware-acceptance finding,
+        not an encoding defect. B(Scope matters): this is one machine, one firmware
+        version -- C(amt-lab-02) (AMT 19.0.5) has never been asked -- so this is not
+        a claim that AMT never supports sleep or hibernate, only that a caller targeting
+        AMT 16.1.30, or anything provisioned like it, should expect these three actions
+        to fail. C(plugins/modules/amt_power.py)''s C(DOCUMENTATION) and C(docs/amt_power.md)
+        now say so where an operator reading the option list will see it before trying
+        one of these three states.'
+      minor_changes:
+      - '.circleci/config.yml - C(hardware-log-clear-approval) (stage 10, C(amt_log_clear))
+        now requires C(hardware-tests) directly instead of C(hardware-pxe). Stages
+        10-12 (log-clear, sleep/hibernate, wake-from-off) had sat at the end of a
+        single linear chain purely because each was appended after the one before
+        it, not because any of the three actually depends on the stages in between:
+        C(amt_log_clear) needs only WS-Man (read the log, archive it, then clear it
+        -- stage 9''s read already lives in C(hardware-tests)), and sleep/hibernate/
+        wake-from-off need only power control, not IDE-R media attach (stage 5) or
+        a native PXE arm (stage 7). Reaching stage 10 therefore required three approvals
+        and three real hardware mutations (power, media, writable-image, plus PXE)
+        that C(amt_log_clear) has no dependency on at all. This is a narrower graph,
+        not a weaker gate: the property that matters -- one independent, dedicated
+        C(type: approval) job per escalation, so approving one destructive action
+        never doubles as approving another -- is unchanged, and C(hardware-log-clear-approval)
+        still gates only C(hardware-log-clear) and still requires its own human click.
+        C(hardware-power) /C(hardware-media)/C(hardware-writable)/C(hardware-pxe)
+        remain reachable in their original order, behind their own approvals, for
+        anyone who wants the full escalation -- this adds a second, shorter path to
+        10-12, it does not remove the existing one. Stages 11 (C(hardware-sleep-hibernate))
+        and 12 (C(hardware-wake-from-off)) stay chained after stage 10 exactly as
+        before, because that ordering is a real dependency: C(amt_log_clear) must
+        follow the event-log read it archives, and wake-from-off is deliberately last.'
+      - '.circleci/config.yml - the C(redact-hardware-evidence) command now emits
+        a SHA-256 digest manifest (C(hardware-evidence/SHA256SUMS)) for every hardware
+        job''s published evidence, closing issue #90: a CircleCI job/workflow UUID
+        proves a run happened and that an artifact exists at a path, but it does not
+        bind a document''s factual claims to the specific bytes a reader later fetches.
+        The digest step runs immediately after the existing redaction step and before
+        C(store_artifacts) in every one of the eight hardware jobs that call it, so
+        it always hashes exactly the bytes that get published -- hashing pre-redaction
+        bytes would pin content nobody can ever fetch. It lives in the shared command
+        rather than being pasted into each job: the same reasoning C(redact-hardware-evidence)''s
+        own header already gives for redaction applies identically to the digest,
+        and a ninth hardware job added later gets a manifest for free instead of being
+        a tenth chance to forget one. C(sha256sum) is used when present (GNU coreutils,
+        on this runner''s Debian/Ubuntu base) and C(shasum -a 256) otherwise, checked
+        at run time rather than assumed. Produced entirely by the job, with no manual
+        transcription step, and covers every published file, not only the ones C(redact-evidence.py)
+        rewrites.'
+      - 'amt_info - a property name is published only if it matches the CIM property-name
+        grammar (a letter, then letters, digits and underscores, 64 maximum, per DSP0004);
+        anything else is counted in C(operation.hardware_reads.<class>.property_names_dropped)
+        instead. A census key is the B(one) place firmware-supplied text becomes a
+        JSON key in this module''s output, and C(tests/hardware/redact-evidence.py)
+        never rewrites keys by a deliberate design decision that renaming a key corrupts
+        the structure the redaction exists to keep readable. Safety there therefore
+        cannot come from the redactor and comes from the grammar: every identifying
+        category that script knows about needs a character the grammar forbids, or
+        exceeds its length. The count is an integer, which the redactor leaves alone
+        and which cannot identify anything, and a non-zero value means a firmware
+        sent a shape nobody has seen and it should be looked at interactively.'
+      - 'amt_info - each C(CIM_Chassis) and C(CIM_Card) read now carries a per-property
+        B(shape census) on the operation receipt: C(operation.hardware_reads.<class>.property_shapes),
+        a mapping from the property name firmware sent to one of V(absent), V(empty),
+        V(text), V(nested) or V(repeated). B(Names and shapes only -- no property
+        value appears there, in any form.) This exists to make issue #84 answerable
+        instead of guessable. C(models.optional_str()) maps B(four) different findings
+        onto one V(null) -- the element was absent, present but empty, carrying child
+        elements, or repeated -- and every evidence artifact this project publishes
+        is already-parsed module output, taken after that collapse, so no amount of
+        re-reading it could recover the distinction. The five states are exhaustive
+        over the ways a scalar fact arrives V(null) from a class that answered, because
+        they are exactly the inputs that coercion refuses; V(nested) and V(repeated)
+        are the two that would mean firmware sent a value and B(this collection dropped
+        it), which is a defect here rather than a firmware limitation. Both C(#84)
+        candidates are served over a real socket by the mock (C(run_wsman_mock.py
+        --baseboard-serial {populated,empty,absent})), so the mechanism is exercised
+        end to end rather than only against a mocked parser.'
+      - 'amt_info - the census is scoped to the two single-instance classes, and both
+        reasons are on the record. A census is a statement about B(one) instance,
+        so a multi-instance class would need one per DIMM or disk and the receipt
+        would grow with the machine rather than with the question -- and C(CIM_Chassis)/C(CIM_Card)
+        are exactly the pair whose asymmetry is the open question (C(baseboard.serial_number)
+        V(null) on both lab machines while C(chassis.serial_number) populates, across
+        AMT 16.1.30 and 19.0.5), so having both censuses side by side in one receipt
+        B(is) the finding. A property name firmware sent that this collection never
+        reads is included too, because "the board serial arrives under a property
+        we do not look at" is a live hypothesis for #84 and the census is the only
+        place it would be visible.'
+      - 'amt_info - the shape census deliberately needs B(no raw SOAP body), which
+        C(docs/amt_info.md) and C(docs/capability-matrix.md) both previously said
+        was required to settle issue #84. Both have been corrected rather than quietly
+        edited: C(wsman._element_to_value()) already preserves the distinction (an
+        omitted element has no key in the parsed instance; a present-but-empty one
+        has a key holding an empty string), and it survives right up to the C(from_instance)
+        call that destroys it -- so the census is taken there, one line earlier. A
+        raw body would have answered the question by publishing B(everything), including
+        values the evidence redactor has never been shown; this answers it by publishing
+        nothing. No length, no prefix and no hash either: a hash of a serial from
+        a known vendor prefix is a guessable oracle, which is the same reasoning C(redact-evidence.py)
+        already applies to hashing an address.'
+      - 'docs/capability-matrix.md - cite the CircleCI run behind every Tier 3 claim.
+        B(Tier 3 rows citing no run ID) has been a tracked complaint against this
+        document since the tier existed, and only the 0.5.0 inventory row answered
+        it. The other three runs were recoverable: machine 1''s eight-stage qualification
+        of 2026-07-28 (workflow C(6ced8630)), machine 2''s of 2026-07-29 (B(pipeline
+        #93), workflow C(6b0b30d8), the number from the commit message that recorded
+        it), and machine 1''s read-only re-run of 2026-07-29 (workflow C(3756bbcd)).
+        Each stage is now cited by the individual job it executed as, so "stage 6
+        on machine 2" resolves to one job UUID rather than to a date, and each attribution
+        was confirmed against that job''s own log rather than matched on date.'
+      - docs/capability-matrix.md - name the measurement behind the branch-coverage
+        figure. B(93%) over C(plugins/), with C(media_session.py) at 81% and C(ider.py)
+        at 92%, all reproduce under C(coverage run --branch --source=plugins) over
+        the unit suite -- but a reader had to infer the methodology from the two per-file
+        figures happening to match, and a coverage number whose measurement is not
+        stated cannot be checked. Every figure in the subsection was re-collected
+        rather than trusted, against a freshly staged collection tree on ansible-core
+        2.21.
+      - 'docs/capability-matrix.md - name which half is which for the two Tier 4 entries
+        that B(span the split), since filing them under a heading forced a question
+        the undivided list let them leave open. B(Sleep and hibernate): whether firmware
+        accepts CIM codes 3, 4 and 7 as issued is one stage away, but whether the
+        machine actually enters S3/S4/S5 needs an operating system on the target --
+        the same limit that keeps the IDE-R write in the accepted list -- so a green
+        stage would prove the request path and not the state transition, and would
+        have to say so. B(Wake-from-off): powering off and then reading is an ordinary
+        extension of stage 4, but the B(independent) confirmation that the machine
+        is off is not, for the reason stage 2''s note already gives about machine
+        identity. Named as needing an attended run or a switched outlet the runner
+        can query. B(Neither claim is weakened): reachability while off remains unmeasured,
+        and configuration remains not a measurement.'
+      - 'docs/capability-matrix.md - narrow the stage 5 entry. Stage 5 now writes
+        a durable evidence artifact, so the claim no longer rests on an operator''s
+        visual confirmation alone. What remains unproven is smaller and unchanged:
+        that bytes were B(served), which nothing can show while no BIOS at the other
+        end issues a SCSI read.'
+      - docs/capability-matrix.md - note in the Tier 3 audit-limits subsection that
+        hardware runs now carry a per-file digest manifest and that the four runs
+        already cited in this document cannot be given one retroactively. Their artifacts
+        can still be hashed as CircleCI serves them today, but that would only prove
+        what is being served now, not what was actually read when this document's
+        Tier 3 claims were written -- the one thing a digest exists to establish.
+        Those four runs are recorded as explicitly, permanently digest-less rather
+        than silently left without one.
+      - 'docs/capability-matrix.md - record in Tier 4 that stages 9-12 now B(exist)
+        and have B(never run), which changes less than it appears to. The gap becomes
+        a scheduled run rather than unwritten work, but the evidence is exactly as
+        absent as before -- a stage that has not run proves nothing. Also notes two
+        things worth knowing in advance: stage 10 archives the event log and asserts
+        records were captured before clearing it, so the read that validates the decoder
+        cannot be destroyed by the clear that follows; and even a green stage 12 would
+        not fully close the reachable-while-off entry, because it proves WS-Man answered
+        while B(AMT reported) the machine off, not that the machine was independently
+        confirmed powered down.'
+      - docs/capability-matrix.md - record what is still not citeable, rather than
+        letting the closed complaint imply nothing is left. Pipeline numbers for the
+        two earlier runs are absent because the API used returns run, workflow and
+        job UUIDs and not the pipeline number, and no commit recorded them; they are
+        B(deliberately not inferred from ordering), since pipeline numbers are sequential
+        and a guessed identifier is precisely what this document exists not to contain.
+        No artifact digest is recorded anywhere, so a reader can confirm that a run
+        happened without confirming that the artifact they fetch is the one this document
+        read.
+      - 'docs/capability-matrix.md - split B(Tier 4: Still unproven) into two labelled
+        subsections, because one list held two kinds of entry and nothing told a reader
+        which kind any entry was. C(Not yet done) is a backlog: an evidence file for
+        stage 5, C(amt_event_log)/C(amt_log_clear) against real firmware, the sleep/hibernate
+        request path, and a deliberate power-off followed by a WS-Man read. C(Permanently
+        unproven) is accepted, and the subsection says what accepted means -- B(documented
+        as out of reach, not forgotten, and not pending work), so no reader treats
+        it as a gap a future release is expected to close: a non-zero IDE-R write,
+        that a PXE exchange happened, that AMT''s internal one-shot role bit was consumed,
+        and any firmware generation beyond 16.1.30 and 19.0.5 including Small Business
+        Mode / no-TLS. B(No entry was added or dropped and no caveat was trimmed)
+        -- the tier''s value is that its hedges are precise.'
+      - docs/capability-matrix.md - state the two things that make a Tier 3 citation
+        look failed at first glance. The 2026-07-30 workflow's overall outcome reads
+        C(canceled), because its four mutating approvals were never given and were
+        cancelled hours after the read-only job finished; the 2026-07-29 re-run's
+        workflow is still B(on hold) at C(hardware-power-approval) and so reports
+        as unfinished. In both cases the cited read-only job succeeded and no mutating
+        job ever started. A citation a reader cannot reconcile with the CircleCI UI
+        is worse than no citation.
+      - 'docs/capability-matrix.md - the 2026-07-31 run (pipeline B(208)) is the first
+        Tier 3 run whose published evidence carries a per-file SHA-256 digest manifest
+        (C(hardware-evidence/SHA256SUMS), the mechanism added by C(evidence-artifact-digests)
+        for issue #90) that a reader can actually check a fetched artifact against.
+        The four hardware runs already cited in this document predate that mechanism
+        and remain B(permanently) digest-less, per the existing "Two limits on how
+        far Tier 3 can be audited" subsection, which this run does not change for
+        them.'
+      - 'docs/capability-matrix.md / README.md / docs/testing.md / tests/hardware/README.md
+        - hardware qualification stage 12 (C(qualify_wake_from_off.yml), job C(hardware-wake-from-off)
+        B(2578), same 2026-07-31 / pipeline B(208) run) measured, for the first time,
+        that C(amt-lab-01) answers WS-Man and accepts a wake request while AMT self-reports
+        the machine powered off: B(3) reachability probes, B(0) failures, C(wake_request_accepted:
+        true), and the machine restored to C(on). This is materially stronger than
+        the position these documents held before this run ("configuration says it
+        should work, nothing has measured it"), and the Tier 4 entry for it shrinks
+        accordingly rather than closing outright: C( off_confirmed_by_amt) is AMT''s
+        own self-report, not independent confirmation of genuine physical power-off,
+        and C(operator_attestation) was C(null) on this run and will be C(null) on
+        every unattended CI run, because nothing reachable from CI can supply it.
+        That narrower, unchanged claim -- independent confirmation of physical power-off
+        -- is what remains in Tier 4.'
+      - 'docs/capability-matrix.md / docs/amt_event_log.md / docs/amt_log_clear.md
+        - C(amt_event_log) and C(amt_log_clear) touched real Intel AMT firmware for
+        the first time, on 2026-07-31, and both passed -- CircleCI pipeline B(208),
+        against C(amt-lab-01) (AMT 16.1.30) only. Stage 9 (C(qualify_event_log.yml),
+        job C(hardware-tests) B(2568)) read all B(205) event-log records to completion
+        with B(zero) decode errors (C(stop_reason=no_more_records), C(complete=true),
+        C(truncated=false)), confirming the 21-byte record layout this collection
+        has assumed since it was written -- C(log.max_record_size: 21) -- against
+        records a real ME actually wrote. Stage 10 (C(qualify_log_clear.yml), job
+        C(hardware-log-clear) B(2574)) archived those same 205 records to disk B(before)
+        clearing, then C(ClearLog) reported C(records_before: 205) / C(records_after:
+        0), and a second, independent C(amt_event_log) read afterwards confirmed the
+        log genuinely empty (C(total_records: 0), C(stop_reason=no_record_exists))
+        rather than trusting C(ClearLog)''s own return value. Both modules move from
+        Tier 2 to Tier 3 of the capability matrix -- on this one machine; C(amt-lab-02)
+        (AMT 19.0.5) has never run either stage, so this is not yet the two-generation
+        coverage the collection''s other five modules have. The module docs'' opening
+        notices, previously B("has been exercised against real firmware") in the negative,
+        are updated to say exactly this.'
+      - 'tests/hardware/PREFLIGHT.md - add the pre-flight brief the repository owner
+        reads before approving stages 10-12: what each does, what it is looking for,
+        expected outcome, every failure mode with the machine state it leaves behind,
+        concrete recovery steps (physical reset, MEBx, KVM), and blast radius. Written
+        for someone about to touch real hardware, not for a code reviewer.'
+      - 'tests/hardware/qualify_event_log.yml - add hardware qualification stage 9,
+        a read-only C(amt_event_log) read. C(amt_event_log) and C(amt_log_clear) are
+        2 of this collection''s 7 modules and had never touched real firmware -- the
+        eight stages that existed before this one predate both. This settles what
+        a read specifically leaves unproven: that real firmware accepts this collection''s
+        C(PositionToFirstRecord)/C(GetRecords) iteration as issued and brings it to
+        a defined end rather than stalling, that every record firmware returns decodes
+        cleanly under the 21-byte struct this collection assumes, and that every non-sentinel
+        timestamp decodes to a plausible, bounded date -- specifically checking for
+        the wrong-byte-order failure mode that would otherwise silently place a real
+        event in the 1690s rather than failing to parse at all. A read is non-destructive
+        exactly like C(amt_info)''s, so it is wired into the existing C(hardware-tests)
+        CI job alongside stages 1/3/8 rather than earning its own approval gate.'
+      - 'tests/hardware/qualify_log_clear.yml - add hardware qualification stage 10,
+        C(amt_log_clear). Irreversible, so it performs its own read-archive-verify
+        sequence immediately before the destructive call rather than trusting a prior
+        stage''s run to still be current: read the full log, write it to C({{ hostname
+        }}-qualify_log_clear-archive.json), confirm that file actually exists and
+        is non-empty, only then clear, then independently re-read via a second, different
+        WS-Man call to confirm empty. Own approval gate (C(hardware-log-clear)), downstream
+        of every existing mutating stage.'
+      - 'tests/hardware/qualify_readonly.yml - stage 1b now prints the shape census
+        for both identity-plate classes and B(asserts) it: that both classes carry
+        one, that every value in it is one of the five shapes, that no property name
+        was withheld, and that a V(null) C(serial_number) is never accompanied by
+        a census claiming V(text). That last check is what makes the evidence self-checking,
+        which is the property the first run of this stage lacked -- it reported four
+        fact groups as absent on both machines and nothing in the output could contradict
+        it. The block sits B(after) the evidence file is written, unlike the read-outcome
+        cross-check above it: this stage exists to produce an artifact, and an assertion
+        that fails before the artifact is written destroys the evidence someone would
+        need to understand the failure. Every lookup in its messages is render-safe
+        for a reason worth recording -- C(assert) finalises both C(fail_msg) and C(success_msg)
+        before it evaluates a single condition, so a C(success_msg) that cannot be
+        templated replaces the real failure with a template error, which is exactly
+        the "structurally incapable of reporting itself" shape of C(#85). The strictness
+        lives in the conditions, which use no C(default) at all.'
+      - 'tests/hardware/qualify_sleep_hibernate.yml - add hardware qualification stage
+        11: sleep-light, sleep-deep, and hibernate. C(amt_power) accepts these three
+        CIM C(RequestPowerStateChange) codes and they are unit-tested, but no hardware
+        stage had ever issued any of them -- stage 4 covers only on/off. Because sleep
+        and hibernate depend on the target operating system supporting and enabling
+        the corresponding ACPI state, every attempt is classified three ways (C(confirmed_transition),
+        C(os_did_not_transition), C(firmware_refused)) so that an unsupporting OS
+        is never conflated with a defect here; only a failure to restore back to C(on)
+        is ever treated as fatal. Own approval gate (C(hardware-sleep-hibernate)),
+        downstream of C(hardware-log-clear).'
+      - 'tests/hardware/qualify_wake_from_off.yml - add hardware qualification stage
+        12 (last in the chain): power the machine off, then attempt to reach and wake
+        it over WS-Man while it reports off. No stage before this one had ever powered
+        a machine off and then tried to talk to it -- stage 4''s own off-and-restore
+        was only ever *consistent* with a reachable-while-off endpoint, never evidence
+        of one. Stated plainly in the playbook, the CI job comment, and C(tests/hardware/PREFLIGHT.md):
+        there is no channel available to this playbook in CI that independently confirms
+        the host is genuinely, physically off -- only an attended run, where an operator
+        can type an explicit attestation captured in the evidence file, can supply
+        that. A CI run establishes only that WS-Man kept answering while AMT reported
+        off and that an explicit wake request landed. Own approval gate (C(hardware-wake-from-off)),
+        the last one in the linear chain.'
+      release_summary: "The release where the evidence caught up with the code.\n\n**Four
+        hardware stages ran against real firmware for the first time**, on ``amt-lab-01``\n(AMT
+        16.1.30). ``amt_event_log`` read **205 records** with no decode errors, confirming\nthe
+        21-byte record layout and that this collection's ``GetRecords`` iteration
+        is accepted\nas issued. ``amt_log_clear`` cleared the log and an **independent
+        re-read** confirmed it\nempty \u2014 verified by a separate read rather than
+        by trusting the method's own return.\nWake-while-powered-off answered WS-Man
+        on **three probes out of three** while AMT reported\nthe machine off, and
+        accepted a wake request. All seven modules have now touched real\nfirmware.\n\n**The
+        most important result is a negative one.** All three of ``amt_power``'s sleep
+        and\nhibernate actions \u2014 ``sleep-light``, ``sleep-deep``, ``hibernate``
+        \u2014 were **refused by\nfirmware** on that machine, before the request ever
+        reached the platform. The CIM codes\nare correct and unchanged; the finding
+        is about firmware acceptance. It is recorded in\n``known_issues`` and in the
+        module's own documentation rather than buried, because a\ncaller reading the
+        option list should learn it before trying it. Scope honestly: one\nmachine,
+        one firmware version, and ``amt-lab-02`` has never been asked.\n\n**Evidence
+        artifacts now carry a SHA-256 manifest**, computed after redaction and before\npublication,
+        so a Tier 3 citation can be bound to the bytes a reader actually fetches\nrather
+        than only to a run that happened. The four older runs remain permanently\ndigest-less;
+        nothing can fix that retroactively.\n\n**A production bug on the declared
+        floor is fixed.** The ``amt_baremetal_install`` role\ncould not run at all
+        on ansible-core 2.17 with stock ports, and separately its\n``password`` and
+        ``tls_fingerprint`` guards used ``is not none``, which an empty string\npasses
+        \u2014 so on 2.17 the requirement for an explicit TLS pin did not fire. Both
+        fixed, and\nthe guard change is version-independent hardening rather than
+        a 2.17 workaround.\n\n**Two over-redaction defects** were found by reading
+        published artifacts rather than by\nlooking for bugs: ``operation.action``
+        and the prose ``note`` fields were being rewritten\nas fake hostnames. Over-redaction
+        is harder to notice than a leak, because the output\nlooks correct.\n"
+    fragments:
+    - action-over-redaction.yml
+    - ci-default-none-template-guard.yml
+    - default-none-guard-hardening.yml
+    - evidence-artifact-digests.yml
+    - fix-amt-baremetal-install-2.17-connection-guards.yml
+    - fix-baremetal-role-target-default-none.yml
+    - hardware-log-clear-approval-branches-off-tests.yml
+    - hardware-property-shape-census.yml
+    - hardware-stages-9-12-first-run.yml
+    - hardware-stages-9-12.yml
+    - hygiene-worktrees-and-target-count.yml
+    - ider-start-session-status-fault.yml
+    - note-over-redaction.yml
+    - reconcile-counts-and-stage-existence.yml
+    - release-summary.yml
+    - tier4-split-and-run-citations.yml
+    - wsman-mock-boot-source-and-page-size-docstrings.yml
+    - wsman-mock-knobs-boot-source-count-and-page-size.yml
+    release_date: '2026-07-31'
