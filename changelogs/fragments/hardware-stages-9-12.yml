@@ -1,0 +1,62 @@
+---
+minor_changes:
+  - "tests/hardware/qualify_event_log.yml - add hardware qualification stage 9, a read-only C(amt_event_log) read.
+    C(amt_event_log) and C(amt_log_clear) are 2 of this collection's 7 modules and had never touched real firmware --
+    the eight stages that existed before this one predate both. This settles what a read specifically leaves unproven:
+    that real firmware accepts this collection's C(PositionToFirstRecord)/C(GetRecords) iteration as issued and brings
+    it to a defined end rather than stalling, that every record firmware returns decodes cleanly under the 21-byte
+    struct this collection assumes, and that every non-sentinel timestamp decodes to a plausible, bounded date --
+    specifically checking for the wrong-byte-order failure mode that would otherwise silently place a real event in the
+    1690s rather than failing to parse at all. A read is non-destructive exactly like C(amt_info)'s, so it is wired into
+    the existing C(hardware-tests) CI job alongside stages 1/3/8 rather than earning its own approval gate."
+  - "tests/hardware/qualify_log_clear.yml - add hardware qualification stage 10, C(amt_log_clear). Irreversible, so it
+    performs its own read-archive-verify sequence immediately before the destructive call rather than trusting a prior
+    stage's run to still be current: read the full log, write it to
+    C({{ hostname }}-qualify_log_clear-archive.json), confirm that file actually exists and is non-empty, only then
+    clear, then independently re-read via a second, different WS-Man call to confirm empty. Own approval gate
+    (C(hardware-log-clear)), downstream of every existing mutating stage."
+  - "tests/hardware/qualify_sleep_hibernate.yml - add hardware qualification stage 11: sleep-light, sleep-deep, and
+    hibernate. C(amt_power) accepts these three CIM C(RequestPowerStateChange) codes and they are unit-tested, but no
+    hardware stage had ever issued any of them -- stage 4 covers only on/off. Because sleep and hibernate depend on the
+    target operating system supporting and enabling the corresponding ACPI state, every attempt is classified three
+    ways (C(confirmed_transition), C(os_did_not_transition), C(firmware_refused)) so that an unsupporting OS is never
+    conflated with a defect here; only a failure to restore back to C(on) is ever treated as fatal. Own approval gate
+    (C(hardware-sleep-hibernate)), downstream of C(hardware-log-clear)."
+  - "tests/hardware/qualify_wake_from_off.yml - add hardware qualification stage 12 (last in the chain): power the
+    machine off, then attempt to reach and wake it over WS-Man while it reports off. No stage before this one had ever
+    powered a machine off and then tried to talk to it -- stage 4's own off-and-restore was only ever *consistent* with
+    a reachable-while-off endpoint, never evidence of one. Stated plainly in the playbook, the CI job comment, and
+    C(tests/hardware/PREFLIGHT.md): there is no channel available to this playbook in CI that independently confirms the
+    host is genuinely, physically off -- only an attended run, where an operator can type an explicit attestation
+    captured in the evidence file, can supply that. A CI run establishes only that WS-Man kept answering while AMT
+    reported off and that an explicit wake request landed. Own approval gate (C(hardware-wake-from-off)), the last one
+    in the linear chain."
+  - "tests/hardware/PREFLIGHT.md - add the pre-flight brief the repository owner reads before approving stages 10-12:
+    what each does, what it is looking for, expected outcome, every failure mode with the machine state it leaves
+    behind, concrete recovery steps (physical reset, MEBx, KVM), and blast radius. Written for someone about to touch
+    real hardware, not for a code reviewer."
+
+bugfixes:
+  - "tests/hardware/qualify_readonly.yml - stop discarding C(operation.hardware_reads) from the stage 1b evidence file.
+    The task wrote only C(amt_hw.amt) (the facts), dropping the per-class read receipt entirely -- so 0.6.0's headline
+    hardware-inventory diagnostic (outcome, error class, and which of C(Get)/C(Enumerate) answered, per class) had no
+    durable artifact, only a CI log line. Confirmed against a real-firmware CI run (job 2106) that the field is exactly
+    what makes a C(null) fact group diagnosable rather than merely visible; it now survives in the published evidence
+    file."
+  - "tests/hardware/qualify_media_attach.yml - stage 5 (C(hardware-media), IDE-R attach) now writes an evidence file.
+    It previously wrote none at all despite being this collection's flagship capability and the only Tier 3 claim
+    resting entirely on an operator's visual confirmation over KVM/console. The new evidence file records the attached
+    session and device detail, the armed one-time boot selection, the power transition actually issued, and the
+    postcondition probe taken after the reset -- all already-parsed module output, consistent with every other stage."
+  - "tests/hardware/redact-evidence.py - redact local filesystem paths (by key: C(path), C(iso_path), C(image_path),
+    C(cdrom), C(floppy), and related C(amt_media)/C(amt_baremetal_install) option names) and the truncated
+    agent-watchdog GUID C(amt_event_log) renders into a record's C(description) (by pattern). Both reach evidence
+    artifacts through modules this collection already ships; paths spell out the lab runner's account and workspace
+    layout, and match no general pattern the same way a serial number does not. Also fixes C(_TOKEN_RE)'s
+    already-redacted-token regex, which was missing the underscore needed to recognise C(asset_tag) and the new
+    C(partial_uuid) category, so a second redaction pass over an already-redacted file re-redacted those two categories
+    instead of leaving them alone. Finally, exempts C(raw_hex)/C(raw_base64) from pattern matching entirely, by key,
+    ahead of any pattern: C(amt_event_log)'s own documentation calls preserving those bytes non-negotiable, but a
+    malformed or truncated record can render at exactly 32 or 64 hex characters -- indistinguishable by pattern from a
+    compact UUID or a SHA-256 digest -- and redacting a record's raw bytes on that coincidence would corrupt the one
+    field the module exists to keep trustworthy."
