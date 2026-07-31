@@ -1,0 +1,32 @@
+---
+bugfixes:
+  - >-
+    docs/capability-matrix.md - correct the unit-test count from 1774 (was 1744). The six
+    pull requests merged on 2026-07-30/31 added 30 tests. The B(666) inventory figure and
+    its C(883 - 217) derivation are unchanged and were re-measured rather than assumed --
+    every one of the 30 landed outside the four files that figure counts. Branch coverage
+    re-measured and unchanged at 93% over C(plugins/), with C(media_session.py) 81% and
+    C(ider.py) 92%.
+  - >-
+    docs/capability-matrix.md - stop the phrase "all eight stages" reading as "all stages".
+    It was accurate when written and is now ambiguous: stages 9-12 were added 2026-07-31,
+    so eight was the whole suite on the dates cited and is now eight of twelve. The dated
+    claims are deliberately left as they were, because they were true when measured; a note
+    beside them says so, and says plainly that nothing there covers event-log, log-clear,
+    sleep/hibernate or wake-from-off.
+minor_changes:
+  - >-
+    docs/capability-matrix.md - record in Tier 4 that stages 9-12 now B(exist) and have
+    B(never run), which changes less than it appears to. The gap becomes a scheduled run
+    rather than unwritten work, but the evidence is exactly as absent as before -- a stage
+    that has not run proves nothing. Also notes two things worth knowing in advance: stage
+    10 archives the event log and asserts records were captured before clearing it, so the
+    read that validates the decoder cannot be destroyed by the clear that follows; and even
+    a green stage 12 would not fully close the reachable-while-off entry, because it proves
+    WS-Man answered while B(AMT reported) the machine off, not that the machine was
+    independently confirmed powered down.
+  - >-
+    docs/capability-matrix.md - narrow the stage 5 entry. Stage 5 now writes a durable
+    evidence artifact, so the claim no longer rests on an operator's visual confirmation
+    alone. What remains unproven is smaller and unchanged: that bytes were B(served),
+    which nothing can show while no BIOS at the other end issues a SCSI read.
