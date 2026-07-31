@@ -1,4 +1,6 @@
-#!/usr/bin/env python3
+# No shebang, and mode 0644, matching tests/integration/mock_servers/run_wsman_mock.py.
+# ansible-test's `shebang` sanity test requires that any file carrying a shebang be
+# executable; this one is invoked as `python3 <path>` by the target, never directly.
 # Copyright (c) 2026 Jim Crowley
 # GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
 # SPDX-License-Identifier: GPL-3.0-or-later

@@ -148,7 +148,9 @@ while IFS= read -r hit; do
     [ -z "${hit}" ] && continue
     file="${hit%%:*}"
     rest="${hit#*:}"
-    line="${rest%%:*}"
+    # The line number is deliberately not captured: `flagged` stores the whole
+    # grep hit, which already carries it, and shellcheck rightly objects to an
+    # assignment nothing reads.
     text="${rest#*:}"
 
     # Skip comments. Prose that merely *describes* this pattern is not an
