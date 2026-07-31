@@ -135,7 +135,25 @@ _IDENTIFYING_KEYS: dict[str, str] = {
 #: corrupt the one field the module exists to keep trustworthy -- worse than
 #: leaking, since a reviewer would not know it had happened. These two keys are
 #: therefore checked, and passed through, before any pattern is even tried.
-_EXEMPT_KEYS: frozenset[str] = frozenset({"raw_hex", "raw_base64"})
+#: ``action`` is exempt for a different reason, and it is the same failure this
+#: file already guards against for ``raw_hex``: over-redaction corrupting a field
+#: nobody would know had been corrupted.
+#:
+#: Every module writes ``operation.action`` from a literal in its own source --
+#: ``amt_event_log.read``, ``amt_log_clear.clear``, ``amt_media.attach``,
+#: ``amt_media.detach``, ``get_facts``, ``amt_boot``, ``amt_redirection``. Five of
+#: those are dotted, and a dotted lowercase token is exactly what the ``fqdn``
+#: pattern matches: ``amt_event_log`` reads as a label and ``.read`` reads as a
+#: TLD. ``_is_dns_name`` does not save them either, since it only rejects known
+#: public suffixes and filename labels.
+#:
+#: Observed, not hypothesised: the first real-firmware event-log run (job 2518)
+#: recorded ``"action": "<redacted-fqdn-2>"`` where the module had written
+#: ``amt_event_log.read``. The evidence file no longer said which operation
+#: produced it. The value can never identify anything -- it comes from this
+#: collection's own source, not from the lab -- so exempting it costs nothing and
+#: keeps the one field that says what the artifact *is*.
+_EXEMPT_KEYS: frozenset[str] = frozenset({"raw_hex", "raw_base64", "action"})
 
 #: Public standards domains that appear inside WS-Man resource URIs and DMTF
 #: namespaces. These are protocol constants, not lab data, and redacting them
