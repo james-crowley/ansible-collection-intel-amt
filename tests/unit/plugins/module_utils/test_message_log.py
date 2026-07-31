@@ -699,14 +699,68 @@ class TestEmptyRecordSlots:
         assert message_log.is_empty_record_slot(record) is False
 
     def test_an_all_zero_record_shorter_than_21_bytes_is_not_a_slot(self):
+        """Decided by length, not by ``decode_error``.
+
+        ``bytes(5)`` produces a 10-hex-character ``raw_hex``, which already cannot
+        equal the 42-character ``_EMPTY_SLOT_HEX`` -- so the ``raw_hex`` comparison
+        alone rejects this record. ``decode_error`` being set is incidental here: this
+        test still passes if the predicate's ``decode_error is None`` clause is
+        deleted, so it must not be read as coverage for that clause. See
+        ``test_a_failed_decode_that_happens_to_carry_all_zero_bytes_is_not_a_slot``
+        for a test that actually isolates it.
+        """
         record = message_log.decode_record(base64.b64encode(bytes(5)).decode("ascii"))
         assert record.decode_error is not None
         assert message_log.is_empty_record_slot(record) is False
 
     def test_an_undecodable_record_is_never_a_slot(self):
-        """Not readable is not the same finding as read-and-empty."""
+        """Decided by ``raw_hex``, not by ``decode_error`` -- despite the name.
+
+        Neither ``"not base64!!"`` nor ``""`` ever produces a ``raw_hex`` at all (both
+        fail before the bytes are even decoded), so ``raw_hex == _EMPTY_SLOT_HEX`` is
+        already ``False`` and decides both cases on its own. This reads as "not
+        readable is not the same as read-and-empty", but it does not actually exercise
+        that distinction in the predicate -- it would pass unchanged if
+        ``is_empty_record_slot`` were simplified to the ``raw_hex`` comparison alone.
+        See ``test_a_failed_decode_that_happens_to_carry_all_zero_bytes_is_not_a_slot``
+        for the test that isolates the ``decode_error`` clause itself.
+        """
         assert message_log.is_empty_record_slot(message_log.decode_record("not base64!!")) is False
         assert message_log.is_empty_record_slot(message_log.decode_record("")) is False
+
+    def test_a_failed_decode_that_happens_to_carry_all_zero_bytes_is_not_a_slot(self):
+        """The one test that actually isolates the ``decode_error`` clause.
+
+        Every other case in this class -- including the two directly above -- fails to
+        decode *and* has a ``raw_hex`` that cannot equal ``_EMPTY_SLOT_HEX``, so the
+        byte comparison alone already decides them and the ``decode_error is None``
+        clause is never the deciding factor. That combination is not a coincidence:
+        ``decode_record`` has no path that produces ``decode_error`` set together with
+        21 all-zero bytes. Its only failure modes are bad base64 (no ``raw_hex`` at
+        all) and a record shorter than 21 bytes (a ``raw_hex`` too short to match); 21
+        zero bytes always decode cleanly. **This state is not reachable through
+        ``decode_record`` today** -- it is constructed directly on the dataclass
+        because no input can be handed to ``decode_record`` to reach it.
+
+        The guard is tested anyway because it is cheap, deliberate insurance against a
+        future decode that could fail on a 21-byte input (a checksum, a reserved-bits
+        check, anything not implemented today) while still reading as all zeros. A
+        future reader who notices the clause is unreachable and is tempted to delete
+        it as dead code should see this test and understand why it is being kept
+        honest instead: is_empty_record_slot must say **False**. Padding is a
+        *judgement about a clean decode*; a decode failure is a different finding
+        regardless of what the bytes look like, and folding the two together is
+        exactly the kind of silent record loss issue #105 exists to prevent. Deleting
+        the ``record.decode_error is None`` clause from the predicate makes this test
+        fail without changing a single byte of input -- unlike the two tests above it.
+        """
+        record = message_log.EventRecord(
+            raw_base64=EMPTY_SLOT,
+            raw_hex=message_log._EMPTY_SLOT_HEX,
+            raw_length=message_log.RECORD_SIZE,
+            decode_error="record failed a check decode_record does not perform today",
+        )
+        assert message_log.is_empty_record_slot(record) is False
 
 
 class TestReadRecordsEmptySlots:

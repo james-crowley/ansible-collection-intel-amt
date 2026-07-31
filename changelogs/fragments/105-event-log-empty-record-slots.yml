@@ -34,13 +34,6 @@ bugfixes:
     under C(complete: true), which is the exact defect in the prior art this module
     exists to avoid. Skipping costs one wasted decode per slot and can never lose a
     record.
-  - >-
-    C(amt_event_log) - O(max_records) now bounds the number of C(RecordArray) elements
-    B(consumed) from firmware rather than the number of records kept. Budgeting on kept
-    records would let firmware serving nothing but padding across advancing iteration
-    identifiers never reach the bound, leaving C(NoMoreRecords) as the loop's only exit --
-    a new way for a play to hang, which is the thing O(max_records) exists to prevent.
-    RV(truncated) is unchanged in meaning: more entries existed and were not fetched.
 minor_changes:
   - >-
     C(amt_event_log) - new return value RV(empty_slots): how many all-zero C(RecordArray)
@@ -58,10 +51,12 @@ minor_changes:
     counting them in C(CurrentNumberOfRecords). Nothing in this mock could previously make
     the container counter and the returned array disagree -- both were derived from the
     same list -- which is precisely why no test caught issue #105 and only hardware did.
-    The padding string is the base64 C(amt-lab-01) actually sent, taken from the evidence
-    artifact rather than constructed to match the code that reads it. Trailing placement
-    only, because that is where firmware put it; the interleaved case is covered against a
-    fake transport, where it can be labelled constructed rather than served as evidence.
+    The padding string is derived from C(bytes(21)) -- the same primitive
+    C(message_log._EMPTY_SLOT_HEX) is built from -- and separately confirmed to match the
+    base64 C(amt-lab-01) actually sent, rather than reverse-engineered from the code that
+    reads it. Trailing placement only, because that is where firmware put it; the
+    interleaved case is covered against a fake transport, where it can be labelled
+    constructed rather than served as evidence.
     Driven through C(message_log.read_records) over the real C(WsmanClient) and through the
     whole module in the C(amt_event_log) integration target, with a response-side
     C(RecordArray) counter and a C(batches) assertion as controls -- issue #92's standard

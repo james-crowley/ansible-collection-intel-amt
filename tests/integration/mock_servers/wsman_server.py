@@ -373,12 +373,13 @@ DEFAULT_MESSAGE_LOG_RECORDS: tuple[str, ...] = (
 #: One **empty record slot**: 21 zero bytes, base64-encoded, exactly as real firmware
 #: pads a ``GetRecords`` response.
 #:
-#: This is measured, not invented. ``amt-lab-01`` (AMT 16.1.30, CircleCI job 2976)
-#: answered one ``GetRecords`` call with 223 ``RecordArray`` elements while
-#: ``CurrentNumberOfRecords`` reported 18 and ``NoMoreRecords`` was already set. The
-#: 223 hold 18 real records followed by *this exact string* repeated 205 times -- one
-#: per record slot a ``ClearLog`` earlier the same day had freed. See
-#: ``message_log.is_empty_record_slot``.
+#: Derived, not measured: this is ``b64encode(bytes(21))``, the same primitive
+#: ``message_log._EMPTY_SLOT_HEX`` is built from. Separately *confirmed* to match what
+#: real firmware sent -- ``amt-lab-01`` (AMT 16.1.30, CircleCI job 2976) answered one
+#: ``GetRecords`` call with 223 ``RecordArray`` elements while ``CurrentNumberOfRecords``
+#: reported 18 and ``NoMoreRecords`` was already set. The 223 hold 18 real records
+#: followed by *this exact string* repeated 205 times -- one per record slot a
+#: ``ClearLog`` earlier the same day had freed. See ``message_log.is_empty_record_slot``.
 EMPTY_MESSAGE_LOG_SLOT = b64encode(bytes(21)).decode("ascii")
 
 #: How many records this mock returns from one ``GetRecords`` call, regardless of
