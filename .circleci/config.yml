@@ -377,6 +377,15 @@ jobs:
           name: CircleCI parameter-tag guard
           command: ./scripts/check-circleci-tags.sh .circleci/config.yml
       - run:
+          # Regression guard for issue #80 and its two siblings (the 0.6.0
+          # qualification-summary bug, issue #87): a quoted scalar Jinja
+          # template that is only `{{ ... | default(none) }}` renders as the
+          # empty string on ansible-core <= 2.18 and as real None/null on
+          # >= 2.19. See the script's own header for the full writeup and the
+          # opt-out mechanism for reviewed exceptions.
+          name: default(none) quoted-scalar template guard
+          command: ./scripts/check-default-none-template.sh
+      - run:
           name: yamllint
           command: yamllint -c .yamllint .
       - run:
