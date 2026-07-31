@@ -499,6 +499,16 @@ jobs:
       - run:
           name: ansible-lint
           command: ansible-lint --offline
+      - run:
+          # Issue #103: neither of the two summary-crash bugs it reports was
+          # ever exercised by anything, because a summary task is only
+          # exercised on the path a run actually takes. This drives the real
+          # hardware-summary task logic against a synthetic amt_info-older-
+          # than-0.6.0 fixture -- no real firmware, no mock server, no
+          # network -- so it runs in every build rather than only on the
+          # self-hosted lab runner behind the hardware-tests approval gate.
+          name: Hardware summary regression test (legacy amt_info shape)
+          command: ansible-playbook tests/hardware/test_qualify_readonly_legacy_shape.yml -v
 
   # -------------------------------------------------------------------------
   sanity:

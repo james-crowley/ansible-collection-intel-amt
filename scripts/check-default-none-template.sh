@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Fail if a tracked YAML file contains a quoted scalar Jinja template whose
-# entire value is one expression ending in `| default(none)` / `| default(None)`.
+# entire value is one expression ending in `| default(none)` / `| default(None)`
+# or the bare-int shape `| default(0)` (see "SCOPE" below for exactly why `0`
+# and not the rest of the falsy family).
 #
 # Why this exists: on ansible-core <= 2.18 (2.17 is this collection's declared
 # floor) a quoted scalar template that is *only* `{{ ... }}` is rendered by
@@ -23,6 +25,48 @@
 # connection guard for an unset password/TLS fingerprint). This is the guard
 # so a fourth occurrence is caught here instead of by whoever next runs the
 # floor.
+#
+# SCOPE -- widened once, deliberately not further (issue #103):
+#
+#   `none`/`None` is not the only literal that fails to round-trip through
+#   this exact mechanism. Measured on the same four floors (2.17.14, 2.19.11,
+#   2.20.x, 2.21.x) with a named `vars:` entry that is one bare
+#   `{{ ... | default(X) }}`:
+#
+#     - `default(0)`   -> "0" (str) on <= 2.18, `0` (int) on >= 2.19. SAME
+#       mechanism as `none`: convert_data's recognised set is dicts, lists,
+#       and True/False -- not bare integers either. A downstream `== 0` fails
+#       on the floor exactly like a downstream `is none` does for #80. This
+#       shape is now flagged too, and it is why the pattern below is not
+#       simply "the literal word none/None".
+#     - `default(false)`, `default([])`, `default({})` -> round-trip
+#       CORRECTLY and identically on every floor from 2.17.14 through 2.21.x.
+#       Confirmed by measurement, not assumed from the paragraph above:
+#       convert_data's recognised set explicitly includes True/False, lists,
+#       and dicts. Widening to these would be pure false positives with zero
+#       floor-divergence to catch -- deliberately NOT flagged.
+#
+#   A second, DIFFERENT falsy hazard exists and is deliberately NOT flagged
+#   here: `default(X, true)` treats any falsy result (0, "", [], {}, false)
+#   as if it were absent and substitutes X regardless. Measured: this
+#   reproduces IDENTICALLY on every floor from 2.17.14 through 2.21.x -- it is
+#   not a version-floor divergence at all, so it is not this script's failure
+#   mode. It is also not mechanically catchable without false positives at a
+#   useful rate: of the 17 `default(..., true)` call sites in this repo at
+#   the time this was measured, all but a handful are the deliberate,
+#   correct idiom `default(omit, true)` on an optional numeric port (0 is not
+#   a valid port, so treating it as absent is exactly the intended
+#   behaviour). Telling that apart from the genuine defect this script exists
+#   to catch elsewhere (`| default('not reported', true)` silently eating a
+#   legitimate reading of `0`) requires knowing whether the real value can
+#   legitimately be falsy, which is a property of the variable, not of the
+#   template text -- the same reason the "What this script deliberately does
+#   NOT do" paragraph below already excludes the `is truthy`-vs-`is none`
+#   question for plain `default(none)`. A clean run of this script means the
+#   round-trip class of the falsy family (`none`/`None`, `0`) is covered --
+#   it does NOT mean the whole falsy family is safe, and it does NOT mean
+#   `default(X, true)` is safe to use on a variable that can legitimately be
+#   falsy. That second class stays a code-review concern.
 #
 # The fix in each case is the same: never let a bare `default(none)` be the
 # WHOLE value of a quoted scalar. Build the value inside a larger expression
@@ -112,18 +156,31 @@ set -euo pipefail
 # list only if you genuinely cannot edit the offending file.
 ALLOWLIST=''
 
+# The name predates the #103 widening to `default(0)` (see "SCOPE" above) and
+# is kept as-is rather than renamed: renaming would have to touch every
+# existing marker just to keep them matching, for a name that is still
+# accurate for the overwhelming majority of what it excuses. Read it as
+# "reviewed instance of this script's round-trip-family pattern", not
+# literally "reviewed instance of default(none)".
 OPT_OUT_MARKER='# *default-none-reviewed:'
 
 # A quoted scalar (single or double) whose entire content is one `{{ ... }}`
-# expression ending in `default(none)`/`default(None)`. `[^{}]*` between the
-# opening `{{` and the `|` is what excludes the fixed pattern: a `default(none)`
-# used as a value *inside* a larger dict/list literal (e.g.
-# `{{ {'k': v | default(none)} }}`) contains a brace before it and does not
-# match, because that whole expression -- not the bare filter result -- is what
-# crosses the template boundary.
-DQ_PATTERN='"\{\{[^{}]*\|[[:space:]]*default\([[:space:]]*[Nn]one[[:space:]]*\)[[:space:]]*\}\}"'
+# expression ending in `default(none)`/`default(None)`, or the bare-int shape
+# `default(0)` (optionally with a second `, true` argument -- the literal `0`
+# is what fails to round-trip; a trailing `, true` does not change that).
+# `[^{}]*` between the opening `{{` and the `|` is what excludes the fixed
+# pattern: a `default(none)` used as a value *inside* a larger dict/list
+# literal (e.g. `{{ {'k': v | default(none)} }}`) contains a brace before it
+# and does not match, because that whole expression -- not the bare filter
+# result -- is what crosses the template boundary. `0` is anchored the same
+# way `none` is (immediately after the opening paren, only whitespace
+# allowed before it), so `default(10)` or `default(100)` cannot match: the
+# character right after `default(` in those is `1`, never `0` or whitespace.
+FALSY_LITERAL='([Nn]one|0)'
+TRAILING_TRUE='(,[[:space:]]*[Tt]rue[[:space:]]*)?'
+DQ_PATTERN='"\{\{[^{}]*\|[[:space:]]*default\([[:space:]]*'"${FALSY_LITERAL}"'[[:space:]]*'"${TRAILING_TRUE}"'\)[[:space:]]*\}\}"'
 Q="'"
-SQ_PATTERN="${Q}\\{\\{[^{}]*\\|[[:space:]]*default\\([[:space:]]*[Nn]one[[:space:]]*\\)[[:space:]]*\\}\\}${Q}"
+SQ_PATTERN="${Q}\\{\\{[^{}]*\\|[[:space:]]*default\\([[:space:]]*${FALSY_LITERAL}[[:space:]]*${TRAILING_TRUE}\\)[[:space:]]*\\}\\}${Q}"
 
 files=()
 if [ "$#" -gt 0 ]; then
@@ -180,32 +237,44 @@ done <<< "${raw_matches}"
 
 if [ "${#flagged[@]}" -gt 0 ]; then
     echo "ERROR: found ${#flagged[@]} quoted scalar template(s) of the form" >&2
-    echo "\"{{ ... | default(none) }}\" (or default(None)) -- see this script's" >&2
-    echo "header for why that exact shape is dangerous:" >&2
+    echo "\"{{ ... | default(none) }}\" (or default(None)), or the bare-int" >&2
+    echo "shape \"{{ ... | default(0) }}\" -- see this script's header for why" >&2
+    echo "both exact shapes are dangerous, and why the rest of the falsy family" >&2
+    echo "(false/[]/{}) deliberately is NOT flagged here:" >&2
     echo >&2
-    echo "On ansible-core <= 2.18 (this collection's floor is 2.17) that renders" >&2
-    echo "as the EMPTY STRING, not None/null -- Jinja finalizes a bare None to" >&2
-    echo "text and Ansible's convert_data does not evaluate a bare 'None' back." >&2
-    echo "On ansible-core >= 2.19 the same line renders None/null. Measured:" >&2
-    echo "  2.17.14 -> \"\" (str), \`is none\` is false" >&2
-    echo "  2.19.11 / 2.21.2 -> null (NoneType), \`is none\` is true" >&2
+    echo "On ansible-core <= 2.18 (this collection's floor is 2.17) a quoted" >&2
+    echo "scalar that is only one {{ ... }} expression renders default(none) as" >&2
+    echo "the EMPTY STRING, not None/null, and default(0) as the STRING \"0\"," >&2
+    echo "not the int 0 -- Jinja finalizes the bare literal to text and" >&2
+    echo "Ansible's convert_data does not evaluate either shape back (its" >&2
+    echo "recognised set is dicts, lists, and True/False -- confirmed by direct" >&2
+    echo "measurement to round-trip correctly on every floor, which is exactly" >&2
+    echo "why they are not in this pattern). On ansible-core >= 2.19 the" >&2
+    echo "templating engine preserves the native object instead. Measured:" >&2
+    echo "  2.17.14 -> default(none) is \"\" (str); default(0) is \"0\" (str)" >&2
+    echo "  2.19.11 / 2.21.2 -> default(none) is null; default(0) is 0 (int)" >&2
     echo >&2
     echo "This has already caused issue #80 (a test asserted \`is none\` and only" >&2
     echo "failed on the floor), the 0.6.0 qualification-summary bug (a printed" >&2
-    echo "\"null\" masked a wrong-key defect), and issue #87 (a role default" >&2
-    echo "fails an int argspec, and a security guard silently passes)." >&2
+    echo "\"null\" masked a wrong-key defect), issue #87 (a role default fails" >&2
+    echo "an int argspec, and a security guard silently passes), and issue #103" >&2
+    echo "(a default(0) counter would fail an \`== 0\` check on every healthy" >&2
+    echo "reading, on this collection's declared floor)." >&2
     echo >&2
     echo "Fix: build the value inside a larger expression -- a dict/list" >&2
     echo "literal or to_json -- so only the finished text crosses the template" >&2
     echo "boundary, or use default(omit) if the variable is optional and the" >&2
     echo "intent is \"let the callee's own default apply\". If this is a" >&2
     echo "reviewed exception (a required value with no viable alternative," >&2
-    echo "checked downstream with \`is truthy\` rather than \`is none\`), add" >&2
-    echo "a trailing '# default-none-reviewed: <reason>' comment on the line." >&2
+    echo "checked downstream with \`is truthy\` rather than \`is none\`/\`== 0\`)," >&2
+    echo "add a trailing '# default-none-reviewed: <reason>' comment on the" >&2
+    echo "line. A clean run of this script means the none/0 round-trip class" >&2
+    echo "is covered -- it does NOT mean default(X, true) is safe on a" >&2
+    echo "variable that can legitimately be falsy; see this script's header." >&2
     echo >&2
     echo "Offending lines:" >&2
     printf '%s\n' "${flagged[@]}" >&2
     exit 1
 fi
 
-echo "OK: no quoted-scalar default(none)/default(None) template found (${allowlisted_count} allowlisted, ${opted_out_count} inline-opted-out)."
+echo "OK: no quoted-scalar default(none)/default(None)/default(0) template found (${allowlisted_count} allowlisted, ${opted_out_count} inline-opted-out). This covers the none/0 round-trip class only -- see this script's header for what it deliberately does not cover."

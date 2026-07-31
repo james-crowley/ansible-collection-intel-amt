@@ -1,0 +1,14 @@
+---
+bugfixes:
+  - 'tests/hardware/qualify_readonly.yml - fix a pre-existing crash in the "Require
+    the read outcomes and the fact values to agree" task, introduced in #85 (the
+    commit that fixed the 0.6.0 qualification-summary bug). It built
+    C(amt_hw.operation.hardware_reads) with no default, so against an C(amt_info)
+    older than 0.6.0 the whole block raised out of the template engine before any
+    of its conditions ran, including the one written to name exactly that case.
+    Fixed the same way PR #102 fixed the equivalent line in the census task,
+    C(| default({}, true)), and factored the whole hardware-summary task list out
+    into C(_qualify_readonly_hardware_summary.yml) so it can be driven directly by
+    a new local-only regression test (C(tests/hardware/test_qualify_readonly_legacy_shape.yml),
+    now wired into CI) against a synthetic pre-0.6.0 C(amt_hw) shape, rather than
+    only ever being exercised by real hardware on the path a run happens to take.'
