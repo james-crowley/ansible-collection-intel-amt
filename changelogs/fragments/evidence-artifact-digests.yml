@@ -1,0 +1,23 @@
+---
+minor_changes:
+  - ".circleci/config.yml - the C(redact-hardware-evidence) command now emits a SHA-256 digest
+    manifest (C(hardware-evidence/SHA256SUMS)) for every hardware job's published evidence,
+    closing issue #90: a CircleCI job/workflow UUID proves a run happened and that an artifact
+    exists at a path, but it does not bind a document's factual claims to the specific bytes a
+    reader later fetches. The digest step runs immediately after the existing redaction step and
+    before C(store_artifacts) in every one of the eight hardware jobs that call it, so it always
+    hashes exactly the bytes that get published -- hashing pre-redaction bytes would pin content
+    nobody can ever fetch. It lives in the shared command rather than being pasted into each job:
+    the same reasoning C(redact-hardware-evidence)'s own header already gives for redaction
+    applies identically to the digest, and a ninth hardware job added later gets a manifest for
+    free instead of being a tenth chance to forget one. C(sha256sum) is used when present (GNU
+    coreutils, on this runner's Debian/Ubuntu base) and C(shasum -a 256) otherwise, checked at run
+    time rather than assumed. Produced entirely by the job, with no manual transcription step, and
+    covers every published file, not only the ones C(redact-evidence.py) rewrites."
+  - "docs/capability-matrix.md - note in the Tier 3 audit-limits subsection that hardware runs now
+    carry a per-file digest manifest and that the four runs already cited in this document cannot
+    be given one retroactively. Their artifacts can still be hashed as CircleCI serves them today,
+    but that would only prove what is being served now, not what was actually read when this
+    document's Tier 3 claims were written -- the one thing a digest exists to establish. Those
+    four runs are recorded as explicitly, permanently digest-less rather than silently left without
+    one."
