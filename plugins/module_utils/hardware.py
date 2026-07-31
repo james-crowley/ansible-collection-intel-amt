@@ -325,6 +325,7 @@ def _shape_of(value: Any) -> str:
     # anything at all.
     return PROPERTY_SHAPE_EMPTY if not str(value).strip() else PROPERTY_SHAPE_TEXT
 
+
 #: WS-Man **HTTP requests** each subset costs, for the module's documented
 #: round-trip table. An ``Enumerate`` costs two (Enumerate + one ``Pull``), and
 #: one more ``Pull`` per further 64 instances -- no realistic machine has 64

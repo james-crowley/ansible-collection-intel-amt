@@ -844,7 +844,7 @@ def test_a_census_only_counts_as_one_when_it_is_actually_a_mapping(redactor: Any
 
 
 def test_the_exemption_is_scoped_to_the_census_key_and_not_to_shape_shaped_strings(redactor: Any) -> None:
-    """"absent" is also an ordinary English word. Outside the census, a key in
+    """ "absent" is also an ordinary English word. Outside the census, a key in
     _IDENTIFYING_KEYS holding it is redacted like anything else -- the exemption is
     positional, and a value-only rule would be a hole this script cannot audit."""
     result = redactor.redact_value({"serial_number": "absent", "note": "absent"})

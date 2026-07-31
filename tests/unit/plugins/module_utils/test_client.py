@@ -1323,9 +1323,7 @@ class TestHardwarePropertyShapeCensus(TestGetFactsHardwareInventory):
         # different board.
         wsman = _fake_wsman()
         wsman.get.side_effect = ProtocolError("no bare Get here", endpoint="10.0.0.5:16993")
-        wsman.enumerate.side_effect = lambda rc, **_kw: (
-            [{"Model": "MOCK-BOARD-0000"}, {"SerialNumber": "MOCKBOARD0002"}] if rc == "CIM_Card" else []
-        )
+        wsman.enumerate.side_effect = lambda rc, **_kw: [{"Model": "MOCK-BOARD-0000"}, {"SerialNumber": "MOCKBOARD0002"}] if rc == "CIM_Card" else []
 
         facts = _client(wsman).get_facts(resolve_gather_subset(["system"]))
         card = facts.hardware.reads_to_dict()["CIM_Card"]

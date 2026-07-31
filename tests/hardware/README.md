@@ -180,6 +180,35 @@ exactly as the firmware reported them:
   `schemas.dmtf.org`, `schemas.xmlsoap.org`, `w3.org`, `oasis-open.org`). Those
   are protocol constants, not lab data.
 - The JSON structure itself: same keys, same nesting, same types.
+- **`amt_info`'s per-property shape census**, new in 0.7.0:
+  `operation.hardware_reads.<class>.property_shapes`. This one needs its own rule
+  and is the most interesting entry in this list, because the general rules
+  actively get it wrong.
+
+  The census is keyed by CIM property name with a shape label as the value --
+  `{"SerialNumber": "absent", "Model": "text"}` -- which is what makes issue #84
+  answerable: whether firmware sent `CIM_Card.SerialNumber` at all, and if it did,
+  whether it was empty. But that puts the literal string `SerialNumber` in **key**
+  position, and `serialnumber` is in the identifying-key table that catches real
+  serial numbers. Unmodified, the script rewrote the *shape* `"absent"` to
+  `<redacted-serial-1>`: the third instance of over-redaction in this file, and the
+  worst-behaved, since a reader would see a plausible token and never know a
+  diagnostic had been destroyed.
+
+  The exemption is scoped two ways so it cannot become a hole -- to the census
+  **container**, and to the **closed vocabulary** of five shapes `amt_info` can
+  emit. Anything else in census position is redacted exactly as it would be
+  anywhere else, which is asserted with a real serial (caught by key) and an IPv4
+  address (caught by pattern).
+
+  What this does **not** do, stated plainly: census keys come from firmware, and
+  this script never rewrites keys. Safety there comes from the generator, which
+  publishes a name only if it matches the CIM property-name grammar -- a letter,
+  then letters, digits and underscores, 64 max -- and counts anything else in
+  `property_names_dropped` instead. Every category above needs a character that
+  grammar forbids, or is longer than it allows. A non-zero
+  `property_names_dropped` in an artifact means a firmware sent a name nobody has
+  seen; look at it interactively rather than reasoning from the artifact.
 
 Redacting twice is a no-op, so a re-run cannot renumber the tokens.
 
@@ -279,7 +308,7 @@ cosmetic:
 
 | Stage | Playbook | Mutates? | What it catches |
 |---|---|---|---|
-| 1 | `qualify_readonly.yml` | No | Endpoint unreachable, firmware read failures |
+| 1 | `qualify_readonly.yml` | No | Endpoint unreachable, firmware read failures. Stage 1b within it reads the hardware/asset inventory and, since 0.7.0, records the per-property **shape census** of `CIM_Chassis` and `CIM_Card` -- which is what settles issue #84 (see [What is deliberately preserved](#what-is-deliberately-preserved-and-why)) |
 | 2 | *(none -- human review of stage 1's output)* | No | **Inventory/reality mismatch** -- firmware-reported UUID vs. reviewed `amt_expected_uuid` |
 | 3 | `qualify_checkmode.yml` (`--check`) | No | Module check-mode paths that unit/mock tests cannot fully exercise against real firmware quirks |
 | 4 | `qualify_power.yml` | Yes | Real `RequestPowerStateChange` behaviour, attended |
