@@ -62,32 +62,80 @@
             dest: "{{ nested_dump_dir }}/{{ inventory_hostname }}.json"
             mode: "0600"
           vars:
-            nested_observation:
-              outcome: "{{ nested_outcome | default('unknown') }}"
-              failed_msg: "{{ nested_failed_msg | default(none) }}"
-              failed_assertion: "{{ nested_failed_assertion | default(none) }}"
-              failed_error_class: "{{ nested_failed_error_class | default(none) }}"
-              inventory_hostname: "{{ inventory_hostname }}"
-              play_hosts_all_count: "{{ ansible_play_hosts_all | length }}"
-              play_batch_count: "{{ ansible_play_batch | length }}"
-              # The resolved connection endpoint, straight from the role's defaults.
-              # This is the assertion surface for the inventory-variable regression:
-              # it must come from amt_host, never from inventory_hostname.
-              resolved_host: "{{ amt_baremetal_install_host | default(none) }}"
-              resolved_port: "{{ amt_baremetal_install_port | default(none) }}"
-              resolved_username: "{{ amt_baremetal_install_username | default(none) }}"
-              # The IDE-R redirection port the media phase aims at, which is a different
-              # plane from resolved_port above and must never be conflated with it.
-              resolved_media_port: "{{ amt_baremetal_install_media_port | default(none) }}"
-              # The hand-off endpoint. Asserted to be *unset* unless the caller named it:
-              # it must not fall back to the AMT management address (resolved_host), and
-              # it must not fall back to inventory_hostname either.
-              resolved_handoff_host: "{{ amt_baremetal_install_handoff_host | default(none) }}"
-              # 'on' for an endpoint observed powered off, 'reset' for one observed
-              # running. Undefined if the role never reached tasks/reset.yml.
-              power_action: "{{ amt_baremetal_install_power_action | default(none) }}"
-              run_state: "{{ amt_baremetal_install_run_state | default(none) }}"
-              state_file: "{{ amt_baremetal_install_state_file | default(none) }}"
+            # ONE Jinja dict expression, deliberately not a YAML mapping whose values
+            # are individually quoted "{{ ... }}" templates. That naive form is the one
+            # that reads correctly and is wrong (issue #80).
+            #
+            # A quoted scalar template is rendered by Jinja to *text* and then handed
+            # back to Ansible, and what happens to `None` at that boundary is not the
+            # same on every ansible-core this collection supports:
+            #
+            #   * >= 2.19's templating engine preserves the native object, so a missing
+            #     value round-trips as None and lands in the JSON as `null`.
+            #   * <= 2.18 (including 2.17, our declared floor in meta/runtime.yml)
+            #     renders None through Jinja's finalize step, which stringifies it as
+            #     the EMPTY STRING. The only values that survive that trip are ones
+            #     whose text form Ansible's convert_data step recognises and evaluates
+            #     back -- dicts, lists, True/False -- and a bare None is not among them.
+            #
+            # So on 2.17 every `| default(none)` below used to emit "" instead of null,
+            # and `run_state is none` in tasks/main.yml -- an assertion that states
+            # exactly the right thing -- evaluated false. The target then reported that
+            # the fan-out guard had not fired, while the nested output quoted in the
+            # very same message showed it firing correctly. Verified on 2.17 and 2.19.
+            #
+            # Inside a single expression there is no such boundary: the dict is built,
+            # `to_nice_json` serialises it, and only the finished JSON text crosses back
+            # into Ansible. None is `null` on every version.
+            #
+            # The cost of that is where the per-key notes have to live. A comment cannot
+            # go inside the expression: `#` is not a comment character in Jinja, and a
+            # Jinja `{# #}` comment is a template-level construct that is a syntax error
+            # within `{{ ... }}` ("unexpected char '#'"). So the keys that need
+            # explaining are explained here:
+            #
+            #   resolved_host, resolved_port, resolved_username
+            #     The resolved connection endpoint, straight from the role's defaults.
+            #     This is the assertion surface for the inventory-variable regression:
+            #     it must come from amt_host, never from inventory_hostname.
+            #   resolved_media_port
+            #     The IDE-R redirection port the media phase aims at, which is a
+            #     different plane from resolved_port and must never be conflated with it.
+            #   resolved_handoff_host
+            #     The hand-off endpoint. Asserted to be *unset* unless the caller named
+            #     it: it must not fall back to the AMT management address
+            #     (resolved_host), and it must not fall back to inventory_hostname
+            #     either.
+            #   power_action
+            #     'on' for an endpoint observed powered off, 'reset' for one observed
+            #     running. Undefined if the role never reached tasks/reset.yml.
+            #   absent_value_canary
+            #     A variable nothing anywhere sets, so this key is absent by construction
+            #     on every run of every scenario. run_nested.yml asserts it is null,
+            #     which makes a regression of everything above fail once, by name, in the
+            #     shared helper -- rather than as a scenario claiming that a destructive
+            #     action's safety guard did not fire.
+            nested_observation: >-
+              {{
+                {
+                  'outcome': nested_outcome | default('unknown'),
+                  'failed_msg': nested_failed_msg | default(none),
+                  'failed_assertion': nested_failed_assertion | default(none),
+                  'failed_error_class': nested_failed_error_class | default(none),
+                  'inventory_hostname': inventory_hostname,
+                  'play_hosts_all_count': ansible_play_hosts_all | length,
+                  'play_batch_count': ansible_play_batch | length,
+                  'resolved_host': amt_baremetal_install_host | default(none),
+                  'resolved_port': amt_baremetal_install_port | default(none),
+                  'resolved_username': amt_baremetal_install_username | default(none),
+                  'resolved_media_port': amt_baremetal_install_media_port | default(none),
+                  'resolved_handoff_host': amt_baremetal_install_handoff_host | default(none),
+                  'power_action': amt_baremetal_install_power_action | default(none),
+                  'run_state': amt_baremetal_install_run_state | default(none),
+                  'state_file': amt_baremetal_install_state_file | default(none),
+                  'absent_value_canary': nested_never_set_by_anything | default(none),
+                }
+              }}
 
     - name: Re-raise a failed role so the caller sees a non-zero exit status
       ansible.builtin.fail:
