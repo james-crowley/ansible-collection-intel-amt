@@ -1,0 +1,23 @@
+---
+# The issue's own write-up recorded the wrong cause and was corrected in a
+# follow-up comment: the claim that ansible-core 2.17 renders the *string*
+# "None" is wrong. It renders the EMPTY STRING. Measured:
+#   2.17.14                 -> "" (str), `is none` is false
+#   2.19.11 / 2.21.2         -> null (NoneType), `is none` is true
+# `is none` against a stringified "None" would also read false, so the two
+# causes are easy to conflate from the symptom alone -- worth recording
+# precisely here since the wrong version is what a search will otherwise
+# turn up first.
+bugfixes:
+  - "tests/integration/targets/amt_baremetal_install_role - stop building the nested play's observation dump from per-key
+    quoted C({{ ... | default(none) }}) templates. On ansible-core <= 2.18 (2.17 is this collection's declared floor) a
+    quoted scalar template that is only C({{ ... }}) is rendered by Jinja's finalize step to text, and Ansible's
+    C(convert_data) step does not evaluate a bare C(None) back from that text -- so it arrived as the B(empty string),
+    not C(null). C(is none) in V(tasks/main.yml) then evaluated false against a fan-out guard, a C(serial: 1) guard, and
+    a resumability guard that had all in fact fired correctly, and the failure message actively misdirected by claiming
+    the guard had not fired, with the nested output quoted in the same message showing otherwise. The observation is now
+    built as a single Jinja dict expression, serialised with C(to_nice_json), so only the finished JSON text crosses the
+    template boundary and C(None) survives as C(null) on every supported ansible-core. Also adds
+    C(absent_value_canary), an observation key fed by a variable nothing sets, asserted once per scenario in
+    V(tasks/run_nested.yml) -- a regression in how the dump is built now fails by name in the shared helper instead of
+    as a scenario claiming a destructive action's safety guard did not fire."

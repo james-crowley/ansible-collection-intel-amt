@@ -20,6 +20,10 @@
 # rc is captured rather than enforced (`failed_when: false`): most scenarios here are
 # proving the role *refuses* something, so a non-zero rc is the expected result and the
 # caller is the only thing that knows which way round it should be.
+#
+# One assertion lives here rather than in a caller: that an observation value with
+# nothing behind it arrives as null. Every scenario depends on that, so it is checked
+# once for all of them -- see the last task in this file.
 
 - name: "Derive the observation directory for scenario {{ scenario }}"
   ansible.builtin.set_fact:
@@ -80,3 +84,34 @@
   ansible.builtin.set_fact:
     nested_obs: "{{ nested_obs | combine({item: lookup('ansible.builtin.file', nested_dump_dir ~ '/' ~ item ~ '.json') | from_json}) }}"
   loop: "{{ scenario_hosts }}"
+
+- name: "Assert an absent observation value is null, not empty text, for scenario {{ scenario }}"
+  # The canary for issue #80, checked once per scenario before any of them asserts on a
+  # value it expects to be absent. nested_play.yml emits absent_value_canary from a
+  # variable nothing sets, so it is absent by construction and must serialise as JSON
+  # null on every supported ansible-core.
+  #
+  # Without this, a regression in how that dump is built does not fail here -- it fails
+  # in whichever scenario next writes `run_state is none`, whose fail_msg then reports
+  # that a destructive-action safety guard did not fire. That message is wrong and
+  # costly: it points at the role, and the nested output pasted beneath it shows the
+  # guard working. This task is what turns that into one named failure in the shared
+  # helper instead.
+  ansible.builtin.assert:
+    that:
+      - nested_obs[scenario_hosts | first].absent_value_canary is none
+    fail_msg: >-
+      {{ scenario }}: an observation key with no value behind it came back as
+      {{ nested_obs[scenario_hosts | first].absent_value_canary | type_debug }}
+      ({{ nested_obs[scenario_hosts | first].absent_value_canary | to_json }}) rather
+      than null, so every `is none` assertion in tasks/main.yml is now testing the wrong
+      thing and will report a safety guard as broken when it is not.
+
+      This is the ansible-core version divergence issue #80 fixed. Something in
+      files/nested_play.yml has gone back to emitting an observation value as its own
+      quoted per-key template ending in `| default(none)`. Jinja renders None as the
+      empty string, and on ansible-core 2.18 and older -- 2.17 is this collection's
+      declared floor -- that empty string is what Ansible gets back, while 2.19 and
+      newer preserve the real None. The whole observation dict has to be built inside
+      one expression, so that only the serialised JSON crosses the template boundary.
+      See the comment on nested_observation in files/nested_play.yml.
