@@ -1,0 +1,72 @@
+---
+# Documentation only -- no code changed -- and the same reasoning
+# `tier4-split-and-run-citations.yml` already gives for why that is not the test for
+# `trivial`: this is the first time stages 9-12 touched real Intel AMT firmware, and a
+# reader relying on `docs/capability-matrix.md`'s previous "neither has run" / "unverified
+# against real firmware" language should be able to see from the changelog that it changed
+# and why. The sleep/hibernate finding in particular is exactly the kind of thing a user
+# needs to see before reaching for `state=sleep-light` on their own hardware, which is why
+# it gets `known_issues` rather than `minor_changes`.
+known_issues:
+  - "plugins/modules/amt_power.py - C(state=sleep-light), C(sleep-deep) and C(hibernate)
+    are refused outright by real firmware, on the one machine that has ever been asked.
+    Hardware qualification stage 11 (2026-07-31, C(amt-lab-01), AMT B(16.1.30), CircleCI
+    pipeline B(208), job C(hardware-sleep-hibernate) B(2576)) issued all three actions
+    against real firmware for the first time -- stage 4 had only ever exercised C(on)/
+    C(off) -- and every one came back C(error_class=remote_operation)
+    (C(outcome=firmware_refused) in the qualification stage's own three-way
+    classification): AMT rejected the request itself, before it ever reached the
+    platform capable of honouring or declining the ACPI transition. The machine was
+    reported C(on) before, during and after every attempt, and was left healthy. B(No
+    code changed and none is being changed here): the CIM codes (3, 4, 7) are correct
+    per the DMTF/C(go-wsman-messages) mapping this collection already verified in Tier 1
+    of C(docs/capability-matrix.md), and this is a firmware-acceptance finding, not an
+    encoding defect. B(Scope matters): this is one machine, one firmware version --
+    C(amt-lab-02) (AMT 19.0.5) has never been asked -- so this is not a claim that AMT
+    never supports sleep or hibernate, only that a caller targeting AMT 16.1.30, or
+    anything provisioned like it, should expect these three actions to fail.
+    C(plugins/modules/amt_power.py)'s C(DOCUMENTATION) and C(docs/amt_power.md) now say
+    so where an operator reading the option list will see it before trying one of these
+    three states."
+
+minor_changes:
+  - "docs/capability-matrix.md / docs/amt_event_log.md / docs/amt_log_clear.md -
+    C(amt_event_log) and C(amt_log_clear) touched real Intel AMT firmware for the first
+    time, on 2026-07-31, and both passed -- CircleCI pipeline B(208), against
+    C(amt-lab-01) (AMT 16.1.30) only. Stage 9 (C(qualify_event_log.yml), job
+    C(hardware-tests) B(2568)) read all B(205) event-log records to completion with
+    B(zero) decode errors (C(stop_reason=no_more_records), C(complete=true),
+    C(truncated=false)), confirming the 21-byte record layout this collection has
+    assumed since it was written -- C(log.max_record_size: 21) -- against records a
+    real ME actually wrote. Stage 10 (C(qualify_log_clear.yml), job
+    C(hardware-log-clear) B(2574)) archived those same 205 records to disk B(before)
+    clearing, then C(ClearLog) reported C(records_before: 205) / C(records_after: 0),
+    and a second, independent C(amt_event_log) read afterwards confirmed the log
+    genuinely empty (C(total_records: 0), C(stop_reason=no_record_exists)) rather than
+    trusting C(ClearLog)'s own return value. Both modules move from Tier 2 to Tier 3 of
+    the capability matrix -- on this one machine; C(amt-lab-02) (AMT 19.0.5) has never
+    run either stage, so this is not yet the two-generation coverage the collection's
+    other five modules have. The module docs' opening notices, previously
+    B(\"has been exercised against real firmware\") in the negative, are updated to say
+    exactly this."
+  - "docs/capability-matrix.md / README.md / docs/testing.md / tests/hardware/README.md -
+    hardware qualification stage 12 (C(qualify_wake_from_off.yml), job
+    C(hardware-wake-from-off) B(2578), same 2026-07-31 / pipeline B(208) run) measured,
+    for the first time, that C(amt-lab-01) answers WS-Man and accepts a wake request
+    while AMT self-reports the machine powered off: B(3) reachability probes,
+    B(0) failures, C(wake_request_accepted: true), and the machine restored to
+    C(on). This is materially stronger than the position these documents held before
+    this run (\"configuration says it should work, nothing has measured it\"), and the
+    Tier 4 entry for it shrinks accordingly rather than closing outright: C(
+    off_confirmed_by_amt) is AMT's own self-report, not independent confirmation of
+    genuine physical power-off, and C(operator_attestation) was C(null) on this run and
+    will be C(null) on every unattended CI run, because nothing reachable from CI can
+    supply it. That narrower, unchanged claim -- independent confirmation of physical
+    power-off -- is what remains in Tier 4."
+  - "docs/capability-matrix.md - the 2026-07-31 run (pipeline B(208)) is the first Tier 3
+    run whose published evidence carries a per-file SHA-256 digest manifest
+    (C(hardware-evidence/SHA256SUMS), the mechanism added by C(evidence-artifact-digests)
+    for issue #90) that a reader can actually check a fetched artifact against. The four
+    hardware runs already cited in this document predate that mechanism and remain
+    B(permanently) digest-less, per the existing \"Two limits on how far Tier 3 can be
+    audited\" subsection, which this run does not change for them."

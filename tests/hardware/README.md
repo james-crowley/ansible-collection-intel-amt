@@ -244,24 +244,31 @@ leak this script exists to prevent.
 
 ## The staged plan, and why it never runs in parallel
 
-**The `amt_event_log`/`amt_log_clear` gap is closed, on paper.** Stages 1-8 predate
-both event-log modules, and until stage 9 was added neither had ever run against real
-firmware. Stage 9 (`qualify_event_log.yml`) is the read-only half, wired into the
-existing `hardware-tests` job precisely because a read is non-destructive exactly like
-`amt_info`'s. Stage 10 (`qualify_log_clear.yml`) is the destructive half, behind its
-own approval gate downstream of every prior mutating stage, and performs its own
-read-archive-verify sequence immediately before the irreversible call rather than
-trusting an earlier stage's run to still be current. **Both stages are authored and
-verified against the mock WS-Man server; as of this writing, neither has yet been run
-against real firmware** -- see [`PREFLIGHT.md`](PREFLIGHT.md) before approving stage 10
-specifically, and do not read this paragraph as a claim that either module is now
-hardware-qualified.
+**The `amt_event_log`/`amt_log_clear` gap is closed, for real, on machine 1.** Stages
+1-8 predate both event-log modules, and until stage 9 was added neither had ever run
+against real firmware. Stage 9 (`qualify_event_log.yml`) is the read-only half, wired
+into the existing `hardware-tests` job precisely because a read is non-destructive
+exactly like `amt_info`'s. Stage 10 (`qualify_log_clear.yml`) is the destructive half,
+behind its own approval gate downstream of every prior mutating stage, and performs its
+own read-archive-verify sequence immediately before the irreversible call rather than
+trusting an earlier stage's run to still be current. **Both stages ran against real
+firmware for the first time on 2026-07-31** (CircleCI pipeline 208), against
+`amt-lab-01` only, and both passed -- see [`PREFLIGHT.md`](PREFLIGHT.md) for what was
+read before approving stage 10, and
+[`docs/capability-matrix.md`](../../docs/capability-matrix.md) Tier 3 for the full
+result. Both modules are now hardware-qualified **on one machine**; `amt-lab-02` has
+never run either stage.
 
-Stages 11 and 12 close two further gaps the original eight stages never reached: `amt_power`'s
-sleep-light/sleep-deep/hibernate states (stage 4 covers only on/off), and whether the
-endpoint can actually be reached and woken over WS-Man while genuinely powered off
-(no earlier stage ever tried). Both are likewise authored, mock-verified, and awaiting
-a real hardware run.
+Stages 11 and 12 close two further gaps the original eight stages never reached:
+`amt_power`'s sleep-light/sleep-deep/hibernate states (stage 4 covers only on/off), and
+whether the endpoint can actually be reached and woken over WS-Man while genuinely
+powered off (no earlier stage ever tried). Both also ran for the first time on
+2026-07-31, against `amt-lab-01` only. Stage 11's result is a clean negative: AMT
+refused all three sleep/hibernate requests outright, before they reached the platform.
+Stage 12 measured that WS-Man kept answering, and a wake request landed, while AMT
+self-reported the machine off -- with the caveat that AMT's own self-report is not
+independent confirmation of genuine physical power-off. See the subsections in
+[`docs/capability-matrix.md`](../../docs/capability-matrix.md) Tier 3 for both.
 
 There are **twelve numbered stages** and **eleven playbooks**: stage 2 has no
 playbook of its own, because it is a human cross-check performed on stage 1's
@@ -340,11 +347,13 @@ Stated precisely, because which run established what still matters:
 | `amt-lab-01` | AMT 16.1.30 | **All eight** (1, 2, 3, 4, 5, 6, 7, 8) | 2026-07-28 |
 | `amt-lab-02` | AMT 19.0.5 | **All eight** (1, 2, 3, 4, 5, 6, 7, 8) | 2026-07-29 |
 | `amt-lab-01` | AMT 16.1.30 | Read-only re-run (1, 3, 8), nothing mutated | 2026-07-29 |
+| `amt-lab-01` | AMT 16.1.30 | **9, 10, 11, 12** -- all four, first real-firmware run of any of them | 2026-07-31 |
 
-**"All eight" above means all eight that existed at the time.** Stages 9-12 were
-added after both of these runs and neither machine has gone through any of them
-yet -- see the previous section for what each closes and
-[`PREFLIGHT.md`](PREFLIGHT.md) before approving 10-12 on either machine.
+**"All eight" in the first two rows means all eight that existed at the time.**
+Stages 9-12 were added after both of those runs. They have now run once each, on
+machine 1 only (pipeline 208) -- see the previous section for the result of each and
+[`PREFLIGHT.md`](PREFLIGHT.md) before approving 10-12 on machine 2, which has not
+run any of them.
 
 Machine 2 cleared its four mutating approvals on 2026-07-29, so power control,
 IDE-R media, the writable-image path and native PXE are reproduced on a second
@@ -367,17 +376,17 @@ One result from that re-run is worth reading before you trust a remote power-on:
 `14` is "available on Sx AC", so both report `wake_on_lan_capable: true`. That is a
 correction: through 0.3.0 this collection decoded `14` as `s0_dc` and reported
 `false` here, from a value table that was wrong (see
-[`docs/capability-matrix.md`](../../docs/capability-matrix.md) Tier 1). Whether
-either machine can actually be reached over WS-Man while off is still **untested
-against real hardware** -- stage 12 (`qualify_wake_from_off.yml`) now exists
-specifically to make that measurement and has been verified against the mock
-WS-Man server, but as of this writing has not yet been run against either lab
-machine. Even once it has, read its own header and
-[`PREFLIGHT.md`](PREFLIGHT.md) for the honest limit on what it can establish
-from CI: "AMT self-reports off" is not the same as "the host is genuinely,
-physically off", and only an attended run with a human watching the machine
-supplies the latter. It is Tier 4 in
-[`docs/capability-matrix.md`](../../docs/capability-matrix.md).
+[`docs/capability-matrix.md`](../../docs/capability-matrix.md) Tier 1). Stage 12
+(`qualify_wake_from_off.yml`) has now made that measurement for real, against
+`amt-lab-01`, on 2026-07-31: WS-Man answered 3 reachability probes out of 3 while AMT
+self-reported the machine off, a wake request was accepted, and the machine came back
+on. `amt-lab-02` has not run stage 12. Read the playbook's own header and
+[`PREFLIGHT.md`](PREFLIGHT.md) for the honest limit on what even this passing run
+establishes from CI: "AMT self-reports off" is not the same as "the host is genuinely,
+physically off", and only an attended run with a human watching the machine, or a
+switched outlet the runner can query, supplies the latter --
+`operator_attestation` was `null` on this run and will be on every unattended one. See
+Tier 3 and Tier 4 in [`docs/capability-matrix.md`](../../docs/capability-matrix.md).
 
 Stage 2's automatic comparison is also live now: `amt_expected_uuid` is recorded
 for machine 2, and the 2026-07-29 run matched it. Recorded from a value this

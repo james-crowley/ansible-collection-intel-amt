@@ -8,13 +8,18 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 Read the Intel AMT event log.
 
-> **Neither `amt_event_log` nor [`amt_log_clear`](amt_log_clear.md) has been exercised
-> against real firmware.** No hardware qualification stage covers them. The wire
-> protocol and the record layout are decoded per the sources recorded in
+> **Exercised against real firmware for the first time on 2026-07-31, on one machine.**
+> Hardware qualification stage 9 (`qualify_event_log.yml`) read `amt-lab-01`, AMT
+> 16.1.30 (CircleCI pipeline 208, job `hardware-tests` 2568), and passed: all 205
+> records read to completion, zero decode errors, the 21-byte record layout confirmed.
+> `amt-lab-02` (AMT 19.0.5) has never run this stage — see
+> [`capability-matrix.md`](capability-matrix.md) Tier 3 for the full result and Tier 4
+> for what a second machine would still add. The wire protocol and the record layout
+> were, and still are, also decoded per the sources recorded in
 > [`protocol-notes.md`](protocol-notes.md) §2.8 — a captured real-firmware response
-> fixture set and MeshCentral — and not per any endpoint this collection has read.
-> Every record is returned with its **raw bytes** alongside the decoded fields
-> precisely because of that.
+> fixture set and MeshCentral. Every record is returned with its **raw bytes** alongside
+> the decoded fields regardless: a decode is not automatically trustworthy everywhere
+> merely because it decoded cleanly on one machine.
 
 ## Purpose
 
@@ -198,8 +203,9 @@ and its raw bytes attached, so one unreadable record does not cost you the other
 
 ## Limitations
 
-- **Not verified against real firmware.** No hardware qualification stage exercises this
-  module, on any generation. See [`capability-matrix.md`](capability-matrix.md).
+- **Verified against real firmware on one machine, one generation.** Stage 9
+  (2026-07-31, `amt-lab-01`, AMT 16.1.30) passed; `amt-lab-02` (AMT 19.0.5) has never
+  run this stage. See [`capability-matrix.md`](capability-matrix.md) Tier 3.
 - The record layout, the method names, the `ReturnValue` maps and every value table are
   third-party-sourced. Each fact names its source in
   [`protocol-notes.md`](protocol-notes.md) §2.8, and anything still inferred says so — in
