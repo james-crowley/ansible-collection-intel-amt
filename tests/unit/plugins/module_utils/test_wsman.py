@@ -210,6 +210,33 @@ class TestEnumeratePull:
 
         assert client.enumerate("CIM_BootSourceSetting") == []
 
+    def test_end_of_sequence_wins_even_when_a_context_is_also_present(self):
+        """``EndOfSequence`` must stop the loop even if firmware also echoes a context.
+
+        A client that keys "keep pulling" off *presence of a context* rather than
+        *absence of* ``EndOfSequence`` would issue a further ``Pull`` here and either
+        loop forever or double-count the page. Only two responses are queued, so a
+        client that asks for a third raises ``StopIteration`` from the mock and fails
+        loudly rather than passing by accident.
+        """
+        client = _make_client()
+        enumerate_response = _soap_response(
+            '<wsen:EnumerateResponse xmlns:wsen="urn:enum"><wsen:EnumerationContext>ctx-1</wsen:EnumerationContext></wsen:EnumerateResponse>'
+        )
+        pull_response = _soap_response(
+            '<wsen:PullResponse xmlns:wsen="urn:enum" xmlns:g="urn:x">'
+            "<wsen:Items><g:Item><g:Name>one</g:Name></g:Item></wsen:Items>"
+            "<wsen:EnumerationContext>ctx-1</wsen:EnumerationContext>"
+            "<wsen:EndOfSequence/>"
+            "</wsen:PullResponse>"
+        )
+        client._session.post.side_effect = [enumerate_response, pull_response]
+
+        items = client.enumerate("CIM_BootSourceSetting")
+
+        assert items == [{"Name": "one"}]
+        assert client._session.post.call_count == 2  # Enumerate + exactly one Pull
+
 
 class TestSoapFault:
     def test_fault_is_raised_as_protocol_error_with_redacted_diagnostic(self):

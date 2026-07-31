@@ -464,6 +464,10 @@ class AmtState:
     redirection_listener_enabled: bool = False
     boot_config_role: int = 0
     boot_order_source: str | None = None
+    #: How many ``CIM_BootSourceSetting`` instances to serve. Below
+    #: ``len(BOOT_SOURCE_NAMES)`` the tail targets become undiscoverable; above it,
+    #: index-suffixed near-misses of the known names appear. See
+    #: :func:`_boot_source_items` for what each direction proves about the client.
     boot_source_count: int = 5
     digest_realm: str = "Digest:A4000000000000000000000000000000"
     boot_setting_data: dict[str, object] = field(default_factory=_default_boot_setting_data)
@@ -1428,9 +1432,23 @@ def _boot_source_items(state: AmtState) -> list[str]:
       by ``InstanceID`` only. A client keying off ``ElementName`` to tell boot sources
       apart would have passed here and then matched every instance on real firmware.
 
-    The ``count > len(BOOT_SOURCE_NAMES)`` branch synthesises extra instances so a test
-    can make discovery *ambiguous*; those carry no ``StructuredBootString``, because there
-    is no firmware shape to copy for an instance firmware would never emit.
+    ``state.boot_source_count`` sizes the served set in both directions, and each direction is
+    a distinct client-visible verdict in ``plugins/module_utils/boot.py``'s
+    ``discover_and_validate()`` (protocol-notes.md §2.5: "confirm exactly one instance matches
+    the requested target ... Fail with unsupported_capability if absent or ambiguous"):
+
+    * **Below** ``len(BOOT_SOURCE_NAMES)`` the tail names are simply not served, which is how a
+      test reaches the "absent" verdict -- firmware whose boot list is shorter than the set of
+      targets the module offers.
+    * **Above** it, extra instances are synthesised, repeating the names with an ``" (<idx>)"``
+      suffix. Note precisely what that does and does not produce: the suffix keeps every
+      ``InstanceID`` **distinct**, so it cannot make discovery ambiguous for a client that
+      matches on equality -- the wording here previously claimed it could, and was wrong. What
+      it does produce is a near-miss neighbour for each known name, which a client matching on
+      prefix or substring rather than equality would count twice.
+
+    Synthesised instances carry no ``StructuredBootString``, because there is no firmware shape
+    to copy for an instance firmware would never emit.
     """
     count = state.boot_source_count
     names = [BOOT_SOURCE_NAMES[i % len(BOOT_SOURCE_NAMES)] for i in range(count)]
@@ -2081,6 +2099,14 @@ class WsmanMockServer:
     Binds to an ephemeral port on 127.0.0.1 only. TLS mode generates a
     throw-away self-signed certificate per instance and exposes its SHA-256
     fingerprint via :attr:`cert_fingerprint` for fingerprint-pinning tests.
+
+    ``page_size`` is how many instances one ``Pull`` returns (:meth:`_handle_pull`).
+    The default of 2 already splits any enumeration of three or more instances across
+    pages, so paging is exercised without a test asking for it; the values worth
+    passing explicitly are the boundaries -- ``1`` (a page per instance, the maximum
+    number of continuations) and anything above the instance count (one page, no
+    continuation at all, which is what real AMT does for a small class). Both are
+    covered against the real client in ``tests/unit/mock_servers/test_wsman_server.py``.
     """
 
     def __init__(
