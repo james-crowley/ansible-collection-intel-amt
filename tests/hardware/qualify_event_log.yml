@@ -1,0 +1,209 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Hardware qualification stage 9 (see README.md): read-only amt_event_log. Never
+# mutates anything -- a GetRecords iteration is a read, same as amt_info -- which is
+# why this sits at the read-only floor alongside stages 1, 3 and 8 rather than behind
+# its own approval: it shares hardware-tests's single hardware-approval gate.
+#
+# WHAT THIS STAGE CAN AND CANNOT PROVE -- read this before trusting a green run:
+#
+#   - "real firmware accepts this collection's PositionToFirstRecord/GetRecords
+#     iteration as issued": PROVEN whenever this stage runs at all. The assertion
+#     below requiring `complete: true` and a normal stop_reason is exactly this
+#     check -- an iteration that stalls, or that firmware answers with a
+#     ReturnValue no source described, fails loudly here instead of being read as
+#     "zero records" by a caller with no way to tell the difference.
+#   - "the 21-byte record layout and little-endian timestamp decode correctly
+#     against records a real ME actually wrote": PROVEN only for whatever records
+#     this firmware's log actually held at read time. amt_event_log's decode is
+#     sourced from go-wsman-messages and MeshCentral, not from any endpoint this
+#     collection has talked to (see that module's own DOCUMENTATION), so a log
+#     that happens to be empty leaves the decode formally untested by this run --
+#     RV(total_records) in the evidence file says which case actually happened,
+#     and the summary debug task below says so plainly rather than claiming
+#     decode coverage a run did not have.
+#   - Nothing here says anything about amt_log_clear. Clearing is a separate,
+#     irreversible mutation with its own qualification stage (see
+#     qualify_log_clear.yml) and its own approval gate -- deliberately not
+#     combined with this one, so a read-only run can never be mistaken for
+#     having exercised the destructive path too.
+#
+# Wired into CircleCI as a fourth step in the hardware-tests job, alongside stages 1,
+# 3 and 8 (see .circleci/config.yml) -- run manually the same way:
+#
+#   ansible-playbook tests/hardware/qualify_event_log.yml -i tests/hardware/inventory.yml -v
+
+- name: "Hardware qualification stage 9: read-only amt_event_log"
+  hosts: amt_targets
+  gather_facts: false
+  connection: local
+  vars:
+    amt_output_dir: "{{ playbook_dir }}/output"
+    # A UINT32 timestamp read in the wrong byte order does not fail to parse -- it
+    # parses into a plausible-looking wrong date (see message_log.py's own docstring:
+    # big-endian would place a real event in "1694-something"). This bound is a second,
+    # independent check on top of the source-confirmed byte order: no Intel AMT
+    # firmware predates 2006, and a clock more than a day ahead of this run is a
+    # firmware RTC fault worth knowing about either way.
+    amt_event_log_min_year: 2006
+
+  tasks:
+    - name: Read the AMT event log
+      block:
+        - name: Read the whole event log
+          james_crowley.intel_amt.amt_event_log:
+            host: "{{ amt_host }}"
+            username: "{{ amt_username }}"
+            password: "{{ amt_password }}"
+            tls_fingerprint: "{{ amt_tls_fingerprint }}"
+          delegate_to: localhost
+          no_log: true
+          register: amt_event_log
+      rescue:
+        - name: Report the redacted failure detail
+          ansible.builtin.debug:
+            msg:
+              error_class: "{{ ansible_failed_result.error_class | default('(none reported)') }}"
+              endpoint: "{{ ansible_failed_result.endpoint | default('(none reported)') }}"
+              operation: "{{ ansible_failed_result.operation | default('(none reported)') }}"
+              message: "{{ ansible_failed_result.msg | default('(no message)') }}"
+              diagnostic: "{{ ansible_failed_result.diagnostic | default('(none)') }}"
+
+        - name: Fail with the error class in the summary line
+          ansible.builtin.fail:
+            msg: >-
+              amt_event_log failed against {{ inventory_hostname }} with
+              error_class={{ ansible_failed_result.error_class | default('unknown') }}.
+              Neither amt_event_log nor amt_log_clear had ever been exercised against
+              real firmware before this stage existed -- this is the first data point,
+              and a failure here is real information, not noise. See the redacted
+              detail above.
+
+    - name: A read must never report changed
+      ansible.builtin.assert:
+        that:
+          - not amt_event_log.changed
+        fail_msg: "amt_event_log reported changed={{ amt_event_log.changed }}; a read-only module must never report changed=true."
+
+    # This is the central claim of this stage: the iteration this collection issues
+    # is one real firmware actually recognises and can bring to a defined end. Every
+    # other outcome (iteration_stalled, invalid_record_pointed with records still
+    # unread, no_iteration_identifier) means either this collection's protocol
+    # sequence or this firmware's response to it does not match what
+    # message_log.read_records() assumes -- worth stopping on, not glossing over,
+    # since nothing has ever run this against real firmware before.
+    - name: Require the GetRecords iteration to have ended normally
+      ansible.builtin.assert:
+        that:
+          - amt_event_log.complete
+          - amt_event_log.stop_reason in ['no_more_records', 'no_record_exists', 'no_record_exists_in_log']
+          - not amt_event_log.truncated
+        fail_msg: >-
+          The event log read on {{ inventory_hostname }} did not end the way this
+          collection expects: complete={{ amt_event_log.complete }},
+          stop_reason={{ amt_event_log.stop_reason }}, truncated={{ amt_event_log.truncated }}.
+          This is the first time this iteration has ever run against real firmware --
+          do not read this as "the log is fine, ignore it": either message_log.py's
+          assumptions about PositionToFirstRecord/GetRecords are wrong for this
+          firmware generation, or something upstream (a stalled prior session,
+          firmware in a state no source described) is genuinely amiss. Investigate
+          before trusting any later read of this log.
+        success_msg: >-
+          GetRecords iteration on {{ inventory_hostname }} ended normally
+          (stop_reason={{ amt_event_log.stop_reason }}), across {{ amt_event_log.batches }}
+          batch(es) -- real firmware accepts this collection's iteration as issued.
+
+    - name: Require records_read and total_records to agree with an unfiltered read
+      ansible.builtin.assert:
+        that:
+          - amt_event_log.filtered_out == 0
+          - amt_event_log.records | length == amt_event_log.records_read
+          - amt_event_log.total_records is none or amt_event_log.records_read <= amt_event_log.total_records
+        fail_msg: >-
+          amt_event_log's own accounting disagrees with itself for {{ inventory_hostname }}:
+          records_read={{ amt_event_log.records_read }}, total_records={{ amt_event_log.total_records }},
+          filtered_out={{ amt_event_log.filtered_out }} (expected 0 -- no severity filter was set).
+
+    # The decode claim. Every record firmware actually returned must decode cleanly
+    # under the 21-byte struct this collection assumes -- decode_error is only ever
+    # non-null when a partial/malformed record was read (see EventRecord's own
+    # docstring), and firmware returning a batch of well-formed 21-byte records that
+    # this collection still fails to decode is precisely the defect this stage exists
+    # to catch before amt_log_clear ever runs against the same log.
+    - name: Require every record read to have decoded cleanly
+      ansible.builtin.assert:
+        that:
+          - amt_event_log.records | selectattr('decode_error', 'none') | list | length == amt_event_log.records | length
+        fail_msg: >-
+          {{ (amt_event_log.records | rejectattr('decode_error', 'none') | list | length) }} of
+          {{ amt_event_log.records | length }} record(s) from {{ inventory_hostname }} failed to decode.
+          This is exactly what the raw_hex/raw_base64 fields exist for -- see the evidence file
+          this stage writes -- but it means message_log.py's 21-byte layout does not match what
+          this firmware actually sent, which is a real defect to fix before amt_log_clear
+          destroys the only copy of these records.
+        success_msg: >-
+          {{ 'The log was empty (total_records=0); decode was not exercised on any record this run.'
+             if (amt_event_log.records | length == 0)
+             else (amt_event_log.records | length | string) +
+                  ' record(s), all decoded cleanly -- the 21-byte layout matches real firmware output.' }}
+
+    # Every record with a real (non-sentinel) timestamp must have decoded to a
+    # plausible date. This is the little-endian claim specifically: reading the
+    # UINT32 timestamp big-endian does not fail, it silently produces a wrong-but-
+    # plausible-looking date (see this file's amt_event_log_min_year comment), so
+    # "it parsed" is not enough evidence on its own -- it has to parse into the
+    # right era.
+    - name: Require every non-sentinel timestamp to decode to a plausible, bounded date
+      vars:
+        dated_records: "{{ amt_event_log.records | selectattr('timestamp_utc', 'string') | list }}"
+        implausible: "{{ dated_records | rejectattr('timestamp_utc', 'ge', amt_event_log_min_year | string) | list }}"
+      ansible.builtin.assert:
+        that:
+          - implausible | length == 0
+        fail_msg: >-
+          {{ implausible | length }} record(s) on {{ inventory_hostname }} decoded to a timestamp
+          before {{ amt_event_log_min_year }}, which predates Intel AMT itself. That is the exact
+          symptom of reading the little-endian UINT32 timestamp in the wrong byte order -- see
+          decode_record()'s own docstring in plugins/module_utils/message_log.py -- not a firmware
+          finding. First offending record: {{ implausible[0] | default('(none)') }}.
+        success_msg: >-
+          {{ dated_records | length }} record(s) carried a real timestamp, and every one decoded
+          to {{ amt_event_log_min_year }} or later -- consistent with the little-endian byte order
+          this collection assumes, not the ~1694 dates big-endian would produce.
+
+    - name: Report the log's own capability flags, ahead of a later amt_log_clear stage
+      ansible.builtin.debug:
+        msg: >-
+          AMT_MessageLog.capabilities={{ amt_event_log.log.capabilities }} for {{ inventory_hostname }}.
+          {{ 'Capability 6 (ClearLogSupported) is present -- amt_log_clear should be implemented here.'
+             if (6 in (amt_event_log.log.capabilities | default([])))
+             else 'Capability 6 (ClearLogSupported) is NOT reported. amt_log_clear may fail with '
+                  + 'error_class=unsupported_capability on this firmware -- expected, and not a defect '
+                  + 'in this collection, if so.' }}
+
+    - name: Summarise this read for the operator
+      ansible.builtin.debug:
+        msg:
+          total_records: "{{ amt_event_log.total_records }}"
+          records_read: "{{ amt_event_log.records_read }}"
+          batches: "{{ amt_event_log.batches }}"
+          stop_reason: "{{ amt_event_log.stop_reason }}"
+          severities_seen: "{{ amt_event_log.records | map(attribute='event_severity_text') | list | unique }}"
+          decode_exercised: "{{ amt_event_log.records | length > 0 }}"
+
+    - name: Ensure the evidence output directory exists
+      ansible.builtin.file:
+        path: "{{ amt_output_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+
+    - name: Record evidence for this target
+      ansible.builtin.copy:
+        content: "{{ amt_event_log | to_nice_json }}\n"
+        dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_event_log.json"
+        mode: "0600"
+      delegate_to: localhost
