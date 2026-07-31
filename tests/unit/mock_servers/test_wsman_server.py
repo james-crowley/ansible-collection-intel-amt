@@ -4,11 +4,22 @@
 
 """Self-tests for the mock WS-Man server.
 
-These exercise ``WsmanMockServer`` from the outside with a plain HTTP client
-(``requests``) plus a raw TLS socket for fingerprint checks, exactly as a
+Most of these exercise ``WsmanMockServer`` from the outside with a plain HTTP
+client (``requests``) plus a raw TLS socket for fingerprint checks, exactly as a
 real integration test would, rather than calling internals directly -- the
 whole point of these tests is to prove the mock behaves like a WS-Man
 endpoint on the wire, not just that its Python happens to be self-consistent.
+
+The two ``TestRealClient*`` classes at the end are the exception, and mirror
+``test_ider_server.py``'s ``TestRealEngineAgainstMock``: they drive the
+collection's **own** client (``plugins/module_utils/wsman.WsmanClient``, and
+``boot.discover_and_validate`` on top of it) against the mock over a real
+socket. A hand-rolled ``requests.post`` proves what the mock puts on the wire;
+it cannot prove the client reads it correctly, and this file contains one half
+of a two-implementation protocol whose other half is ``wsman.py``. Those
+classes exist to make a mock knob's effect observable *through* the client --
+see issue #92 -- and are deliberately narrow: they are not a second suite for
+either side.
 """
 
 from __future__ import annotations
@@ -35,6 +46,7 @@ from wsman_server import (
     AMT_MESSAGE_LOG,
     AMT_REDIRECTION_SERVICE,
     AMT_SETUP_AND_CONFIGURATION_SERVICE,
+    BOOT_SOURCE_NAMES,
     CIM_ASSOCIATED_POWER_MANAGEMENT_SERVICE,
     CIM_BIOS_ELEMENT,
     CIM_BOOT_CONFIG_SETTING,
@@ -53,6 +65,10 @@ from wsman_server import (
     MESSAGE_LOG_BATCH_SIZE,
     WsmanMockServer,
 )
+
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.boot import discover_and_validate
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import ErrorClass, UnsupportedCapabilityError
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.wsman import WsmanClient
 
 NS_S = "http://www.w3.org/2003/05/soap-envelope"
 NS_WSEN = "http://schemas.xmlsoap.org/ws/2004/09/enumeration"
@@ -1610,3 +1626,225 @@ class TestHardwareInventoryCarriesNoRealIdentifiers:
     def test_manufacturer_strings_use_the_invalid_tld(self, server):
         root = ET.fromstring(_post(server, _get_xml(CIM_CHASSIS)).content)  # noqa: S314
         assert "example.invalid" in _find_text(root, "Manufacturer")
+
+
+# --------------------------------------------------------------------------
+# The real WS-Man client against the mock
+# --------------------------------------------------------------------------
+
+
+class _ActionCountingSession(requests.Session):
+    """A ``requests.Session`` that records the SOAP action of every POST the client sends.
+
+    ``WsmanClient`` takes a ``session=`` argument precisely so a test can supply
+    one, and every request it makes goes through ``session.post``. Recording the
+    ``wsa:Action`` there gives an exact count of *logical* WS-Man operations --
+    the digest challenge/response pair for one operation is two HTTP exchanges
+    but a single ``post`` call, so this counts operations rather than round trips.
+
+    The count is the control that stops the paging tests below from being
+    vacuous. Asserting only "all N instances came back" passes identically at
+    every page size, including one the mock ignored; asserting *how many* Pulls
+    it took is what proves ``page_size`` reached the wire.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.actions: list[str] = []
+
+    def post(self, url, data=None, **kwargs):  # type: ignore[override]
+        root = ET.fromstring(data)  # noqa: S314 -- the client's own envelope, built in-process
+        action = _find_text(root, "Action") or ""
+        self.actions.append(action.rsplit("/", 1)[-1])
+        return super().post(url, data=data, **kwargs)
+
+    def count(self, action: str) -> int:
+        return self.actions.count(action)
+
+
+def _real_client(server: WsmanMockServer, session: requests.Session | None = None) -> WsmanClient:
+    """The collection's own ``WsmanClient``, pointed at the mock over plaintext.
+
+    ``max_retries=0`` deliberately: a retry would turn a hang or a dropped page
+    into a slower pass, and these tests assert on exact request counts.
+    """
+    return WsmanClient(
+        host=server.host,
+        port=server.port,
+        username=FAKE_USERNAME,
+        password=FAKE_PASSWORD,
+        use_tls=False,
+        allow_insecure_transport=True,
+        connect_timeout=5.0,
+        timeout=5.0,
+        max_retries=0,
+        session=session,
+    )
+
+
+class TestRealClientBootSourceCount:
+    """``AmtState.boot_source_count`` driven away from its default, through the real client.
+
+    Issue #92: the knob was wired into ``_boot_source_items`` and read nowhere else in
+    the repository, so ``CIM_BootSourceSetting`` had only ever been served as the same
+    five instances. A constructor knob that is only ever its own default is
+    indistinguishable from one that does not work.
+
+    What this buys is not coverage of the mock -- it is the two shapes of
+    ``boot_source_setting`` enumeration that ``boot.discover_and_validate`` has a
+    documented verdict for (protocol-notes.md §2.5: "confirm exactly one instance
+    matches ... Fail with unsupported_capability if absent or ambiguous") and that
+    nothing could previously produce: **fewer** sources than the client asks about,
+    and **more** than it knows about.
+    """
+
+    def test_the_count_the_mock_is_told_to_serve_is_the_count_the_client_sees(self):
+        """The knob is visible through ``WsmanClient.enumerate``, not just on the wire.
+
+        Two non-default values, either side of the five-name fixture set, so a mock
+        that clamped to ``len(BOOT_SOURCE_NAMES)`` fails on both.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            with _real_client(srv) as client:
+                srv.state.boot_source_count = 2
+                assert len(client.enumerate("CIM_BootSourceSetting")) == 2
+                srv.state.boot_source_count = 8
+                instances = client.enumerate("CIM_BootSourceSetting")
+                assert len(instances) == 8
+                # Distinct keys, so nothing was dropped or served twice across pages.
+                assert len({instance["InstanceID"] for instance in instances}) == 8
+
+    def test_a_firmware_missing_the_requested_boot_source_fails_closed(self):
+        """Two sources served, three targets asked for: the third must be refused, not guessed.
+
+        This is the "absent" half of §2.5's rule and it had no way to happen before:
+        with all five names always served, every one of ``pxe``/``hdd``/``cd`` always
+        matched. A client that fell back to "any source will do" -- or that took the
+        first instance when its own match count was zero -- would arm a boot to the
+        wrong device on firmware with a shorter boot list, which is the highest
+        consequence operation in this collection.
+
+        The pxe assertion in the same fixture is the positive control: it proves the
+        refusal is specific to the missing source rather than discovery having broken
+        wholesale at ``boot_source_count=2``.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.state.boot_source_count = 2  # PXE and Hard-drive only; no CD/DVD instance
+            with _real_client(srv) as client:
+                discover_and_validate(client, "pxe")
+                discover_and_validate(client, "hdd")
+
+                with pytest.raises(UnsupportedCapabilityError) as excinfo:
+                    discover_and_validate(client, "cd")
+
+        assert excinfo.value.error_class == ErrorClass.UNSUPPORTED_CAPABILITY
+        assert excinfo.value.operation == "discover_boot_source"
+        # The count is in the message so an operator can tell "no such source" (0)
+        # from "ambiguous" (>1) -- the same message serves both verdicts.
+        assert "found 0" in str(excinfo.value)
+        assert "Intel(r) AMT: Force CD/DVD Boot" in str(excinfo.value)
+
+    def test_extra_boot_sources_do_not_make_a_known_one_ambiguous(self):
+        """Above five names the mock synthesises ``"<name> (<idx>)"`` instances.
+
+        Those repeat the fixture names with an index suffix, so the ``InstanceID``s
+        stay distinct -- a client matching on **equality** still finds exactly one
+        ``Intel(r) AMT: Force PXE Boot``. A client matching on prefix, substring or
+        ``startswith`` finds two and would either refuse a boot it should have armed
+        or, worse, pick whichever came back first. ``discover_and_validate`` matches
+        with ``==``; this is what holds it to that.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.state.boot_source_count = 8
+            with _real_client(srv) as client:
+                instances = client.enumerate("CIM_BootSourceSetting")
+                # Pin the mock's shape, so the test below is known to be exercising the
+                # collision the docstring describes rather than passing by absence of it.
+                suffixed = [i["InstanceID"] for i in instances if i["InstanceID"].startswith("Intel(r) AMT: Force PXE Boot")]
+                assert sorted(suffixed) == ["Intel(r) AMT: Force PXE Boot", "Intel(r) AMT: Force PXE Boot (5)"]
+
+                # The synthetic instances carry no StructuredBootString (there is no
+                # firmware shape to copy), so this also proves the client does not
+                # require the property to be present on every instance it walks past.
+                assert all("StructuredBootString" not in i for i in instances if i["InstanceID"].endswith(")"))
+
+                discover_and_validate(client, "pxe")
+
+
+class TestRealClientPageSizeBoundaries:
+    """``WsmanMockServer.page_size`` at both boundaries, through the real client.
+
+    Issue #92, measured rather than assumed: the default of 2 does exercise paging
+    (five boot sources take three Pulls), so the gap is not "paging is untested" --
+    it is that *no other* page size has ever been served. The two boundaries are
+    where a paging bug lives:
+
+    * **1** -- a page per instance, the maximum number of continuations, and the
+      only size at which an off-by-one in the client's ``EnumerationContext``
+      handling loses a specific instance rather than a whole page.
+    * **above the instance count** -- everything in the first Pull, with
+      ``EndOfSequence`` and *no* ``EnumerationContext``. That firmware is real: AMT
+      is entitled to return the whole set at once. The test below proves exactly
+      that shape (single Pull, no continuation) for this mock.
+
+      It does *not* prove a client keys "keep pulling" off the absence of
+      ``EndOfSequence`` rather than the presence of a context: this mock's
+      ``_handle_pull`` never emits both in the same response (see
+      ``tests/integration/mock_servers/wsman_server.py``), so that confusion has
+      no response shape here to trigger it. Deleting the ``end_of_sequence is
+      None`` guard in ``wsman.py``'s ``enumerate()`` leaves this test passing.
+      That exact bug -- a context present *alongside* ``EndOfSequence`` -- is
+      caught instead by
+      ``tests/unit/plugins/module_utils/test_wsman.py::TestEnumeratePull::test_end_of_sequence_wins_even_when_a_context_is_also_present``,
+      which fabricates the response directly rather than going through this mock.
+
+    Both are asserted with an exact Pull count, not just a complete result set,
+    because a complete result set is what you get at *every* page size.
+    """
+
+    _SOURCES = 5  # len(BOOT_SOURCE_NAMES) -- five instances to divide into pages
+
+    def test_page_size_one_serves_a_page_per_instance_and_the_client_reassembles_them(self):
+        session = _ActionCountingSession()
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD, page_size=1) as srv:
+            srv.state.boot_source_count = self._SOURCES
+            with _real_client(srv, session=session) as client:
+                instances = client.enumerate("CIM_BootSourceSetting")
+
+        instance_ids = [instance["InstanceID"] for instance in instances]
+        assert len(instance_ids) == self._SOURCES
+        assert len(set(instance_ids)) == self._SOURCES  # nothing dropped, nothing duplicated
+        assert instance_ids == list(BOOT_SOURCE_NAMES)  # and in the order firmware sent them
+
+        assert session.count("Enumerate") == 1
+        # Five single-instance pages. The fifth empties the context, so the mock puts
+        # EndOfSequence on it and there is no sixth, wasted Pull.
+        assert session.count("Pull") == self._SOURCES
+        assert session.actions == ["Enumerate", *["Pull"] * self._SOURCES]
+
+    def test_a_page_larger_than_the_instance_count_is_one_pull_with_no_continuation(self):
+        session = _ActionCountingSession()
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD, page_size=self._SOURCES + 1) as srv:
+            srv.state.boot_source_count = self._SOURCES
+            with _real_client(srv, session=session) as client:
+                instances = client.enumerate("CIM_BootSourceSetting")
+
+        assert [instance["InstanceID"] for instance in instances] == list(BOOT_SOURCE_NAMES)
+        assert session.actions == ["Enumerate", "Pull"], "a single page must not be followed by a second Pull"
+
+    def test_the_same_instances_come_back_at_every_page_size(self):
+        """The invariant the two boundary tests are boundaries *of*.
+
+        Run as one test rather than three copies of the assertion so the page sizes
+        are compared against each other and not merely each against a literal: a
+        mock that ignored ``page_size`` would satisfy every individual assertion
+        here and still fail the equality between runs in the Pull-count test above.
+        """
+        results = {}
+        for page_size in (1, 2, 3, self._SOURCES, self._SOURCES + 7):
+            with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD, page_size=page_size) as srv:
+                srv.state.boot_source_count = self._SOURCES
+                with _real_client(srv) as client:
+                    results[page_size] = [instance["InstanceID"] for instance in client.enumerate("CIM_BootSourceSetting")]
+
+        assert all(ids == list(BOOT_SOURCE_NAMES) for ids in results.values()), results
