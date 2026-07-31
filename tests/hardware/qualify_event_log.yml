@@ -82,6 +82,32 @@
               and a failure here is real information, not noise. See the redacted
               detail above.
 
+    # Written BEFORE the assertions below, deliberately.
+    #
+    # This stage previously recorded evidence as its last task, so a failing
+    # assertion destroyed the artifact needed to diagnose it. That is exactly what
+    # happened on amt-lab-01 in pipeline 226: the accounting assertion fired
+    # (records_read=223 against total_records=18, issue #105), the play aborted, and
+    # the 223 records that would have identified which number was wrong were never
+    # written. The evidence for a failure is worth more than the evidence for a pass,
+    # and ordering it last guaranteed we only kept the latter.
+    #
+    # A `block`/`always` would also work; a plain reorder is simpler and has the same
+    # effect, because nothing between the read and here can fail.
+    - name: Ensure the evidence output directory exists
+      ansible.builtin.file:
+        path: "{{ amt_output_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+
+    - name: Record evidence for this target, before anything can assert on it
+      ansible.builtin.copy:
+        content: "{{ amt_event_log | to_nice_json }}\n"
+        dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_event_log.json"
+        mode: "0600"
+      delegate_to: localhost
+
     - name: A read must never report changed
       ansible.builtin.assert:
         that:
@@ -193,17 +219,3 @@
           stop_reason: "{{ amt_event_log.stop_reason }}"
           severities_seen: "{{ amt_event_log.records | map(attribute='event_severity_text') | list | unique }}"
           decode_exercised: "{{ amt_event_log.records | length > 0 }}"
-
-    - name: Ensure the evidence output directory exists
-      ansible.builtin.file:
-        path: "{{ amt_output_dir }}"
-        state: directory
-        mode: "0700"
-      delegate_to: localhost
-
-    - name: Record evidence for this target
-      ansible.builtin.copy:
-        content: "{{ amt_event_log | to_nice_json }}\n"
-        dest: "{{ amt_output_dir }}/{{ inventory_hostname }}-qualify_event_log.json"
-        mode: "0600"
-      delegate_to: localhost
