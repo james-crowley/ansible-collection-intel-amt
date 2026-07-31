@@ -327,6 +327,45 @@ def test_raw_hex_survives_even_when_digest_shaped(redactor: Any) -> None:
     assert result["image_digest"] == "<redacted-digest-1>"
 
 
+# operation.action is written from a literal in each module's own source and can
+# never identify anything -- but five of the seven values are dotted, and a dotted
+# lowercase token is what the fqdn pattern matches. Observed on the first
+# real-firmware event-log run (job 2518): "amt_event_log.read" was published as
+# "<redacted-fqdn-2>", so the artifact no longer said which operation produced it.
+@pytest.mark.parametrize(
+    "action",
+    [
+        "amt_event_log.read",
+        "amt_log_clear.clear",
+        "amt_media.attach",
+        "amt_media.detach",
+        "get_facts",
+        "amt_boot",
+        "amt_redirection",
+    ],
+)
+def test_operation_action_is_never_redacted(redactor: Any, action: str) -> None:
+    """Every action a module can write must survive verbatim.
+
+    Parameterised over the real values rather than one example, because the bug only
+    hit the dotted ones and a single-value test would have passed on `get_facts`.
+    """
+    result = redactor.redact_value({"action": action})
+    assert result["action"] == action, f"{action} was redacted; the artifact no longer says what it recorded"
+
+
+def test_action_exemption_does_not_leak_a_real_hostname_elsewhere(redactor: Any) -> None:
+    """The positive control: exempting `action` must not disarm redaction generally.
+
+    Without this, `_EXEMPT_KEYS` growing to cover something identifying would leave the
+    test above passing while the file leaked.
+    """
+    result = redactor.redact_value({"action": "amt_media.attach", "hostname": "machine1", "endpoint": "10.1.2.3:16993"})
+    assert result["action"] == "amt_media.attach"
+    assert result["hostname"] == "<redacted-hostname-1>"
+    assert "10.1.2.3" not in str(result["endpoint"])
+
+
 def test_raw_hex_is_matched_case_insensitively(redactor: Any) -> None:
     """The exemption is keyed on the lowercase form, matching every other
     key lookup in this script (_IDENTIFYING_KEYS.get(key.lower()))."""
