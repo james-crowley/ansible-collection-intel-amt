@@ -86,7 +86,56 @@ _IDENTIFYING_KEYS: dict[str, str] = {
     "assettag": "asset_tag",
     "sku": "asset_tag",
     "sku_number": "asset_tag",
+    # Local filesystem paths, which reach the evidence through amt_media's
+    # ``devices.<slot>.path`` (the resolved backing image) and through the media
+    # options echoed back in a module invocation. An absolute path on the lab
+    # runner spells out the account the job runs as (``/home/<user>/...``) and the
+    # workspace layout underneath it, and on a hand run it is somebody's home
+    # directory outright.
+    #
+    # Like a serial number, a path matches no general pattern: the FQDN rule
+    # deliberately refuses anything ending in a filename label (see
+    # _FILENAME_LABELS), which is exactly what an image path does end in, so
+    # ``/home/jane/lab/ipxe-test.iso`` passed through the previous version of this
+    # script completely untouched. Caught by key for the same reason serials are.
+    #
+    # The whole value goes, basename included. Keeping the last component would be
+    # nicer to read, but it would mean parsing a path in order to decide which part
+    # of it is safe, and the stable pseudonym already preserves what a reviewer
+    # actually needs from it: that the cdrom and floppy slots held *different*
+    # files, and that two stages held the *same* one. Size and byte counters are
+    # untouched and say more about the media than its name does.
+    "path": "path",
+    "iso_path": "path",
+    "image_path": "path",
+    "answer_image_path": "path",
+    "cdrom": "path",
+    "floppy": "path",
+    "allowed_directory": "path",
+    "runtime_dir": "path",
+    "state_file": "path",
 }
+
+#: Keys whose string value must survive completely untouched -- not merely
+#: exempt from the identifying-key table above, but exempt from pattern
+#: matching too.
+#:
+#: ``amt_event_log`` renders each 21-byte record as 42 lowercase hex
+#: characters in ``raw_hex`` (and the equivalent bytes as ``raw_base64``), and
+#: that module's own documentation calls preserving them "not negotiable": the
+#: decode is derived from third-party sources this collection has never
+#: checked against firmware, so the raw bytes are the only thing that makes a
+#: wrong decode diagnosable. A hex string that size has no separators for the
+#: mac/uuid/fingerprint/digest patterns to anchor on in the general case, but a
+#: *malformed* or truncated record decodes to something shorter -- a record
+#: read as exactly 16 or 32 bytes renders as a bare 32-hex or 64-hex run with
+#: clean non-hex boundaries either side, which is exactly what the compact-UUID
+#: and digest patterns match. Redacting a record's raw bytes because a firmware
+#: bug or a partial read happened to produce a plausible-looking length would
+#: corrupt the one field the module exists to keep trustworthy -- worse than
+#: leaking, since a reviewer would not know it had happened. These two keys are
+#: therefore checked, and passed through, before any pattern is even tried.
+_EXEMPT_KEYS: frozenset[str] = frozenset({"raw_hex", "raw_base64"})
 
 #: Public standards domains that appear inside WS-Man resource URIs and DMTF
 #: namespaces. These are protocol constants, not lab data, and redacting them
@@ -127,7 +176,16 @@ _FILENAME_LABELS: frozenset[str] = frozenset(
 
 #: Matches a token this script already produced, so a second pass is a no-op
 #: rather than a rename to ``<redacted-hostname-2>``.
-_TOKEN_RE = re.compile(r"<redacted-[a-z0-9]+-\d+>")
+#:
+#: The underscore in the character class is load-bearing and was missing: two
+#: category names contain one (``asset_tag``, and ``partial_uuid`` added later), so
+#: ``<redacted-asset_tag-1>`` did not match this pattern. Nothing else recognised it
+#: either -- it holds no address, so no pattern claims it -- which meant a second
+#: pass over an already-redacted file saw a bare string under an identifying key and
+#: minted ``<redacted-asset_tag-2>`` for it. The documented "redacting twice is a
+#: no-op" guarantee therefore held for every category except the two that needed it
+#: spelled with an underscore.
+_TOKEN_RE = re.compile(r"<redacted-[a-z0-9_]+-\d+>")
 
 # Order matters. Every pattern below is anchored so it cannot match inside a
 # longer hex run, and the colon-separated forms are tried longest-first: a
@@ -149,6 +207,27 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # Compact 32-hex UUID. Tried after the 64-hex digest so half a digest is
     # never mistaken for a GUID.
     ("uuid", re.compile(rf"(?<![0-9A-Za-z]){_HEX}{{32}}(?![0-9A-Za-z])")),
+    # The truncated agent GUID amt_event_log renders into an event description:
+    # "Agent watchdog 1a2b3c4d-5e6f-... changed to Expired". Only the first six GUID
+    # bytes are in a 21-byte record, so neither source can reconstruct a full one and
+    # both emit this "-..." form -- which means the dashed-UUID pattern above cannot
+    # see it. It identifies a management agent registered on the machine, which is
+    # organisational information rather than a firmware diagnostic.
+    #
+    # The lookahead keeps the "-..." marker in the output, so the redacted
+    # description still reads as a truncated GUID rather than as an unexplained
+    # token.
+    #
+    # **Be precise about what this does not do.** The same six bytes remain visible,
+    # by design, in that record's raw_hex, raw_base64 and event_data -- see the
+    # "deliberately preserved" note in this directory's README.md. Those are
+    # amt_event_log's entire diagnostic contract (a decode this collection has never
+    # checked against firmware must stay falsifiable), so they cannot be removed
+    # without destroying the evidence the stage exists to produce. What this rule
+    # buys is that the *rendered* identifier -- the form a scanner greps for and a
+    # reader can copy -- is not published. That is a narrower claim than
+    # containment, and it is the honest one.
+    ("partial_uuid", re.compile(rf"(?<![0-9A-Za-z-]){_HEX}{{8}}-{_HEX}{{4}}(?=-\.\.\.)")),
     ("ipv4", re.compile(rf"(?<![0-9A-Za-z.])(?:{_OCTET}\.){{3}}{_OCTET}(?![0-9A-Za-z.])")),
     # IPv6. Only the fully-populated eight-group form and the compressed "::"
     # forms are accepted. A three-group colon run with no "::" is far more likely
@@ -179,7 +258,21 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 #: Human-readable order for the summary, so the counts always print the same way.
-_CATEGORY_ORDER: tuple[str, ...] = ("ipv4", "ipv6", "mac", "uuid", "fingerprint", "digest", "fqdn", "hostname", "username", "serial", "asset_tag")
+_CATEGORY_ORDER: tuple[str, ...] = (
+    "ipv4",
+    "ipv6",
+    "mac",
+    "uuid",
+    "partial_uuid",
+    "fingerprint",
+    "digest",
+    "fqdn",
+    "hostname",
+    "username",
+    "serial",
+    "asset_tag",
+    "path",
+)
 
 
 def _is_dns_name(candidate: str) -> bool:
@@ -256,6 +349,12 @@ class Redactor:
         if isinstance(value, list):
             return [self.redact_value(item) for item in value]
         if isinstance(value, str):
+            # Checked before any pattern is tried, not after: a malformed or
+            # truncated amt_event_log record can render raw_hex/raw_base64 at a
+            # length that would otherwise look exactly like a UUID or digest --
+            # see _EXEMPT_KEYS.
+            if key is not None and key.lower() in _EXEMPT_KEYS:
+                return value
             # Patterns first, even under an identifying key. An `endpoint` and an
             # `invocation.module_args.host` hold the same IPv4 address, and they
             # have to end up as the same token or the artifact stops showing that
