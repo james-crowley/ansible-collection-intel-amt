@@ -35,3 +35,6 @@ htmlcov/
 *.swp
 .idea/
 .vscode/
+
+# Agent worktrees created by Claude Code. Never part of the collection.
+.claude/worktrees/
