@@ -1,0 +1,11 @@
+---
+trivial:
+  - >-
+    .gitignore - ignore ``.claude/worktrees/``. Agent worktrees are checkouts of this
+    repository inside itself; untracked and unignored, they were one ``git add -A`` away
+    from being committed into the collection.
+  - >-
+    .circleci/config.yml - correct a comment claiming "all five targets are committed
+    now" to nine. The comment explains why the integration job has no skip-guard, and
+    the count is the evidence for that reasoning, so a stale number weakens an argument
+    that is still correct.
