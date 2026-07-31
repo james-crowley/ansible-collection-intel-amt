@@ -32,14 +32,25 @@ fault starts a second mock process configured that way.
 
 Most IDE-R faults need no flag at all, because they are properties of what the *client*
 does: a wrong password fails the redirection-plane digest on the first exchange. The
-feature-toggle flags below are the other kind -- properties of the endpoint, unreachable
-by anything a client can do to it. ``--refuse-feature-toggle`` is firmware that opens the
-session and then declines to engage IDE-R; ``--withhold-feature-toggle`` is firmware that
-never answers either way. They are mutually exclusive and deliberately separate, because
-they are not the same fault: a refusal is a definite "no media is being served", while
-withholding leaves that genuinely unknown and can only be ended by a bounded wait. A
-client that collapses them into one failure has lost the distinction between "stop, this
-endpoint cannot do this" and "stop, this endpoint did not say".
+remaining flags are the other kind -- properties of the endpoint, unreachable by anything
+a client can do to it.
+
+``--refuse-feature-toggle`` is firmware that opens the session and then declines to engage
+IDE-R; ``--withhold-feature-toggle`` is firmware that never answers either way. They are
+mutually exclusive and deliberately separate, because they are not the same fault: a
+refusal is a definite "no media is being served", while withholding leaves that genuinely
+unknown and can only be ended by a bounded wait. A client that collapses them into one
+failure has lost the distinction between "stop, this endpoint cannot do this" and "stop,
+this endpoint did not say".
+
+``--start-session-status`` refuses one step earlier still, at the very first exchange:
+``0x11`` StartRedirectionSessionReply carries a non-zero status, so the session never
+opens and authentication is never even offered (protocol-notes.md §3.1). That makes it the
+only endpoint fault here that fires entirely upstream of ``ider.IderEngine`` -- neither the
+digest exchange nor the attach gate is involved in reaching the verdict -- which is why it
+is a separate flag rather than another member of the toggle group. It takes a value rather
+than being a bare switch: the client is expected to report the status byte it actually
+decoded, and a test can only prove that by asking for a status it would not have guessed.
 """
 
 from __future__ import annotations
@@ -79,6 +90,21 @@ def _write_json_atomic(path: str, data: dict) -> None:
     os.replace(tmp, target)
 
 
+def _wire_byte(raw: str) -> int:
+    """argparse type for a value that goes straight onto the wire as a single byte.
+
+    Range-checked here rather than left to the ``bytes([status])`` inside
+    ``ider_server.encode_start_session_reply``: this process has already daemonised behind
+    ``nohup`` by the time that would run, so the ``ValueError`` would land in a log file
+    while the calling playbook sat waiting on a ready file that never reports a handshake.
+    An argparse error, by contrast, is a non-zero exit before anything is written.
+    """
+    value = int(raw)
+    if not 0 <= value <= 0xFF:
+        raise argparse.ArgumentTypeError(f"must fit in one byte (0-255), got {value}")
+    return value
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mock-servers-dir", required=True, help="Directory containing ider_server.py")
@@ -96,6 +122,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--write-payload-b64", default=None, help="If set, WRITE_10 this payload (base64) to the floppy device once connected")
     parser.add_argument("--write-lba", type=int, default=0)
     parser.add_argument("--write-frame-size", type=int, default=0, help="0 means one single DATA_FROM_HOST frame carrying the whole payload")
+    parser.add_argument(
+        "--start-session-status",
+        type=_wire_byte,
+        default=0,
+        metavar="N",
+        help=(
+            "Status byte for the 0x11 StartRedirectionSessionReply. 0 (the default) accepts the session; any non-zero value "
+            "refuses it and aborts the handshake before authentication is offered, standing in for a redirection plane that "
+            "is reachable but will not open a session at all"
+        ),
+    )
     toggle = parser.add_mutually_exclusive_group()
     toggle.add_argument(
         "--refuse-feature-toggle",
@@ -173,8 +210,9 @@ def main() -> None:
         use_tls=args.use_tls,
         readbfr=args.readbfr,
         writebfr=args.writebfr,
-        # Set before start(): this describes what this endpoint *is*, so it must hold for
-        # the endpoint's whole lifetime rather than changing under a running client.
+        # Both set before start(): these describe what this endpoint *is*, so they must hold
+        # for the endpoint's whole lifetime rather than changing under a running client.
+        start_session_status=args.start_session_status,
         feature_toggle_status=_feature_toggle_status(args),
     ).start()
 
