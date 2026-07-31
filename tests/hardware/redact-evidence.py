@@ -153,7 +153,24 @@ _IDENTIFYING_KEYS: dict[str, str] = {
 #: produced it. The value can never identify anything -- it comes from this
 #: collection's own source, not from the lab -- so exempting it costs nothing and
 #: keeps the one field that says what the artifact *is*.
-_EXEMPT_KEYS: frozenset[str] = frozenset({"raw_hex", "raw_base64", "action"})
+#: ``note`` is exempt for the same reason as ``action``, and it was found the same
+#: way -- by reading a published artifact. Stage 5's note is authored prose reading
+#: "media_attach.devices/bytes_* are amt_media's own report...", and
+#: ``media_attach.devices`` is a dotted lowercase token, so the ``fqdn`` pattern
+#: rewrote it to "<redacted-fqdn-1>/bytes_*". The sentence explaining what the
+#: evidence means stopped naming the field it was explaining.
+#:
+#: ``_is_dns_name`` exists partly to stop this ("repository paths in the prose
+#: ``note`` fields") but works from a fixed label list, so it only catches the
+#: dotted words someone already thought of. Exempting the key is the version that
+#: does not need updating every time a note mentions a new field.
+#:
+#: Safe because every ``note`` in tests/hardware/*.yml is a literal string authored
+#: here -- none interpolates anything, and test_no_hardware_note_is_templated in
+#: tests/unit/hardware/test_redact_evidence.py fails if that ever changes. That
+#: test is the condition on which this exemption is sound; do not delete one
+#: without the other.
+_EXEMPT_KEYS: frozenset[str] = frozenset({"raw_hex", "raw_base64", "action", "note"})
 
 #: Public standards domains that appear inside WS-Man resource URIs and DMTF
 #: namespaces. These are protocol constants, not lab data, and redacting them

@@ -327,6 +327,41 @@ def test_raw_hex_survives_even_when_digest_shaped(redactor: Any) -> None:
     assert result["image_digest"] == "<redacted-digest-1>"
 
 
+# `note` is exempt from redaction, which is only sound while every note is a literal
+# authored here. This test is the condition that exemption rests on: if a note ever
+# starts interpolating -- an inventory_hostname, an endpoint, a path -- the exemption
+# would publish it verbatim. Fail loudly at that moment rather than silently leaking.
+def test_no_hardware_note_is_templated() -> None:
+    """No `note` in tests/hardware/*.yml may contain a Jinja expression.
+
+    Deliberately checks the source playbooks rather than the redactor: the redactor
+    cannot tell an authored note from an interpolated one, so the invariant has to be
+    enforced where notes are written.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[3] / "tests" / "hardware"
+    playbooks = sorted(root.glob("*.yml"))
+    assert playbooks, f"found no hardware playbooks under {root}; this test would pass vacuously"
+
+    offenders = []
+    for pb in playbooks:
+        text = pb.read_text(encoding="utf-8")
+        # Each note is a single-quoted key followed by its value up to the closing brace
+        # or the next key. Crude on purpose -- a false positive here is cheap and a
+        # false negative is a leak.
+        for m in re.finditer(r"'note':\s*(.{0,600}?)(?:\}|\n\s{0,8}[a-z_]+:)", text, re.S):
+            if "{{" in m.group(1):
+                offenders.append(f"{pb.name}: {m.group(1)[:80]!r}")
+
+    assert not offenders, (
+        "a hardware playbook note now interpolates a value, but `note` is in "
+        "_EXEMPT_KEYS and is published verbatim. Either remove the interpolation or "
+        "remove the exemption:\n  " + "\n  ".join(offenders)
+    )
+
+
 # operation.action is written from a literal in each module's own source and can
 # never identify anything -- but five of the seven values are dotted, and a dotted
 # lowercase token is what the fqdn pattern matches. Observed on the first
