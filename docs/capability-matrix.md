@@ -149,7 +149,7 @@ the two wrong tables noted above.
 
 This is the bulk of the collection's verification effort:
 
-- **1774 unit tests** (collected via `pytest` against the staged collection tree on
+- **1869 unit tests** (collected via `pytest` against the staged collection tree on
   2026-07-30; the number drifts as tests are added, so treat it as a point
   measurement, not a promise) across `tests/unit/plugins/module_utils/`, `tests/unit/plugins/modules/`
   and `tests/unit/mock_servers/`, covering error classification/redaction, TLS trust
@@ -271,11 +271,11 @@ applies here exactly as it does elsewhere.
 What Tier 2 still buys — and it is what makes the *labels*, rather than the plumbing,
 trustworthy:
 
-- **666 unit tests.** **What that number measures**, written out so it cannot quietly
+- **730 unit tests.** **What that number measures**, written out so it cannot quietly
   come to mean something else: `pytest --collect-only` over the four test files this work
   touched — `module_utils/test_hardware.py`, `module_utils/test_client.py`,
   `modules/test_amt_info.py`, `mock_servers/test_wsman_server.py` — **minus their
-  pre-0.5.0 baseline of 217**. Those four collect **883** today, and 883 − 217 = 666.
+  pre-0.5.0 baseline of 217**. Those four collect **947** today, and 947 − 217 = 730.
 
   It is **not** a count of tests that exercise the inventory and nothing else: three of
   those files predate the inventory and keep testing what they always did, and the fourth
@@ -285,20 +285,28 @@ trustworthy:
   reconstructing at all is that it stated no measure, which let it drift into meaning
   something its arithmetic never claimed.
 
-  **609**, the number here previously, turns out to have been defensible on either of
-  the two readings available to it. It is the whole-suite delta of the 0.5.0 feature
-  commit — 1078 tests before, 1687 after, which is the arithmetic that commit's own
-  message records — **and** it is the growth of those same four files, 217 to 826. The
-  two coincide because 0.5.0 added tests to nothing else, so "609 tests covering the
-  inventory" was not the overstatement it looks like from the whole-suite arithmetic
-  alone; the figure has simply drifted. The same holds for the 57 added since: all of
-  them landed in these four files, in the follow-up that added
-  `operation.hardware_reads` described at the end of this subsection, so 826 → 883 and
-  1687 → 1774 are the same 57 tests counted two ways.
+  **609**, the number here originally, was defensible on either of the two readings
+  available to it. It is the whole-suite delta of the 0.5.0 feature commit — 1078 tests
+  before, 1687 after, which is the arithmetic that commit's own message records — **and**
+  it is the growth of those same four files, 217 to 826. The two coincided because 0.5.0
+  added tests to nothing else, so "609 tests covering the inventory" was not the
+  overstatement it looks like from the whole-suite arithmetic alone; the figure had simply
+  drifted. It held again for the 57 that followed, all of which landed in these four files
+  with `operation.hardware_reads`: 826 → 883 and 1687 → 1744 were the same 57 counted two
+  ways.
+
+  **That coincidence has now ended, and this is the more useful thing to record.** Between
+  1744 and 1869 the suite grew by 125, of which only 64 landed in these four files
+  (883 → 947). The remaining 61 went to `test_redact_evidence.py`, `test_wsman.py`,
+  `test_ider_server.py` and the role's integration target — redaction fixes, the
+  `EndOfSequence` discriminator, the IDE-R `start_session_status` fault, the 2.17
+  connection-guard regressions. So the whole-suite figure and the four-file figure now
+  measure genuinely different things, as they always claimed to but never had to
+  demonstrate. Anyone tempted to treat one as a proxy for the other should stop here.
 
   Two narrower counts, for anyone who wants a figure that needs no reconstruction at
   all: `test_hardware.py` — the file dedicated to the decoders and the value tables —
-  collects **514** on its own, and the whole unit suite collects **1774**.
+  collects **538** on its own, and the whole unit suite collects **1869**.
 
   Of these the bulk are per-value assertions over the nine value
   tables — every defined value plus an out-of-table value for each — written against the
