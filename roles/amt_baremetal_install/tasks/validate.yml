@@ -72,11 +72,32 @@
       guessing or silently combining them.
 
 - name: Require connection settings that are actually consistent
+  # password and tls_fingerprint are checked with `is truthy`, not `is not none`, and
+  # deliberately match amt_baremetal_install_host above rather than reading as a looser
+  # check. `is not none` only ever refuses a real Python None; it lets an empty string
+  # straight through, and the templates these two variables come from
+  # (defaults/main.yml's `"{{ amt_password | default(None) }}"` and
+  # `"{{ amt_tls_fingerprint | default(None) }}"`) do not reliably produce that None: on
+  # ansible-core <=2.18, Jinja's finalize step stringifies a quoted scalar template that
+  # evaluates to None, and Ansible's convert_data only evaluates a template's text back
+  # into dicts, lists and booleans, not None -- so an unset amt_password or
+  # amt_tls_fingerprint arrives here as "" on those cores, which `is not none` waves
+  # through. `is truthy` refuses "" the same way it already refuses None, on every core.
+  #
+  # This is hardening independent of that version detail, not a workaround for it: an
+  # empty-string password or fingerprint should never pass this guard, on any core,
+  # because on any core it means the same thing -- nothing was actually supplied. The
+  # fingerprint half is the one that matters most. This collection's trust model is that
+  # a TLS trust decision is always explicit, enforced here by requiring a pin whenever
+  # use_tls is true; an empty string satisfying `is not none` let that enforcement not
+  # fire on ansible-core <=2.18, leaving the role willing to proceed over TLS with no pin
+  # at all. See amt_baremetal_install_port's comment in defaults/main.yml for the same
+  # defect's other, louder consequence (an unusable role on stock ports).
   ansible.builtin.assert:
     that:
       - amt_baremetal_install_host is truthy
-      - amt_baremetal_install_password is not none
-      - (amt_baremetal_install_use_tls | bool and amt_baremetal_install_tls_fingerprint is not none) or
+      - amt_baremetal_install_password is truthy
+      - (amt_baremetal_install_use_tls | bool and amt_baremetal_install_tls_fingerprint is truthy) or
         (not (amt_baremetal_install_use_tls | bool) and amt_baremetal_install_allow_insecure_transport | bool)
     fail_msg: >-
       Missing or inconsistent connection settings. amt_baremetal_install_host and amt_baremetal_install_password
