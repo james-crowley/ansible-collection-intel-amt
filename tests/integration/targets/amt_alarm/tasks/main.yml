@@ -1,0 +1,789 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Drives the real amt_alarm module against the local mock WS-Man server, over a real
+# socket. Issue #112.
+#
+# What this tier buys over the unit tests, specifically:
+#
+#   * The mock's AmtState.alarm_occurrences is real, mutable, cross-request state, so
+#     "the same alarm twice, second run changed=false" is asserted against a mutation
+#     that actually happened. A canned alarm list would report changed=false whether or
+#     not the first run wrote anything -- which is the whole idempotence claim.
+#   * The AddAlarm body spans THREE namespaces (protocol-notes.md 2.10.3) and the mock
+#     reads every property at its exact namespace. A client that flattened any of them
+#     produces well-formed XML that firmware would answer HTTP 400 to, and only a real
+#     socket against a strict server catches that.
+#   * A replace has to Delete before AddAlarm, because the occurrence class has no Put
+#     and the mock refuses a duplicate InstanceID -- so a module that added over the top
+#     fails here rather than on hardware.
+#
+# Three servers, because each models a property of the endpoint rather than of anything a
+# client does to it:
+#
+#   default   -- an ordinary firmware with an alarm clock and a working RTC.
+#   fastclock -- an RTC set years ahead. This is how the past-date check's *source* is
+#                proven: a start_time the controller thinks is in the future is past to
+#                firmware, so a refusal here can only come from consulting firmware.
+#   noalarm   -- firmware with no alarm classes at all.
+#
+# NOTE ON WHAT THIS DOES NOT SHOW. Nothing here is evidence that firmware fires an alarm,
+# or what it does with a past-dated one. Both need wall-clock time to pass and a machine
+# that is powered off -- see docs/amt_alarm.md, "Why there is no hardware stage".
+
+- name: Create a scratch directory for this target's runtime files
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: amt_alarm_integration_
+  register: scratch_dir
+  delegate_to: localhost
+
+- name: Set mock-server paths for this run
+  ansible.builtin.set_fact:
+    mock_servers_dir: "{{ role_path }}/../../mock_servers"
+    default_ready_file: "{{ scratch_dir.path }}/wsman_default_ready.json"
+    fastclock_ready_file: "{{ scratch_dir.path }}/wsman_fastclock_ready.json"
+    noalarm_ready_file: "{{ scratch_dir.path }}/wsman_noalarm_ready.json"
+
+# Every time this target uses is derived from one reading of the wall clock, so nothing
+# here can go stale the way a hardcoded 2030 date eventually would, and so the "100 days
+# ahead" endpoint is guaranteed to be ahead of every start_time written below.
+#
+# `gather_facts: false` is the rule for these targets, so `ansible_date_time` is not
+# available; one `date -u +%s` is read instead. `strftime(..., utc=True)` is measured to
+# behave identically on ansible-core 2.17, 2.19 and 2.21.
+- name: Read the wall clock once
+  ansible.builtin.set_fact:
+    now_epoch: "{{ lookup('ansible.builtin.pipe', 'date -u +%s') | trim | int }}"
+
+- name: Derive every time this target uses from that one reading
+  ansible.builtin.set_fact:
+    fast_clock_ta0: "{{ (now_epoch | int) + (100 * 86400) }}"
+    first_start_time: "{{ '%Y-%m-%dT%H:%M:00Z' | strftime((now_epoch | int) + 3600, utc=True) }}"
+    second_start_time: "{{ '%Y-%m-%dT%H:%M:00Z' | strftime((now_epoch | int) + 7200, utc=True) }}"
+    past_start_time: "{{ '%Y-%m-%dT%H:%M:00Z' | strftime((now_epoch | int) - 3600, utc=True) }}"
+    # The same instant as `offset_expected_utc`, written with an explicit -04:00 offset
+    # instead of `Z`. A module that ignored the offset -- which is exactly what
+    # MeshCentral's write path does -- would store the local wall-clock digits and fail
+    # the assertion that pairs these two.
+    offset_start_time: "{{ '%Y-%m-%dT%H:%M:00' | strftime((now_epoch | int) + 10800 - 14400, utc=True) }}-04:00"
+    offset_expected_utc: "{{ '%Y-%m-%dT%H:%M:00Z' | strftime((now_epoch | int) + 10800, utc=True) }}"
+
+- name: Start the default mock WS-Man server
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ default_ready_file }} \
+      > {{ scratch_dir.path }}/wsman_default.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: default_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Start a mock WS-Man server whose RTC is 100 days ahead of this run
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ fastclock_ready_file }} \
+      --time-sync-ta0 {{ fast_clock_ta0 }} \
+      > {{ scratch_dir.path }}/wsman_fastclock.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: fastclock_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Start a mock WS-Man server with no alarm-clock classes at all
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ noalarm_ready_file }} \
+      --no-alarm-clock \
+      > {{ scratch_dir.path }}/wsman_noalarm.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: noalarm_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Wait for all three mock servers to report ready
+  ansible.builtin.wait_for:
+    path: "{{ item }}"
+    state: present
+    timeout: 15
+  loop:
+    - "{{ default_ready_file }}"
+    - "{{ fastclock_ready_file }}"
+    - "{{ noalarm_ready_file }}"
+  delegate_to: localhost
+
+- name: Read mock server connection info and pids
+  ansible.builtin.set_fact:
+    default_info: "{{ lookup('ansible.builtin.file', default_ready_file) | from_json }}"
+    fastclock_info: "{{ lookup('ansible.builtin.file', fastclock_ready_file) | from_json }}"
+    noalarm_info: "{{ lookup('ansible.builtin.file', noalarm_ready_file) | from_json }}"
+    default_pid: "{{ default_start.stdout | trim }}"
+    fastclock_pid: "{{ fastclock_start.stdout | trim }}"
+    noalarm_pid: "{{ noalarm_start.stdout | trim }}"
+
+- name: Exercise amt_alarm against the mock servers
+  block:
+    # ------------------------------------------------------------------
+    # Read-only baseline
+    # ------------------------------------------------------------------
+    - name: A bare invocation reads and changes nothing
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: initial_query
+
+    - name: Assert the default endpoint starts with no alarms and a readable clock
+      ansible.builtin.assert:
+        that:
+          - initial_query.changed == false
+          - initial_query.alarms == []
+          - initial_query.alarm is none
+          - initial_query.operation.alarm_operation == 'none'
+          # Firmware's own RTC, read over the wire. time_source 0 is the vendor
+          # fixture's value and the one that means "reading the platform RTC", which
+          # is not necessarily UTC -- see protocol-notes.md 2.10.5.
+          - initial_query.firmware_clock is not none
+          - initial_query.firmware_clock.time_source == 0
+          - initial_query.firmware_clock.time_source_name == 'bios_rtc'
+          - initial_query.firmware_clock.local_time_sync_enabled_name == 'default_true'
+          # The two properties real firmware's captured response omits. Null means
+          # "firmware did not report it", not "no alarm is set".
+          - initial_query.service.next_alarm_time is none
+          - initial_query.service.alarm_interval is none
+        fail_msg: >-
+          The default mock served an unexpected initial state: {{ initial_query.alarms | length }}
+          alarm(s), firmware_clock={{ initial_query.firmware_clock }}.
+
+    # ------------------------------------------------------------------
+    # Check mode before any real mutation, so "it sent nothing" is provable
+    # ------------------------------------------------------------------
+    - name: Check mode reports the add it would make
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: present
+        name: nightly-patch-window
+        start_time: "{{ first_start_time }}"
+        interval_minutes: 1440
+        delete_on_completion: false
+      delegate_to: localhost
+      no_log: true
+      check_mode: true
+      register: check_mode_add
+
+    - name: Assert check mode previewed the add and encoded the wire values
+      ansible.builtin.assert:
+        that:
+          - check_mode_add.changed == true
+          - check_mode_add.operation.alarm_operation == 'add'
+          - check_mode_add.operation.desired.start_time == first_start_time
+          # The ISO-8601 duration the module derived from interval_minutes: 1440.
+          - check_mode_add.operation.desired.interval == 'P1DT0H0M'
+          - check_mode_add.operation.desired.delete_on_completion == false
+
+    - name: Confirm check mode wrote nothing to the endpoint
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: after_check_mode
+
+    - name: Assert the endpoint still holds no alarms
+      ansible.builtin.assert:
+        that:
+          - after_check_mode.alarms == []
+
+    # ------------------------------------------------------------------
+    # The real add, then the idempotence case
+    # ------------------------------------------------------------------
+    - name: Set a daily wake alarm for real
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: present
+        name: nightly-patch-window
+        start_time: "{{ first_start_time }}"
+        interval_minutes: 1440
+        delete_on_completion: false
+      delegate_to: localhost
+      no_log: true
+      register: first_run
+
+    - name: Assert the alarm was created and read back from firmware, not assumed
+      ansible.builtin.assert:
+        that:
+          - first_run.changed == true
+          - first_run.operation.alarm_operation == 'add'
+          - first_run.operation.previous is none
+          # `observed` comes from a fresh Enumerate after AddAlarm, not from
+          # AddAlarm's own ReturnValue.
+          - first_run.operation.observed is not none
+          - first_run.operation.observed.start_time == first_start_time
+          - first_run.alarm.instance_id == 'nightly-patch-window'
+          # The caller-supplied name became BOTH the key and the friendly name, which
+          # is what makes the alarm deletable by every implementation of this class.
+          - first_run.alarm.element_name == 'nightly-patch-window'
+          - first_run.alarm.interval == 'P1DT0H0M'
+          - first_run.alarm.interval_minutes == 1440
+          - first_run.alarm.delete_on_completion == false
+          - first_run.alarms | length == 1
+
+    # THE IDEMPOTENCE CASE. Byte-identical arguments, against a server that really
+    # holds what the previous task wrote.
+    - name: Set the same alarm again
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: present
+        name: nightly-patch-window
+        start_time: "{{ first_start_time }}"
+        interval_minutes: 1440
+        delete_on_completion: false
+      delegate_to: localhost
+      no_log: true
+      register: second_run
+
+    - name: Assert the second run converged with changed=false
+      ansible.builtin.assert:
+        that:
+          - second_run.changed == false
+          - second_run.operation.alarm_operation == 'none'
+          # And exactly one alarm, not two under the same key -- which is what a
+          # module that re-added blindly would leave behind if firmware allowed it.
+          - second_run.alarms | length == 1
+          - second_run.alarm.start_time == first_start_time
+        fail_msg: >-
+          A second identical run reported changed={{ second_run.changed }} with
+          alarm_operation={{ second_run.operation.alarm_operation }}. An alarm is desired
+          state; converging on it is the entire point of this module.
+
+    - name: Check mode on the converged alarm also reports no change
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: present
+        name: nightly-patch-window
+        start_time: "{{ first_start_time }}"
+        interval_minutes: 1440
+        delete_on_completion: false
+      delegate_to: localhost
+      no_log: true
+      check_mode: true
+      register: converged_check_mode
+
+    - name: Assert check mode and the real run agree
+      ansible.builtin.assert:
+        that:
+          - converged_check_mode.changed == false
+          - converged_check_mode.operation.alarm_operation == second_run.operation.alarm_operation
+
+    # ------------------------------------------------------------------
+    # Changing the alarm: delete-then-add, because the class has no Put
+    # ------------------------------------------------------------------
+    - name: Move the wake time an hour later
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: present
+        name: nightly-patch-window
+        start_time: "{{ second_start_time }}"
+        interval_minutes: 1440
+        delete_on_completion: false
+      delegate_to: localhost
+      no_log: true
+      register: replace_run
+
+    - name: Assert the change was a replace and really landed
+      ansible.builtin.assert:
+        that:
+          - replace_run.changed == true
+          # The mock refuses a duplicate InstanceID, so this could only succeed by
+          # deleting first. A module that added over the top fails here.
+          - replace_run.operation.alarm_operation == 'replace'
+          - replace_run.operation.previous.start_time == first_start_time
+          - replace_run.operation.observed.start_time == second_start_time
+          - replace_run.alarms | length == 1
+
+    - name: Changing only the interval also replaces
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: present
+        name: nightly-patch-window
+        start_time: "{{ second_start_time }}"
+        interval_minutes: 10080
+        delete_on_completion: false
+      delegate_to: localhost
+      no_log: true
+      register: interval_change
+
+    - name: Assert an interval-only difference is not silently treated as converged
+      ansible.builtin.assert:
+        that:
+          - interval_change.changed == true
+          - interval_change.operation.alarm_operation == 'replace'
+          - interval_change.alarm.interval == 'P7DT0H0M'
+          - interval_change.alarm.interval_minutes == 10080
+        fail_msg: >-
+          A differing interval reported changed={{ interval_change.changed }}. Comparing
+          start_time alone would leave a weekly alarm where a daily one was asked for.
+
+    # ------------------------------------------------------------------
+    # A one-shot alarm, and the five-occurrence limit
+    # ------------------------------------------------------------------
+    - name: Add a one-shot alarm alongside the recurring one
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: present
+        name: one-shot-maintenance
+        start_time: "{{ first_start_time }}"
+      delegate_to: localhost
+      no_log: true
+      register: one_shot
+
+    - name: Assert a one-shot alarm reports a zero interval, not an absent one
+      ansible.builtin.assert:
+        that:
+          - one_shot.changed == true
+          - one_shot.alarm.interval == 'P0DT0H0M'
+          # 0 means "runs once"; null would mean "firmware reported something
+          # unreadable", and those are different findings.
+          - one_shot.alarm.interval_minutes == 0
+          - one_shot.alarm.delete_on_completion == true
+          - one_shot.alarms | length == 2
+
+    - name: Fill firmware to the documented five-occurrence limit
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: present
+        name: "filler-{{ item }}"
+        start_time: "{{ first_start_time }}"
+      delegate_to: localhost
+      no_log: true
+      loop: [1, 2, 3]
+      register: fillers
+
+    - name: A sixth alarm is refused, naming the limit and its source
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: present
+        name: sixth-alarm
+        start_time: "{{ first_start_time }}"
+      delegate_to: localhost
+      no_log: true
+      register: sixth
+      ignore_errors: true
+
+    - name: Assert the refusal is invalid_state and cites where the limit comes from
+      ansible.builtin.assert:
+        that:
+          - sixth.failed == true
+          - sixth.error_class == 'invalid_state'
+          - "'go-wsman-messages' in sixth.msg"
+          - "'MODULE FAILURE' not in sixth.msg"
+
+    - name: Replacing an existing alarm at the limit is still allowed
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: present
+        name: one-shot-maintenance
+        start_time: "{{ second_start_time }}"
+      delegate_to: localhost
+      no_log: true
+      register: replace_at_limit
+
+    - name: Assert a replace at the limit succeeds -- it frees the key before claiming it
+      ansible.builtin.assert:
+        that:
+          - replace_at_limit.changed == true
+          - replace_at_limit.operation.alarm_operation == 'replace'
+          - replace_at_limit.alarms | length == 5
+
+    # ------------------------------------------------------------------
+    # Removal, and its idempotence
+    # ------------------------------------------------------------------
+    - name: Remove the one-shot alarm
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: absent
+        name: one-shot-maintenance
+      delegate_to: localhost
+      no_log: true
+      register: remove_run
+
+    - name: Assert the alarm is gone
+      ansible.builtin.assert:
+        that:
+          - remove_run.changed == true
+          - remove_run.operation.alarm_operation == 'delete'
+          - remove_run.alarm is none
+          - remove_run.alarms | length == 4
+
+    - name: Remove it again
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: absent
+        name: one-shot-maintenance
+      delegate_to: localhost
+      no_log: true
+      register: remove_again
+
+    - name: Assert removing an absent alarm is already converged, not a failure
+      ansible.builtin.assert:
+        that:
+          - remove_again.changed == false
+          - remove_again.operation.alarm_operation == 'none'
+        fail_msg: >-
+          Removing an already-absent alarm reported changed={{ remove_again.changed }}.
+          Firmware faults a Delete for a key that does not exist, so this can only pass
+          if the module reads before deciding.
+
+    # ------------------------------------------------------------------
+    # start_time validation, and the past-date refusal
+    # ------------------------------------------------------------------
+    - name: A start_time with no timezone is refused
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: present
+        name: naive-time
+        start_time: "2030-01-02T03:00:00"
+      delegate_to: localhost
+      no_log: true
+      register: naive
+      ignore_errors: true
+
+    - name: Assert the naive-timestamp refusal names both fixes
+      ansible.builtin.assert:
+        that:
+          - naive.failed == true
+          - naive.error_class == 'invalid_state'
+          - "'offset' in naive.msg"
+          - "'MODULE FAILURE' not in naive.msg"
+        fail_msg: >-
+          A start_time with no timezone was not refused. The two implementations of this
+          firmware class disagree about what one means, so guessing wakes half the
+          machines at the wrong hour -- see docs/amt_alarm.md.
+
+    - name: An explicit non-UTC offset is accepted and converted to UTC on the wire
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: present
+        name: offset-alarm
+        start_time: "{{ offset_start_time }}"
+      delegate_to: localhost
+      no_log: true
+      register: offset_alarm
+
+    - name: Assert the offset was applied rather than dropped
+      ansible.builtin.assert:
+        that:
+          - offset_alarm.changed == true
+          # The instant, in UTC, four hours ahead of the digits that were passed in.
+          - offset_alarm.operation.desired.start_time == offset_expected_utc
+          - offset_alarm.alarm.start_time == offset_expected_utc
+        fail_msg: >-
+          start_time {{ offset_start_time }} was stored as
+          {{ offset_alarm.alarm.start_time | default('(nothing)') }} rather than
+          {{ offset_expected_utc }}. Dropping the offset and labelling the local digits
+          'Z' is precisely what MeshCentral's write path does, and it wakes the machine
+          four hours early.
+
+    - name: A past-dated alarm is refused against the default clock
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: present
+        name: nightly-patch-window
+        start_time: "{{ past_start_time }}"
+        interval_minutes: 1440
+        delete_on_completion: false
+      delegate_to: localhost
+      no_log: true
+      register: past_dated
+      ignore_errors: true
+
+    - name: Assert the refusal is attributed to this collection, not to firmware
+      ansible.builtin.assert:
+        that:
+          - past_dated.failed == true
+          - past_dated.error_class == 'invalid_state'
+          - "'allow_past_start_time' in past_dated.msg"
+          # The message must say the refusal is ours, or an operator will go looking
+          # for a firmware setting to change.
+          - "'No source' in past_dated.msg"
+          - "\"firmware's own clock\" in past_dated.msg"
+
+    # ------------------------------------------------------------------
+    # THE FAST-CLOCK SERVER: proves the check consults firmware, not the controller
+    # ------------------------------------------------------------------
+    - name: Report the fast-clock endpoint's RTC
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ fastclock_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: fastclock_query
+
+    - name: Assert the skew is reported, positive, and roughly the 100 days configured
+      ansible.builtin.assert:
+        that:
+          - fastclock_query.firmware_clock is not none
+          - fastclock_query.firmware_clock.epoch_seconds | int == fast_clock_ta0 | int
+          # Positive means firmware is AHEAD. An inverted sign would send an operator
+          # adjusting in the wrong direction.
+          - fastclock_query.firmware_clock.skew_seconds | int > (99 * 86400)
+          - fastclock_query.firmware_clock.skew_seconds | int < (101 * 86400)
+
+    - name: An hour-away alarm is refused by firmware whose clock is 100 days ahead
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ fastclock_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: present
+        name: soon
+        start_time: "{{ first_start_time }}"
+      delegate_to: localhost
+      no_log: true
+      register: fastclock_refusal
+      ignore_errors: true
+
+    - name: Assert the past-date check consulted firmware's clock and not the controller's
+      ansible.builtin.assert:
+        that:
+          - fastclock_refusal.failed == true
+          - fastclock_refusal.error_class == 'invalid_state'
+          - "\"firmware's own clock\" in fastclock_refusal.msg"
+        fail_msg: >-
+          A start_time an hour in the controller's future was accepted by an endpoint
+          whose RTC is 100 days ahead. The check must consult firmware's clock -- the
+          machine holding the alarm is the one that decides whether the time has passed.
+
+    - name: The same endpoint accepts a time in its own future
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ fastclock_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: present
+        name: far-future
+        start_time: "{{ '%Y-%m-%dT%H:%M:00Z' | strftime((fast_clock_ta0 | int) + 3600, utc=True) }}"
+      delegate_to: localhost
+      no_log: true
+      register: fastclock_accepted
+
+    - name: Assert the negative control -- the check is not simply refusing everything
+      ansible.builtin.assert:
+        that:
+          - fastclock_accepted.changed == true
+          - fastclock_accepted.operation.alarm_operation == 'add'
+        fail_msg: >-
+          Without this, the refusal above would be satisfied just as well by a check
+          that rejected every alarm.
+
+    - name: allow_past_start_time sends a past-dated alarm anyway
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ fastclock_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        state: present
+        name: deliberately-stale
+        start_time: "{{ first_start_time }}"
+        allow_past_start_time: true
+      delegate_to: localhost
+      no_log: true
+      register: opted_out
+
+    - name: Assert the opt-out reaches the endpoint
+      ansible.builtin.assert:
+        that:
+          - opted_out.changed == true
+          - opted_out.alarm.start_time == first_start_time
+
+    # ------------------------------------------------------------------
+    # Firmware with no alarm clock at all
+    # ------------------------------------------------------------------
+    - name: A read against firmware with no alarm classes degrades, not crashes
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ noalarm_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: no_alarm_read
+      ignore_errors: true
+
+    - name: Assert an absent class is unsupported_capability and names the class
+      ansible.builtin.assert:
+        that:
+          - no_alarm_read.failed == true
+          - no_alarm_read.error_class == 'unsupported_capability'
+          - "'IPS_AlarmClockOccurrence' in no_alarm_read.msg"
+          - "'MODULE FAILURE' not in no_alarm_read.msg"
+        fail_msg: >-
+          Firmware with no alarm clock must not be reported as "no alarms configured" --
+          that is a fabrication, and a caller of this module asked specifically about
+          alarms.
+
+    # ------------------------------------------------------------------
+    # Fault injection
+    # ------------------------------------------------------------------
+    - name: A wrong password is refused with error_class=authentication
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: definitely-the-wrong-password
+        use_tls: false
+        allow_insecure_transport: true
+        state: absent
+        name: nightly-patch-window
+      delegate_to: localhost
+      no_log: true
+      register: bad_password
+      ignore_errors: true
+
+    - name: Assert the wrong-password call failed on authentication
+      ansible.builtin.assert:
+        that:
+          - bad_password.failed == true
+          - bad_password.error_class == 'authentication'
+
+    - name: Confirm the failed-authentication attempt changed nothing
+      james_crowley.intel_amt.amt_alarm:
+        host: 127.0.0.1
+        port: "{{ default_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: final_state
+
+    - name: Assert the alarm the bad-password run tried to remove is still there
+      ansible.builtin.assert:
+        that:
+          - final_state.alarms | length == 5
+          - "'nightly-patch-window' in (final_state.alarms | map(attribute='instance_id') | list)"
+
+  always:
+    - name: Stop the mock WS-Man servers
+      ansible.builtin.command: "kill {{ item }}"
+      loop:
+        - "{{ default_pid }}"
+        - "{{ fastclock_pid }}"
+        - "{{ noalarm_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup; the assertions above are what must pass.
+      changed_when: false
+
+    - name: Remove the scratch directory
+      ansible.builtin.file:
+        path: "{{ scratch_dir.path }}"
+        state: absent
+      delegate_to: localhost

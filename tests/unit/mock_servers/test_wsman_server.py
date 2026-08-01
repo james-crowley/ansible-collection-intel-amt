@@ -2208,6 +2208,74 @@ class TestRealClientAlarmClock:
                     alarm.add_alarm(client, name="nightly", start_time=self._parsed(self.START_TIME))
                 assert alarm.get_service(client) == {}
 
+    def test_the_mock_rejects_a_wrongly_namespaced_add_alarm_body(self, server):
+        """The mock's own strictness, asserted directly rather than only relied upon.
+
+        Every other test in this class proves the *client* builds the body right, and
+        each does so by the body being accepted. None of them can distinguish "the client
+        got the namespaces right" from "the mock does not check" -- which is exactly the
+        defect ``_param``'s docstring records having been fixed once before, where a
+        parameter in the wrong namespace sailed through the mock and then failed schema
+        validation on real firmware.
+
+        So this posts a hand-built body whose occurrence properties are in the *method's*
+        namespace instead of ``IPS_AlarmClockOccurrence``'s -- valid XML, and the single
+        most plausible way to get this wrong -- and asserts the mock answers HTTP 400,
+        which is what §2.5 records real AMT 16.1.30 doing for a schema-invalid body.
+        """
+        wrong = (
+            f'<r:AddAlarm_INPUT xmlns:r="{AMT_ALARM_CLOCK_SERVICE}">'
+            "<r:AlarmTemplate>"
+            "<r:InstanceID>nightly</r:InstanceID>"
+            f'<r:StartTime><p:Datetime xmlns:p="{NS_CIM_COMMON}">2030-01-02T03:04:00Z</p:Datetime></r:StartTime>'
+            "<r:DeleteOnCompletion>true</r:DeleteOnCompletion>"
+            "</r:AlarmTemplate>"
+            "</r:AddAlarm_INPUT>"
+        )
+        response = _post(server, _envelope(f"{AMT_ALARM_CLOCK_SERVICE}/AddAlarm", AMT_ALARM_CLOCK_SERVICE, wrong))
+        assert response.status_code == 400
+        assert server.state.alarm_occurrences == {}
+
+    def test_the_mock_rejects_a_flat_datetime_too(self, server):
+        """The other plausible mistake: the DMTF common wrapper omitted.
+
+        ``<s:StartTime>2030-...Z</s:StartTime>`` is the shape the vendor's own placeholder
+        fixture uses, so it is not an unthinkable thing for an implementer to send -- but
+        it is not the shape either write path builds, and the mock must not accept it.
+        """
+        flat = (
+            f'<r:AddAlarm_INPUT xmlns:r="{AMT_ALARM_CLOCK_SERVICE}">'
+            f'<r:AlarmTemplate xmlns:s="{IPS_ALARM_CLOCK_OCCURRENCE}">'
+            "<s:InstanceID>nightly</s:InstanceID>"
+            "<s:StartTime>2030-01-02T03:04:00Z</s:StartTime>"
+            "<s:DeleteOnCompletion>true</s:DeleteOnCompletion>"
+            "</r:AlarmTemplate>"
+            "</r:AddAlarm_INPUT>"
+        )
+        response = _post(server, _envelope(f"{AMT_ALARM_CLOCK_SERVICE}/AddAlarm", AMT_ALARM_CLOCK_SERVICE, flat))
+        assert response.status_code == 400
+        assert server.state.alarm_occurrences == {}
+
+    def test_a_correctly_namespaced_hand_built_body_is_accepted(self, server):
+        """The positive control for the two rejections above.
+
+        Without it, both would be satisfied by a mock that answered 400 to every
+        hand-built AddAlarm regardless of its namespaces.
+        """
+        good = (
+            f'<r:AddAlarm_INPUT xmlns:r="{AMT_ALARM_CLOCK_SERVICE}">'
+            f'<r:AlarmTemplate xmlns:s="{IPS_ALARM_CLOCK_OCCURRENCE}">'
+            "<s:InstanceID>nightly</s:InstanceID>"
+            f'<s:StartTime><p:Datetime xmlns:p="{NS_CIM_COMMON}">2030-01-02T03:04:00Z</p:Datetime></s:StartTime>'
+            "<s:DeleteOnCompletion>true</s:DeleteOnCompletion>"
+            "</r:AlarmTemplate>"
+            "</r:AddAlarm_INPUT>"
+        )
+        response = _post(server, _envelope(f"{AMT_ALARM_CLOCK_SERVICE}/AddAlarm", AMT_ALARM_CLOCK_SERVICE, good))
+        assert response.status_code == 200
+        assert _find_text(ET.fromstring(response.content), "ReturnValue") == "0"
+        assert list(server.state.alarm_occurrences) == ["nightly"]
+
     def test_the_amt10_enumerate_fault_mode_does_not_reach_the_ips_class(self):
         """§2.7's finding names five ``AMT_``-prefixed classes and says so.
 

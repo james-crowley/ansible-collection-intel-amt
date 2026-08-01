@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from unittest.mock import Mock
+from xml.etree import ElementTree as ET
 
 import pytest
 import requests
@@ -20,8 +21,10 @@ from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors imp
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.wsman import (
     ACTION_GET,
     NS_ADDRESSING,
+    NS_CIM_COMMON,
     NS_SOAP,
     NS_WSMAN,
+    EmbeddedInstance,
     EndpointReference,
     WsmanClient,
     build_envelope,
@@ -469,3 +472,145 @@ class TestNullMethodParametersAreOmitted:
         xml = self._body_xml({"Source": None, "Role": 1})
         assert "Source" not in xml
         assert "Role" in xml
+
+
+def _local_name_of(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+class TestDelete:
+    """WS-Transfer ``Delete``, added for ``amt_alarm`` (issue #112).
+
+    ``IPS_AlarmClockOccurrence`` is the only class this collection deletes, and it is
+    addressed entirely by its ``InstanceID`` selector -- see docs/protocol-notes.md s2.10.
+    """
+
+    @staticmethod
+    def _sent(client):
+        call = client._session.post.call_args
+        sent = call.kwargs.get("data") or call.args[1]
+        return sent.decode() if isinstance(sent, bytes) else sent
+
+    def test_sends_the_transfer_delete_action_with_the_selector_and_an_empty_body(self):
+        client = _make_client()
+        client._session.post.return_value = _soap_response("")
+        client.delete("IPS_AlarmClockOccurrence", selectors={"InstanceID": "nightly"})
+        xml = self._sent(client)
+        assert "http://schemas.xmlsoap.org/ws/2004/09/transfer/Delete" in xml
+        assert 'Name="InstanceID"' in xml
+        assert ">nightly<" in xml
+        # WS-Transfer Delete names the instance in the header and carries no body. An
+        # element here would be a body firmware has no schema for.
+        assert "<s:Body />" in xml or "<s:Body></s:Body>" in xml
+
+    def test_returns_nothing_because_the_response_body_is_empty(self):
+        """The vendor's captured DeleteResponse has ``<a:Body></a:Body>``.
+
+        There is nothing to parse, so a caller wanting proof the instance is gone must
+        re-read -- the same rule every other mutation here follows.
+        """
+        client = _make_client()
+        client._session.post.return_value = _soap_response("")
+        assert client.delete("IPS_AlarmClockOccurrence", selectors={"InstanceID": "nightly"}) is None
+
+    def test_delete_is_never_retried_on_connection_error(self):
+        """A mutation, so not retryable -- and the retry has a specific hazard here.
+
+        A retry after a lost response would delete an instance a *different* caller had
+        since recreated under the same key, which is possible precisely because the key
+        is caller-supplied.
+        """
+        client = _make_client(max_retries=5)
+        client._session.post.side_effect = [requests.exceptions.ConnectionError("refused"), _soap_response("")]
+        with pytest.raises(ConnectionError_):
+            client.delete("IPS_AlarmClockOccurrence", selectors={"InstanceID": "nightly"})
+        assert client._session.post.call_count == 1
+
+    def test_a_fault_surfaces_as_a_protocol_error(self):
+        # Firmware faults a Delete for a key that does not exist; WS-Transfer has no
+        # "delete if present". That is why amt_alarm reads before deciding.
+        client = _make_client()
+        client._session.post.return_value = _soap_response(
+            '<s:Fault xmlns:s="http://www.w3.org/2003/05/soap-envelope">'
+            "<s:Code><s:Value>s:Receiver</s:Value><s:Subcode><s:Value>w:InvalidSelectors</s:Value></s:Subcode></s:Code>"
+            '<s:Reason><s:Text xml:lang="en-US">No such instance</s:Text></s:Reason>'
+            "</s:Fault>"
+        )
+        with pytest.raises(ProtocolError, match="Delete IPS_AlarmClockOccurrence"):
+            client.delete("IPS_AlarmClockOccurrence", selectors={"InstanceID": "nope"})
+
+
+class TestEmbeddedInstanceParameters:
+    """A method parameter that is a nested property bag. Added for ``AddAlarm`` (#112).
+
+    ``AddAlarm``'s body spans three namespaces (docs/protocol-notes.md s2.10.3), which no
+    other method in this collection needs and which the flat parameter path structurally
+    cannot express. These tests assert on the emitted XML rather than on a parsed result,
+    because the namespaces *are* the thing that can be wrong.
+    """
+
+    NS_METHOD = "http://intel.com/wbem/wscim/1/amt-schema/1/AMT_AlarmClockService"
+    NS_OCCURRENCE = "http://intel.com/wbem/wscim/1/ips-schema/1/IPS_AlarmClockOccurrence"
+
+    @staticmethod
+    def _sent_root(params):
+        client = _make_client()
+        client._session.post.return_value = _soap_response("<g:AddAlarm_OUTPUT xmlns:g='x'><g:ReturnValue>0</g:ReturnValue></g:AddAlarm_OUTPUT>")
+        client.invoke("AMT_AlarmClockService", "AddAlarm", params)
+        call = client._session.post.call_args
+        sent = call.kwargs.get("data") or call.args[1]
+        return ET.fromstring(sent)
+
+    def test_the_wrapper_is_named_in_the_enclosing_namespace_and_its_children_in_its_own(self):
+        root = self._sent_root(
+            {
+                "AlarmTemplate": EmbeddedInstance(
+                    namespace=self.NS_OCCURRENCE,
+                    properties={"InstanceID": "nightly", "DeleteOnCompletion": True},
+                )
+            }
+        )
+        template = root.find(f".//{{{self.NS_METHOD}}}AlarmTemplate")
+        assert template is not None, "the wrapper must be named in the method's namespace, not the instance's"
+        assert [child.tag for child in template] == [
+            f"{{{self.NS_OCCURRENCE}}}InstanceID",
+            f"{{{self.NS_OCCURRENCE}}}DeleteOnCompletion",
+        ]
+
+    def test_nesting_reaches_a_third_namespace(self):
+        root = self._sent_root(
+            {
+                "AlarmTemplate": EmbeddedInstance(
+                    namespace=self.NS_OCCURRENCE,
+                    properties={"StartTime": EmbeddedInstance(namespace=NS_CIM_COMMON, properties={"Datetime": "2030-01-02T03:04:00Z"})},
+                )
+            }
+        )
+        start_time = root.find(f".//{{{self.NS_OCCURRENCE}}}StartTime")
+        assert [child.tag for child in start_time] == [f"{{{NS_CIM_COMMON}}}Datetime"]
+        assert start_time[0].text == "2030-01-02T03:04:00Z"
+
+    def test_booleans_render_lowercase_inside_an_embedded_instance_too(self):
+        root = self._sent_root({"AlarmTemplate": EmbeddedInstance(namespace=self.NS_OCCURRENCE, properties={"DeleteOnCompletion": False})})
+        assert root.find(f".//{{{self.NS_OCCURRENCE}}}DeleteOnCompletion").text == "false"
+
+    def test_a_none_property_is_omitted_rather_than_emitted_empty(self):
+        """The same rule as a flat ``None`` parameter, and for the same firmware reason.
+
+        Real AMT 16.1.30 answers HTTP 400 to an empty element where an absent one is
+        accepted; an embedded instance that emitted ``<Interval/>`` would reintroduce
+        exactly the bug that blocked IDE-R boot.
+        """
+        root = self._sent_root(
+            {"AlarmTemplate": EmbeddedInstance(namespace=self.NS_OCCURRENCE, properties={"InstanceID": "nightly", "Interval": None})}
+        )
+        template = root.find(f".//{{{self.NS_METHOD}}}AlarmTemplate")
+        assert [child.tag for child in template] == [f"{{{self.NS_OCCURRENCE}}}InstanceID"]
+
+    def test_property_insertion_order_survives_to_the_wire(self):
+        # Both vendor implementations emit InstanceID, ElementName, StartTime, Interval,
+        # DeleteOnCompletion in that order, and dict order is what carries it.
+        names = ["InstanceID", "ElementName", "StartTime", "Interval", "DeleteOnCompletion"]
+        root = self._sent_root({"AlarmTemplate": EmbeddedInstance(namespace=self.NS_OCCURRENCE, properties=dict.fromkeys(names, "x"))})
+        template = root.find(f".//{{{self.NS_METHOD}}}AlarmTemplate")
+        assert [_local_name_of(child.tag) for child in template] == names

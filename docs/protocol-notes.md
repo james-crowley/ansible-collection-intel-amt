@@ -1001,6 +1001,304 @@ the class definitions and the fixtures:
 
 ---
 
+### 2.10 Alarm clock — `AMT_AlarmClockService` and `IPS_AlarmClockOccurrence`
+
+Backs `amt_alarm` (issue #112), implemented in `plugins/module_utils/alarm.py`.
+
+**Nothing in this subsection has been exercised against real firmware by this
+collection.** No hardware qualification stage covers it, and there deliberately is not
+one — see §2.10.9. Every claim below is sourced, and the provenance is unusually uneven
+for this document, so each table says which kind of evidence it rests on.
+
+#### 2.10.1 Sources used, and how good each one is
+
+| Tag | What | Licence / provenance |
+|---|---|---|
+| **go-wsman** | `device-management-toolkit/go-wsman-messages` at tag `v2.48.3` — `pkg/wsman/amt/alarmclock/` (`service.go`, `types.go`, `decoder.go`, `service_test.go`), `pkg/wsman/ips/alarmclock/` (`occurrence.go`, `types.go`, `constants.go`), `pkg/wsman/amt/timesynchronization/` | Apache-2.0, Intel-authored |
+| **console** | `device-management-toolkit/console` — `internal/usecase/devices/alarms.go`, `internal/entity/dto/v1/alarm.go` | Apache-2.0, Intel-authored. A *consumer* of go-wsman, so it corroborates intent rather than the wire |
+| **MeshCentral** | `agents/meshcmd.js` (`performAmtWakeConfig*`, `prepareAlarmOccurenceTemplate`, `convertAmtDataStr`), `agents/modules_meshcmd/amt.js` (`AMT_AlarmClockService_AddAlarm`) | Apache-2.0, corroborating prior art |
+| **fixture** | Captured responses under `pkg/wsman/wsmantesting/responses/` | See the warning immediately below |
+
+> **The occurrence-class fixtures are hand-written placeholders, not firmware
+> captures.** `responses/ips/alarmclock/get.xml` reports `InstanceID` `testalarm` and
+> `StartTime` `testdatetime`. Unlike the hardware-inventory fixtures of §2.9 — which are
+> real responses and are the primary source there — these establish the **field set and
+> nothing else**. Where this subsection cites a *value*, the citation is go-wsman's code
+> or its own test, never these files.
+>
+> They also **contradict go-wsman's own parser**: the fixture sends
+> `<g:StartTime>testdatetime</g:StartTime>` flat, while `ips/alarmclock/types.go` models
+> `StartTime` as a struct wrapping a `Datetime` child. Both shapes are therefore in
+> circulation for the same property, and this collection parses both
+> (`alarm.decode_start_time`). It only ever *sends* the nested one, which is the shape
+> both write paths build.
+
+#### 2.10.2 The two classes
+
+| Class | Verbs used here | Verbs evidenced | Purpose |
+|---|---|---|---|
+| `AMT_AlarmClockService` | `Get` | `Get`, `Enumerate` (fixtures for both) | Singleton service. Owns `AddAlarm` |
+| `IPS_AlarmClockOccurrence` | `Enumerate`, `Delete` | `Get`, `Enumerate`, `Delete` (fixtures for all three) | One instance per configured alarm |
+
+`IPS_AlarmClockOccurrence` is read by `Enumerate` **only, with no `Get` fallback**, and
+that is a decision rather than an omission: the question is "which alarms exist", which a
+`Get` structurally cannot answer, and a `Get` with an `InstanceID` selector for a name
+that does not exist faults — so it could not tell "no such alarm" from "no such class".
+
+**§2.7's `Enumerate`-is-HTTP-400 finding does not reach the occurrence class.** That
+finding is hardware-verified on AMT 10.0.56 and names five **`AMT_`**-prefixed classes;
+`IPS_AlarmClockOccurrence` is `IPS_`-prefixed. Extending it there would make the module
+unusable on a generation where it should work. It *does* reach `AMT_AlarmClockService`,
+which is one reason this collection reads that class with `Get`.
+
+**There is no `Put` on the occurrence class.** go-wsman's `Occurrence` exposes the base
+service operations plus `Delete` and nothing else; no fixture shows a `Put`; MeshCentral
+never issues one. So **changing an existing alarm is `Delete` then `AddAlarm`, in that
+order** — the key has to be freed before it can be reclaimed, because `AddAlarm` for an
+`InstanceID` that already exists cannot succeed (the property is the instance key).
+
+#### 2.10.3 `AddAlarm` — the exact body, and its three namespaces
+
+`AMT_AlarmClockService.AddAlarm` takes a single input parameter, `AlarmTemplate`, which is
+an **embedded instance** of `IPS_AlarmClockOccurrence`. This is the only method in this
+collection whose body is not a flat parameter list, and it is why
+`plugins/module_utils/wsman.py` grew `EmbeddedInstance`.
+
+```xml
+<r:AddAlarm_INPUT xmlns:r="http://intel.com/wbem/wscim/1/amt-schema/1/AMT_AlarmClockService">
+  <d:AlarmTemplate xmlns:d="http://intel.com/wbem/wscim/1/amt-schema/1/AMT_AlarmClockService"
+                   xmlns:s="http://intel.com/wbem/wscim/1/ips-schema/1/IPS_AlarmClockOccurrence">
+    <s:InstanceID>nightly-patch-window</s:InstanceID>
+    <s:ElementName>nightly-patch-window</s:ElementName>
+    <s:StartTime>
+      <p:Datetime xmlns:p="http://schemas.dmtf.org/wbem/wscim/1/common">2022-12-31T23:59:00Z</p:Datetime>
+    </s:StartTime>
+    <s:Interval>
+      <p:Interval xmlns:p="http://schemas.dmtf.org/wbem/wscim/1/common">P1DT23H59M</p:Interval>
+    </s:Interval>
+    <s:DeleteOnCompletion>true</s:DeleteOnCompletion>
+  </d:AlarmTemplate>
+</r:AddAlarm_INPUT>
+```
+
+**Three namespaces, and none of them is optional.** The `AlarmTemplate` wrapper is in the
+*method's* namespace; its properties are in the *occurrence class's*; and
+`Datetime`/`Interval` are in the DMTF **common** namespace,
+`http://schemas.dmtf.org/wbem/wscim/1/common`, which appears nowhere else in this
+document and is not derivable from any class name. Flattening any of the three produces a
+body that is well-formed XML and schema-invalid.
+
+| Claim | Evidence |
+|---|---|
+| The body above, element for element and namespace for namespace | go-wsman `service.go` builds it as a string literal; its `service_test.go` asserts the whole thing byte for byte. MeshCentral's `amt.js` and `meshcmd.js` each build the identical template independently |
+| `ElementName` is **optional** in the template | go-wsman emits it only `if alarmClockOccurrence.ElementName != ""`; MeshCentral's `meshcmd.js` template omits it entirely while its `amt.js` one includes it. This collection always sends it — see §2.10.4 |
+| `Interval` may be **omitted** entirely | MeshCentral `amt.js`: `((interval!=undefined)? "<s:Interval>...</s:Interval>" : "")`. go-wsman always emits it. This collection always emits it, since "always present" is the shape both support |
+| `DeleteOnCompletion` renders `true`/`false` lowercase | go-wsman `strconv.FormatBool`; MeshCentral string-concatenates a JS boolean |
+| Output is `AlarmClock` (an EPR to the created instance) **before** `ReturnValue` | fixture `responses/amt/alarmclock/addalarm.xml`. Its `<b:Address>` is the literal string `default`, not a URL |
+
+**`AddAlarm`'s `ReturnValue` has no value table, and this collection does not invent
+one.** go-wsman's `amt/alarmclock/decoder.go` defines exactly one entry — `Success = 0` —
+so a non-zero return has no name in any source and is reported raw under
+`error_class: remote_operation`.
+
+Two conditions under which the method cannot succeed are nevertheless documented:
+
+| Condition | Evidence |
+|---|---|
+| **Five or more occurrences already exist** | go-wsman `service.go`, on `AddAlarm`: "The method would fail if 5 instances or more of `IPS_AlarmClockOccurrence` already exist in the system." `amt_alarm` pre-checks this and refuses with `invalid_state`, naming the limit and its source, because an opaque `ReturnValue` it could not name is worse than a client-side refusal it can explain |
+| **The `InstanceID` already exists** | Structural: it is the instance key. What firmware *returns* is unknown; that it cannot create a second instance under the same key is not |
+
+#### 2.10.4 Identity — `InstanceID` is caller-supplied, and `ElementName` tracks it
+
+This is what makes the whole feature converge rather than merely act.
+
+| Claim | Evidence |
+|---|---|
+| `InstanceID` is the instance key and is **set by the caller** | go-wsman `amt/alarmclock/types.go`, on the field: "InstanceID is the instance key, set by the caller of `AMT_AlarmClockService.AddAlarm`" |
+| `Delete` selects on `InstanceID` | go-wsman `ips/alarmclock/occurrence.go`: `message.Selector{Name: "InstanceID", Value: handle}`. MeshCentral `meshcmd.js`: `stack.Delete('IPS_AlarmClockOccurrence', { InstanceID: args.del })` |
+| One caller-supplied name serves as **both** `InstanceID` and `ElementName` | Intel's Console does it outright: `alarm.InstanceID = alarm.ElementName` (`internal/usecase/devices/alarms.go`). MeshCentral's meshcmd passes its `--add` argument as both (`alarm_name` for `id` and `nm`) |
+
+`amt_alarm` therefore has one `name` option, which becomes both fields, and matches
+existing alarms on **`InstanceID` only**.
+
+**Why not match on `ElementName`.** MeshCentral does, and gets away with it only because
+it sets the two equal. Its `performAmtWakeConfig1` scans `response[i]['ElementName']` to
+decide whether an alarm exists, then issues the `Delete` with an `InstanceID` selector —
+so an alarm whose two fields *differed* would be reported as present by that code and then
+not deleted. Matching on the key avoids constructing that resource in the first place.
+
+#### 2.10.5 Time zone and clock source — where the two authorities contradict
+
+**The wire format is a UTC-shaped RFC 3339 string.** What "UTC-shaped" means in practice
+is the problem, because the two implementations disagree:
+
+| Source | What it sends for a caller-supplied 23:59 |
+|---|---|
+| **go-wsman** | `alarmClockOccurrence.StartTime.UTC().Format(time.RFC3339Nano)` — a genuine conversion to UTC. Its test asserts `2022-12-31T23:59:00Z` |
+| **MeshCentral** | `meshcmd.js` builds `new Date(y, m-1, d, H, M, 0, 0)` from the user's arguments and formats it with **local** getters (`getFullYear`, `getHours`, …), then appends a **literal `Z`**. It sends local wall-clock time mislabelled as UTC |
+
+MeshCentral is at least self-consistent: its read path, `convertAmtDataStr`, strips the
+`Z` and constructs a local `Date`, so it round-trips its own alarms. That does not make
+the label true.
+
+**This collection follows go-wsman** — it is Intel's own library, it is the pinned
+authority for this document, and this is the same tie-break §2.8 already applies to the
+event log's timestamp rendering: prefer the source whose behaviour is a property of the
+*value* rather than of whoever happened to be reading it.
+
+**And because the disagreement exists, `amt_alarm` refuses to guess.** A `start_time`
+carrying no timezone is rejected with `invalid_state`; `Z` or an explicit offset is
+required. Either reading of a naive value would be wrong for one population of users by
+the controller's UTC offset, which is the single most likely defect in a feature like this.
+
+There is also a **third opinion: firmware's own clock**, and unlike the other two it can
+be read.
+
+| Claim | Evidence |
+|---|---|
+| `AMT_TimeSynchronizationService.GetLowAccuracyTimeSynch` returns `Ta0`, **Unix epoch seconds** | go-wsman `amt/timesynchronization/service.go` ("used for reading the Intel® AMT device's internal clock") and `types.go` (`Ta0 int64`). Fixture `responses/amt/timesynchronization/getlowaccuracytimesynch.xml` reports `1704586865`, which is 2024-01-07T00:21:05Z — a plausible capture date, which corroborates both the epoch and the units |
+| Same epoch and units as the `AMT_MessageLog` record timestamps of §2.8 | Both are Unix epoch seconds; `message_log.py`'s decoding basis is reused rather than reimplemented |
+| `Ta0` precedes `ReturnValue` in the output | that fixture |
+| `GetLowAccuracyTimeSynch` `ReturnValue` `ValueMap={0, 1}` = `PT_STATUS_SUCCESS`, `PT_STATUS_INTERNAL_ERROR` | go-wsman `service.go` doc comment. The fuller map in `decoder.go` (`0`, `1`, `36`, `38`) belongs to `SetHighAccuracyTimeSynch` and must not be applied to this method |
+
+**`TimeSource` is the property that makes the timezone question answerable per machine.**
+
+`AMT_TimeSynchronizationService.TimeSource` — go-wsman
+`amt/timesynchronization/decoder.go`, `TimeSource` const block + `timeSourceString`.
+2 values, 0–1 contiguous. The class comment on the property is *"Determines if RTC was set
+to UTC by any configuration SW"*.
+
+| Raw | Name | Reading |
+|---|---|---|
+| `0` | `bios_rtc` | Firmware is reading whatever the platform RTC holds. On a machine whose BIOS keeps **local** time, that is **not UTC** |
+| `1` | `configured` | Configuration software set the clock — and per the property's own comment, set it to UTC |
+
+The vendor's captured response reports `0`. So "AMT keeps UTC" is not a fact about AMT; it
+is a fact about how a given machine was set up, and `TimeSource` is how a caller finds
+out. `amt_alarm` reports it, with its raw integer, next to every result.
+
+`AMT_TimeSynchronizationService.LocalTimeSyncEnabled` — same file,
+`localTimeSyncEnabledString`. 3 values, 0–2 contiguous. Whether a caller holding
+`LOCAL_SYSTEM_REALM` may set the clock, i.e. whether the host OS can move firmware's clock
+underneath a scheduled alarm.
+
+| Raw | Name |
+|---|---|
+| `0` | `default_true` |
+| `1` | `configured_true` |
+| `2` | `false` |
+
+Note `0` and `1` both mean *enabled* and differ only in whether that is the default or was
+configured. Transcribed rather than collapsed to a boolean for that reason; the raw integer
+is authoritative, and an unrecognised value renders `unknown(<raw>)`.
+
+**Nothing here writes firmware's clock.** `SetHighAccuracyTimeSynch` exists and is
+deliberately not implemented: it writes to flash — go-wsman documents
+`PT_STATUS_FLASH_WRITE_LIMIT_EXCEEDED` (38) as one of its return values — and an alarm
+whose time had been silently adjusted for clock skew would be impossible to reason about.
+The skew is **reported, never corrected for**.
+
+#### 2.10.6 `Interval` — an ISO-8601 duration carrying whole minutes
+
+The wire value is `P<days>DT<hours>H<minutes>M`, with every field emitted even when zero:
+`P0DT0H0M` for a one-shot alarm, not the shorter-but-valid `P0D`.
+
+Both implementations model the underlying quantity as an **integer count of minutes** and
+derive the duration from it with identical arithmetic:
+
+```
+minutes = Interval % 60
+hours   = (Interval / 60) % 24
+days    = Interval / 1440
+```
+
+| Claim | Evidence |
+|---|---|
+| That arithmetic, and the `P…DT…H…M` output | go-wsman `service.go`. MeshCentral's meshcmd builds `'P' + d + 'DT' + h + 'H' + m + 'M'` from three user-supplied fields |
+| It encodes 2879 minutes as `P1DT23H59M` | go-wsman `service_test.go` asserts exactly that body. This is the case a transposition of the `%`/`/` pair would break, and it is what `tests/unit/plugins/module_utils/test_alarm.py` anchors on |
+| The read direction is minutes too | Console's `ParseInterval` converts the duration string back to `IntervalInMinutes` |
+| `Interval` `0` means "runs once" | go-wsman `types.go`: "Interval between occurrences of the alarm (0 if the alarm is scheduled to run once)" |
+
+`amt_alarm`'s option is therefore named **`interval_minutes`**, not `interval`. The unit is
+in the name deliberately: a bare `interval: 24` is ambiguous between hours and minutes in a
+way a wake-up time cannot afford. The encoded duration is reported in the receipt so the
+translation is visible.
+
+**Reading is deliberately more permissive than writing.** `alarm.decode_interval` accepts
+an omitted `D` or `T` group and a seconds field, because the shape firmware *emits* is not
+guaranteed to be the shape it *accepts*, and no captured response shows a populated interval
+at all. An unparseable duration decodes to `None`, **not `0`** — `0` means firmware reported
+a one-shot alarm and `None` means it reported something this collection could not read, and
+a convergence decision that conflated them would re-add a recurring alarm on every run. The
+raw string ships alongside either way.
+
+#### 2.10.7 Seconds must be `00`
+
+MeshCentral's meshcmd carries this comment against its own construction of the start time:
+
+> `// Not sure why, but month is 0 = JAN, 11 = DEC, seconds must be 00.`
+
+The month half is a JavaScript `Date` quirk. The seconds half is an **undocumented firmware
+constraint reported by prior art** and nothing else — no class definition, no fixture, and
+go-wsman does not truncate. It is honoured here (the wire value always ends `:00Z`) because
+the cost of honouring it is a truncated seconds field and the cost of ignoring it is an
+alarm firmware may reject. The value actually sent appears in the operation receipt, so the
+truncation is visible rather than silent.
+
+#### 2.10.8 What a past-dated alarm does — **not established**
+
+This is the question `amt_alarm` could not answer from any source available to this
+project, and it is recorded as unanswered rather than guessed at.
+
+What exists:
+
+- MeshCentral's meshcmd prints **"Verify the alarm is for a future time."** — twice, on
+  both a non-200 HTTP status and a non-zero `ReturnValue`. That is prior art's *belief*,
+  expressed as a hint in an error message. It is not a specification, it does not say which
+  of the two happens, and it does not distinguish "rejected" from "accepted and then
+  ignored".
+- go-wsman cannot say: its `AddAlarm` return-value map has one entry.
+- No captured response shows a rejection of any kind.
+- Intel's Console performs **no** client-side past-date check at all, so its behaviour
+  reveals nothing either.
+
+So the three candidate behaviours — **fires immediately**, **rejected**, **sits forever** —
+are all consistent with everything known, and one of them is an unscheduled reboot on a
+machine somebody left a stale playbook variable pointing at.
+
+`amt_alarm` therefore **refuses a past-dated alarm itself**, before sending, with
+`error_class: invalid_state`, and the message says the refusal is this collection's rather
+than firmware's — so an operator does not go hunting for a firmware setting to change. The
+comparison is made against **firmware's clock** where firmware will report one, because the
+machine that decides whether a time has passed is the machine holding the alarm; where it
+will not, the controller's clock is used and the refusal message says so.
+`allow_past_start_time: true` opts out for a caller who has reason to believe their firmware
+does what they want.
+
+Settling this needs hardware, and specifically needs a machine that is powered **off**,
+since "fires immediately" and "sits forever" are indistinguishable on a running one.
+
+#### 2.10.9 Why there is no hardware stage
+
+Two reasons, and the first is not solvable by patience:
+
+1. **Proving an alarm fires needs wall-clock time to pass.** The shortest honest test is
+   "set an alarm two minutes out, then poll" — the slowest stage in the suite by a wide
+   margin, and one whose failure mode (the alarm did not fire *yet*) is indistinguishable
+   from a real failure without waiting longer still.
+2. **It only means anything with the machine powered off**, which requires AMT to answer
+   WS-Man while reporting itself off. Stage 12 (`tests/hardware/qualify_wake_from_off.yml`)
+   established that on **`amt-lab-01` only**. A stage built on it would be a stage that can
+   only ever run on one machine, and a green result there would say nothing about the other.
+
+So the wire shape is covered by mock coverage driven through the real client
+(`tests/unit/mock_servers/test_wsman_server.py`'s `TestRealClientAlarmClock` and
+`TestRealClientFirmwareClock`) and end to end in the `amt_alarm` integration target,
+including the idempotence case. **Nothing about firmware's actual alarm behaviour is
+claimed by any of it.** `docs/capability-matrix.md` records `amt_alarm` accordingly.
+
+---
+
 ## 3. Redirection plane — session handshake
 
 All multi-byte integers in the redirection/IDE-R protocols are **little-endian**
@@ -1386,7 +1684,15 @@ excerpt (2 KB is enough). A timeout *after* sending a mutation must surface as
 
 - MeshCentral (Apache-2.0), Ylian Saint-Hilaire / Intel Corporation —
   `amt/amt-wsman.js`, `amt/amt.js`, `amt/amt-redir-mesh.js`,
-  `amt/amt-ider-module.js`, `agents/meshcmd.js`
+  `amt/amt-ider-module.js`, `agents/meshcmd.js`,
+  `agents/modules_meshcmd/amt.js` (§2.10)
+- `device-management-toolkit/go-wsman-messages` (Apache-2.0, Intel-authored), read at
+  tag **`v2.48.3`** — the authoritative source for value tables, method signatures and
+  captured firmware responses throughout §2.8, §2.9 and §2.10
+- `device-management-toolkit/console` (Apache-2.0, Intel-authored) —
+  `internal/usecase/devices/alarms.go`, `internal/entity/dto/v1/alarm.go` (§2.10). A
+  *consumer* of go-wsman rather than an independent wire implementation, so it
+  corroborates intent and never a byte layout
 - `parmstro/intel_amt` (GPL-3.0-or-later) — `plugins/module_utils/wsman.py`,
   the hardware-verified AMT 10.0.56 TLS findings in
   `development/research/AMT_10_TLS_LIMITATION.md`, and the AMT 10.0.56 property
