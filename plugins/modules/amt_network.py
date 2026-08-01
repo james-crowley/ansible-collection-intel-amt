@@ -63,7 +63,7 @@ description:
     machine needing a physical MEBx visit, so the pre-flight brief in
     C(tests/hardware/PREFLIGHT.md) exists for a human to decide from, and no stage is wired up.
     Mock coverage drives the real client end to end against the fixture WS-Man server.
-version_added: 0.8.0
+version_added: 1.1.0
 author:
   - Jim Crowley (@james-crowley)
 options:

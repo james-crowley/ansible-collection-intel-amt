@@ -479,7 +479,7 @@ about this.
 
 ### `amt_network` — Tier 2 only, and deliberately without a hardware stage
 
-`amt_network` (added 0.8.0, issue #111) is the collection's **first and only write
+`amt_network` (added 1.1.0, issue #111) is the collection's **first and only write
 path** to `AMT_EthernetPortSettings` and `AMT_GeneralSettings`. Everything about it
 is Tier 2. **Nothing in it has been exercised against real firmware, and no hardware
 stage is wired up** — this is the first mutating module in the collection for which
