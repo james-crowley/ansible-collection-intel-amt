@@ -56,10 +56,18 @@ def _set_module_args(args: dict) -> None:
     basic._ANSIBLE_PROFILE = "legacy"
 
 
+def _exit_json(*_args, **kwargs):
+    raise AnsibleExitJson(kwargs)
+
+
+def _fail_json(*_args, **kwargs):
+    raise AnsibleFailJson(kwargs)
+
+
 @pytest.fixture(autouse=True)
 def _patch_exit_and_fail(monkeypatch):
-    monkeypatch.setattr(basic.AnsibleModule, "exit_json", lambda *_a, **kw: (_ for _ in ()).throw(AnsibleExitJson(kw)))
-    monkeypatch.setattr(basic.AnsibleModule, "fail_json", lambda *_a, **kw: (_ for _ in ()).throw(AnsibleFailJson(kw)))
+    monkeypatch.setattr(basic.AnsibleModule, "exit_json", _exit_json)
+    monkeypatch.setattr(basic.AnsibleModule, "fail_json", _fail_json)
 
 
 def _ethernet(**overrides) -> dict:
@@ -186,7 +194,10 @@ class TestSuccessfulConvergence:
         client = _client([*_PLAN_READS, ("AMT_EthernetPortSettings", _ethernet(DefaultGateway="198.51.100.1"))])
         _set_module_args({**BASE_ARGS, "default_gateway": "198.51.100.1", "allow_self_disconnect": True})
         warnings: list[str] = []
-        record_warning = lambda _self, msg: warnings.append(msg)  # noqa: E731 -- one-line stub, a def here would read as a fixture
+
+        def record_warning(_self, message):
+            warnings.append(message)
+
         with patch.object(amt_network, "build_wsman_client", return_value=client), patch.object(basic.AnsibleModule, "warn", record_warning):
             with pytest.raises(AnsibleExitJson):
                 amt_network.main()

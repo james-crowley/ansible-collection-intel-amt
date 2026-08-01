@@ -574,7 +574,10 @@ This is the **host BIOS** version, not the AMT firmware version.
 - Any AMT time field. `parmstro`'s `amt_host_status` fabricates `amt_time` from the
   *controller's* own clock (`datetime.utcnow()`), which is not a fact about the endpoint
   at all. The real source would be `AMT_TimeSynchronizationService`, unverified.
-- Any write path to any class in this subsection.
+- ~~Any write path to any class in this subsection.~~ **Superseded by §2.10**, which
+  documents the `amt_network` write path for both classes. What that subsection does
+  *not* touch is listed under its own "Deliberately not written" heading, and the
+  reading in this subsection is unchanged.
 
 ### 2.8 Event log — `AMT_MessageLog`
 
@@ -998,6 +1001,243 @@ the class definitions and the fixtures:
 - Any write path to any class in this subsection. Several carry methods
   (`CIM_MediaAccessDevice.LockMedia`, `CIM_Processor.RequestStateChange`); all are out of
   scope for a read-only capability.
+
+---
+
+### 2.10 Network configuration — the **write** path (`amt_network`)
+
+§2.7 above ends with "Any write path to any class in this subsection" under
+*Deliberately not implemented*. That is no longer true, and this subsection is what
+replaced it. Everything §2.7 records about **reading** `AMT_EthernetPortSettings` and
+`AMT_GeneralSettings` still applies unchanged; what follows is only what the write
+direction adds.
+
+**Sources, and their standing.** Every field list, value and wire shape below comes
+from `device-management-toolkit/go-wsman-messages` **v2.48.3** — the pinned vendor
+reference implementation — with MeshCentral as corroborating prior art where it agrees
+and a recorded disagreement where it does not. No value here comes from `parmstro`'s
+notes: §2.7 records that their *constants and derived meanings* have now been wrong
+twice, and a wrong table on the write side does not merely misreport, it can strand a
+machine.
+
+#### The selector asymmetry is the vendor's, not ours
+
+```
+Put AMT_EthernetPortSettings   SelectorSet InstanceID = "Intel(r) AMT Ethernet Port Settings 0"   REQUIRED
+Put AMT_GeneralSettings        no SelectorSet at all
+```
+
+Both halves are evidenced, and they disagree with each other on purpose:
+
+- `pkg/wsman/amt/ethernetport/settings.go` **overrides** the generic
+  `WSManService.Put()` specifically to add the selector, with the comment *"each
+  instance must be addressed by an InstanceID selector, which the generic Put does not
+  provide"*. It calls `Base.Put(data, useHeaderSelector=true, selector)`.
+- `pkg/wsman/amt/general/` does **not** override it, so it uses the generic
+  `WSManService.Put()`, which calls `Base.Put(request, false, nil)` — and
+  `internal/message/base.go` emits no `<w:SelectorSet>` element when
+  `useHeaderSelector` is false.
+
+MeshCentral agrees on the general-settings half: `amtstack.Put('AMT_GeneralSettings',
+body, ...)` in both `amtmanager.js` and `agents/meshcmd.js` passes no selectors. This
+collection's own hardware-verified *read* of that class is also selector-less
+(`client.py`'s `_get_optional("AMT_GeneralSettings")`, populated on AMT 16.1.30 and
+19.0.5), so the write matches the read.
+
+The ethernet half is consistent with §2.7's `Enumerate`-is-HTTP-400 finding: an indexed
+`AMT_` class offers selective instance access only, and a `Put` addressed to an instance
+a `Get` would refuse is a `Put` to nothing.
+
+#### Read-only properties — derive the delete list from the request struct
+
+`Put` **replaces** the instance, so the body is a read-modify-write of a whole `Get`.
+The properties that must be stripped before sending it are the ones the vendor's
+*request* struct does not carry — not the ones a `Get` happens to return.
+
+`AMT_EthernetPortSettings`, by diffing `SettingsResponse` against `SettingsRequest` in
+`pkg/wsman/amt/ethernetport/types.go`:
+
+| Property | Vendor doc comment |
+|---|---|
+| `MACAddress` | "This property can only be read and can't be changed" |
+| `LinkControl` | "Additional Notes: This property is read-only" |
+| `SharedDynamicIP` | "This property is read only" |
+| `WLANLinkProtectionLevel` | "Read only property" |
+
+`AMT_GeneralSettings`, the same diff in `pkg/wsman/amt/general/types.go`:
+`NetworkInterfaceEnabled`, `DigestRealm`, `PrivacyLevel`, `PowerSource` — each annotated
+*"This is a read-only property"*.
+
+**MeshCentral disagrees in both directions, and the disagreements are informative
+rather than decisive.**
+
+- On the ethernet port it deletes a **superset**: `performAmtNetConfig1` in
+  `agents/meshcmd.js` also drops `SharedMAC`, `SharedStaticIp`, `LinkIsUp`,
+  `LinkPolicy` and `IpSyncEnabled`. The vendor request struct lists all five as
+  settable, and `LinkPolicy` is a property `amt_network` exists to write, so this is
+  read as "more deletion is tolerated" and not as evidence those five are read-only.
+- On general settings it deletes **nothing**: `amtmanager.js` and
+  `agents/meshcmd.js` both `Put` the entire `Get` body back including `DigestRealm`,
+  apparently successfully. So firmware tolerating a read-only property is prior art.
+
+Stripping is still what this collection does, on `boot.DELETE_BEFORE_PUT_FIELDS`'s
+reasoning: the cost of sending a read-only property is a `Put` some firmware generation
+rejects, and the cost of omitting one is nothing, because **none of the eight is
+documented as required for the Put**.
+
+#### Properties that *are* required for the Put
+
+Three, each annotated verbatim in the vendor class definitions:
+
+| Class | Property | Annotation |
+|---|---|---|
+| `AMT_EthernetPortSettings` | `DHCPEnabled` | "'DHCPEnabled' is a required field for the Put command" |
+| `AMT_GeneralSettings` | `PingResponseEnabled` | "'PingResponseEnabled' is a required field for the Put command" |
+| `AMT_GeneralSettings` | `WsmanOnlyMode` | "'WsmanOnlyMode' is a required field for the Put command" |
+
+A read-modify-write supplies all three from the preceding `Get` for free. They are
+nonetheless *asserted* present in `network.build_{ethernet,general}_put_properties`
+rather than assumed, because `WsmanOnlyMode` in particular is a property this collection
+never sets and only ever passes through — a future edit to the delete list could start
+omitting it silently.
+
+Note in passing that `GeneralSettingsRequest` marks `PingResponseEnabled` `omitempty` in
+Go, which means a `false` is **dropped** by that library's own marshaller. So
+go-wsman-messages cannot write `PingResponseEnabled: false` through its own request
+struct at all, despite the property being required for the Put. This collection builds
+the body itself and always emits the booleans, which is why `amt_network` can turn ping
+response off.
+
+#### `DHCPEnabled=true` and static addressing are mutually exclusive in one body
+
+When the *resulting* configuration is DHCP, these five must be **absent** from the body:
+
+```
+IPAddress, SubnetMask, DefaultGateway, PrimaryDNS, SecondaryDNS
+```
+
+Two sources, agreeing:
+
+- `pkg/wsman/amt/ethernetport/types.go` on `IPAddress`: *"Get operation - reports the
+  acquired IP address (whether in static or DHCP mode). Put operation - sets the IP
+  address (**in static mode only**)"*.
+- `agents/meshcmd.js`, immediately before its `Put`:
+  `if (x['DHCPEnabled'] == true) { delete x['IPAddress']; delete x['DefaultGateway'];
+  delete x['PrimaryDNS']; delete x['SecondaryDNS']; delete x['SubnetMask']; }`.
+
+This matters specifically for a read-modify-write. A `Get` on a static endpoint returns
+all five populated, so flipping one boolean and echoing the rest back asks firmware to
+reconcile a contradiction. **The drop must be decided from the value being written, not
+the one that was read** — deciding it before the merge strips the very address a
+switch *to* static is setting.
+
+What firmware actually does with the contradiction is **not** established. MeshCmd's
+deletion establishes that its authors thought it mattered; it is not an observation of a
+rejection. The mock therefore models the rejection behind an opt-in knob
+(`FaultConfig.reject_static_addressing_with_dhcp`, default off) rather than
+unconditionally.
+
+#### `LinkPolicy` on the write side — re-derived, and it agrees with the read table
+
+The read table is in §2.7 and had to be corrected once already (0.2.0/0.3.0 shipped a
+table wrong in three of five entries, which inverted `wake_on_lan_capable`). The write
+values were therefore **re-derived from the vendor source rather than reused from that
+table on trust**, because a wrong write table can make an endpoint unreachable while
+powered off.
+
+The derivation, in full:
+
+1. `pkg/wsman/amt/ethernetport/types.go` declares `SettingsRequest.LinkPolicy` as
+   `[]LinkPolicy` — the **same Go type** as `SettingsResponse.LinkPolicy`. There is no
+   separate write-side enum.
+2. That `LinkPolicy` type carries one schema annotation, used by both directions:
+   `ValueMap={1, 14, 16, 224}` /
+   `Values={available on S0 AC, available on Sx AC, available on S0 DC, available on Sx DC}`.
+3. `pkg/wsman/amt/ethernetport/decoder.go` defines exactly four constants against it:
+   `LinkPolicyS0AC = 1`, `LinkPolicySxAC = 14`, `LinkPolicyS0DC = 16`,
+   `LinkPolicySxDC = 224`.
+
+| Value | Go constant | Meaning | Write name |
+|---|---|---|---|
+| 1 | `LinkPolicyS0AC` | available on S0 AC — host powered on, mains | `s0_ac` |
+| 14 | `LinkPolicySxAC` | available on Sx AC — host asleep/hibernating/off, mains | `sx_ac` |
+| 16 | `LinkPolicyS0DC` | available on S0 DC — host powered on, battery | `s0_dc` |
+| 224 | `LinkPolicySxDC` | available on Sx DC — host asleep/hibernating/off, battery | `sx_dc` |
+
+**Conclusion: the read table and the write table agree, in all four entries.** That was
+not assumed; it is the outcome of the derivation above, and it is the case precisely
+because the vendor has one type and one ValueMap for both directions. The write names in
+`network.LINK_POLICY_WRITE_VALUES` are bound to the read-side constants in `models.py`
+so the two cannot drift apart numerically, and the unit test asserts the **literal
+integers** (`{"s0_ac": 1, "sx_ac": 14, "s0_dc": 16, "sx_dc": 224}`) rather than the
+constants — asserting the constants would pass for any table at all, including the
+inverted one.
+
+**Wire shape: repeated plain elements, no wrapper.** Settled by the recorded firmware
+response `pkg/wsman/wsmantesting/responses/amt/ethernetport/put.xml`, which carries three
+consecutive `<g:LinkPolicy>` elements, and by that library's own Put-request assertion in
+`pkg/wsman/amt/ethernetport/settings_test.go`, which renders the same shape from a
+`[]LinkPolicy`. §2.7 records the read side as unsettled between this and `parmstro`'s
+`<PolicyValue>`-wrapper reading; the *write* side has direct fixture evidence and no
+competing candidate.
+
+This required a fix to `wsman._append_params`, which stringified a Python list to its
+`repr` — a CIM array would have gone on the wire as
+`<LinkPolicy>[1, 14, 224]</LinkPolicy>`. Nothing had surfaced it because no `Put` in this
+collection sent an array property before: `boot.DELETE_BEFORE_PUT_FIELDS` drops both of
+`AMT_BootSettingData`'s array fields (`BIOSLastStatus`, `UefiBootParametersArray`). An
+**empty** array now emits no element at all, which is the only rendering that follows
+from "one element per value"; what firmware does with an absent array property is
+unestablished, so `network.plan_network_change` refuses an empty `link_policy` rather
+than letting a caller reach it.
+
+**Why an Sx value is load-bearing.** §2.7 already records it for the read side: an
+endpoint whose `LinkPolicy` carries neither `14` nor `224` keeps its link up only while
+the host is in S0, and stops answering WS-Man once it sleeps or powers down. On the write
+side that becomes an operation an operator can perform and **cannot undo remotely** —
+`amt_power state=on` can no longer reach the endpoint to bring it back. Hence
+`amt_network`'s separate `allow_wake_capability_loss` acknowledgement, distinct from the
+`allow_self_disconnect` one that guards this connection's own addressing.
+
+#### `AMT_EthernetPortSettings` instance 0 *is* the connection you arrived on
+
+Not a protocol fact so much as a consequence of one, and it is the fact the whole module
+is shaped around. §2.7: instance 0 is the wired port AMT answers on. So a write to its
+addressing is a write to the path carrying the request, and a `Put` that succeeds may
+make its own confirmation unobtainable. `amt_network` refuses such a change without an
+explicit acknowledgement, and reports `indeterminate: true` (§6's vocabulary — *re-probe,
+do not retry*) when a write was issued and no confirming read could be obtained. A `Put`
+that firmware answered `200` and did not honour is a *different* finding, reported as
+`unsupported_capability`, following the rule issue #69 established for `amt_media`: a
+definite refusal is `unsupported_capability`, an absent verdict is `timeout`.
+
+#### Deliberately not written
+
+- `LinkPreference` and the `SetLinkPreference` method
+  (`pkg/wsman/amt/ethernetport/settings.go`). Both are real and documented
+  (`ValueMap={1, 2, 3..}` / `Values={ME, HOST, Reserved}`), and the method takes a
+  `Timeout` whose units and expiry semantics nothing available documents. Handing the
+  link to the host OS is also a plausible way to lose the management plane, and nothing
+  in the motivating use case needs it.
+- `AMT_GeneralSettings.AMTNetworkEnabled`. The class definition is explicit that this is
+  a one-way door: *"When set to Disabled, the AMT OOB network interfaces (LAN and WLAN)
+  are disabled ... Since OOB networking is disabled, **there will not be an option to
+  enable it back remotely**"*. No acknowledgement flag makes that a reasonable thing for
+  a module to offer.
+- `WsmanOnlyMode`. Passed through because the Put requires it; never set. Blocking every
+  non-WS-Man interface is a security posture decision with no way back if the WS-Man path
+  is then lost.
+- `IpSyncEnabled`. Writable per the vendor request struct, and deliberately not exposed:
+  §2.7 records `parmstro`'s collection writing it from an option named
+  `ping_response_enabled`, and adding an option for it would invite exactly that
+  confusion back. It remains reported by `amt_info`.
+- `VLANTag`, `ConsoleTcpMaxRetransmissions`, `PhysicalConnectionType`,
+  `PhysicalNicMedium`, and the DDNS/`SharedFQDN`/`HostOSFQDN`/`ThunderboltDockEnabled`
+  family on `AMT_GeneralSettings`. All settable per the request structs; none is needed
+  by the motivating use case, and each would be another option surface with no test
+  hardware behind it. `PhysicalConnectionType`/`PhysicalNicMedium` are additionally
+  AMT 15.0+ only.
+- IPv6. `IPS_IPv6PortSettings` is the class and this collection has never read it.
 
 ---
 

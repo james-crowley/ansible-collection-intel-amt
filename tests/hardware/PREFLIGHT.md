@@ -4,7 +4,7 @@ GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/lic
 SPDX-License-Identifier: GPL-3.0-or-later
 -->
 
-# Pre-flight briefs: stages 10-12
+# Pre-flight briefs: stages 10-12, plus one proposed stage that does not exist
 
 Read the relevant section below **before clicking approve** on
 `hardware-log-clear-approval`, `hardware-sleep-hibernate-approval`, or
@@ -16,6 +16,13 @@ way it is (see the corresponding playbook's own header comment for that, and
 
 If you are running one of these three playbooks by hand instead of through
 CI, everything below still applies -- "the approver" just means you.
+
+**The last section is different in kind from the other three.** `amt_network`
+has **no playbook, no stage, and no approval job**. Its brief is here so that a
+human has what they need in order to decide whether one should ever exist --
+which is a decision this collection has deliberately not made on their behalf.
+Nothing in `.circleci/config.yml` refers to it. Read that section as a
+proposal, not as instructions for a run you are about to approve.
 
 ---
 
@@ -286,3 +293,170 @@ the first place -- is also the one thing that makes "did the wake actually
 work" a real question rather than a foregone conclusion. This is the last
 stage in the chain specifically because it carries this stage's own,
 previously-untested risk on top of everything proven by stages 1-11.
+
+---
+
+## `amt_network` — **PROPOSED, NOT IMPLEMENTED** (no stage, no playbook, no approval job)
+
+**There is nothing to approve here.** No `qualify_network.yml` exists, no
+`hardware-network-approval` job exists, and `amt_network` is not reachable from
+any hardware stage. This brief exists so that whoever eventually considers
+adding one has the risk written down in the same shape as the three real briefs
+above, rather than having to reconstruct it.
+
+`amt_network` is currently **mock-tested only** (Tier 2 in
+[`../../docs/capability-matrix.md`](../../docs/capability-matrix.md) terms). Its
+own documentation says so, and says why: see
+[`../../docs/amt_network.md`](../../docs/amt_network.md).
+
+### Why this one was held back when stages 10-12 were not
+
+Every existing stage's worst case is recoverable **at the machine**, with a
+power button, a KVM console, or in the worst case an AC unplug. Stage 12's brief
+says exactly that: "the risk here is entirely availability: a machine that ends
+up powered off and requiring a physical hand to bring it back."
+
+A bad network write is not that. If the AMT management interface ends up with an
+address, mask, gateway or link policy that does not work on the lab network,
+**AMT is no longer reachable at all, and nothing you can do over the network
+fixes it.** Recovery requires MEBx -- `Ctrl+P` at boot, on a keyboard and a
+monitor physically attached to that machine -- and MEBx requires the MEBx
+password, which is a separate credential from the AMT admin password these
+playbooks use. That is a materially higher bar than "walk over and press the
+power button", and it is the reason this is a proposal rather than a stage.
+
+The wake-capability case is worse still in one specific way: a `LinkPolicy` with
+no Sx value leaves the endpoint reachable **right now** and unreachable the next
+time the host sleeps or powers down. So a stage could pass, be signed off, and
+strand the machine hours later.
+
+### What a stage would do
+
+Sketched, not written. Against one machine that must already be reporting `on`
+and reachable:
+
+1. Read the full current state (`amt_info`), and **write it to disk before
+   anything else happens** -- the same archive-first discipline stage 10 uses
+   for the event log. This file is the only record of what to restore to, and
+   unlike an event log it cannot be re-read afterwards if the write goes wrong.
+2. Assert the recorded state is complete: `amt.network.ip_address`,
+   `subnet_mask`, `default_gateway`, `dhcp_enabled` and `link_policy` all
+   non-null. Refuse to continue otherwise. A restore built from a partial
+   reading is worse than no restore.
+3. Run the **ungated** changes only: `ping_response_enabled`,
+   `rmcp_ping_response_enabled`, `hostname`, `domain_name`. None of these can
+   affect reachability. Confirm each, then restore each.
+4. Run a **check-mode** addressing plan (`allow_self_disconnect: true`,
+   `check_mode: true`) and record the exact `Put` body it would send. This is
+   the highest-value, zero-risk observation available: it proves the
+   read-modify-write body this collection builds is the shape real firmware
+   returned, without writing anything.
+5. Optionally, and behind its own separate approval: a `link_policy` write that
+   **adds** `sx_dc` while keeping `sx_ac`, then restores. Additive and
+   wake-preserving, so it cannot lose reachability in any host power state.
+6. **Stop there.** An actual addressing write (steps that set `ip_address` or
+   `dhcp_enabled`) should be a separate stage again, approved separately, on a
+   machine someone is physically sitting at.
+
+Steps 1-4 are worth doing and carry roughly the risk of stage 1. Step 5 is a
+real but bounded risk. Step 6 is the one this brief exists to make someone think
+twice about.
+
+### What it is looking for
+
+Three things, none of which any mock can settle:
+
+- **Does firmware accept the `Put` body this collection builds?** The read-only
+  properties it strips (`MACAddress`, `LinkControl`, `SharedDynamicIP`,
+  `WLANLinkProtectionLevel`) come from the vendor's *request struct*, which says
+  those properties are not settable and says nothing about what firmware does if
+  you send them anyway. MeshCentral sends `AMT_GeneralSettings`' read-only
+  properties back and apparently succeeds. So "does a stripped body work, and
+  does an unstripped one fail" is genuinely open, and the mock models the
+  rejection behind a default-off knob for exactly that reason.
+- **Does `PingResponseEnabled: false` take?** The vendor library marks that
+  property `omitempty`, so it cannot write `false` through its own request
+  struct at all. This collection emits the boolean explicitly. Whether firmware
+  honours it is unmeasured.
+- **Is a `LinkPolicy` write honoured at all, and does the `Get` afterwards
+  report what was written?** Both lab machines report `[1, 14]`. Nothing has
+  ever attempted to change it.
+
+### Expected outcome on a healthy machine
+
+Steps 1-4 complete with `changed: true` for each ungated write, `changed: false`
+on an immediate repeat (idempotence), and a check-mode plan whose
+`operation.desired.AMT_EthernetPortSettings` contains `DHCPEnabled` and none of
+`MACAddress`/`LinkControl`/`SharedDynamicIP`/`WLANLinkProtectionLevel`. Step 5
+reports `wake_capability_loss: false` and a `link_policy` of `[1, 14, 224]`,
+then restores to `[1, 14]`.
+
+### Failure modes
+
+| Failure | What it means | Machine left in |
+|---|---|---|
+| The pre-write state read is incomplete (step 2 refuses) | Nothing has been written and nothing is at risk. Investigate the read before considering a write. | Untouched. |
+| A `Put` is refused with `error_class=protocol` and a SOAP fault | Firmware rejected the body. **A real and useful finding** -- it means the delete list is wrong for this generation, in one direction or the other. The fault reason arrives in `diagnostic`. | Untouched: the refused property was not applied. |
+| `error_class=unsupported_capability` after a `Put` | Firmware answered HTTP 200 and did not honour the property. Also a real finding, and the reason the confirming re-read exists. | Untouched in effect, though firmware accepted the request. |
+| An ungated write applies and the restore then fails | Ping response or the hostname is left at a test value. Cosmetic and remotely fixable -- rerun the restore. | Reachable. Low consequence. |
+| `indeterminate: true` on an **ungated** write | Should not happen: nothing in steps 3-5 changes addressing. If it does, something else took the connection down and the state of that write is unknown. | Unknown. Re-probe with `amt_info` at the same address before doing anything else. |
+| `indeterminate: true` on a step-6 addressing write | The endpoint stopped answering at the old address. **This is what a successful address change looks like** -- and also what a failed one looks like. The two are indistinguishable from here. | **Reachable at the new address, or not reachable at all.** See Recovery. |
+| A `link_policy` write lands with no Sx value | The endpoint answers now and will stop answering the next time the host leaves S0. `amt_network` refuses this without `allow_wake_capability_loss: true`, so reaching it requires having asked for it. | Reachable while on; **unreachable once asleep or off, permanently, until MEBx**. |
+
+### Recovery
+
+In escalating order of how much it costs:
+
+1. **`amt_info` at the address you expected.** For an `indeterminate` addressing
+   write this is the first and usually the only step needed:
+   `amt_network`'s failure message names it. Retry with `until`/`retries` --
+   firmware can take several seconds to answer on a new address.
+2. **`amt_info` at the *old* address.** If the write did not take, the endpoint
+   is still there. This is the other half of the "indistinguishable" problem
+   above, and checking both is how you tell them apart.
+3. **Scan the subnet for the AMT MAC.** The MAC does not change when the address
+   does -- it is read-only and this module cannot write it -- so `arp`/`nmap`
+   against the management VLAN will find the endpoint even if it landed on a
+   DHCP address nobody predicted. Both lab machines' MACs are in the inventory.
+4. **Restore from the step-1 archive.** Once the endpoint is reachable at *any*
+   address, run `amt_network` with the recorded values and
+   `allow_self_disconnect: true`. Expect another `indeterminate` on the way
+   back.
+5. **MEBx.** `Ctrl+P` at boot, on a keyboard and monitor physically attached.
+   This needs the **MEBx password**, not the AMT admin password. Confirm you
+   have it *before* approving any stage that could get you here. Under
+   `Intel(R) AMT Configuration` -> `Network Setup` -> `TCP/IP Settings` ->
+   `Wired LAN IPV4 Configuration` you can set DHCP or a static address by hand.
+   `ME ON in Host Sleep States` under `Power Control` is the adjacent setting
+   for the wake case -- note it governs whether the **ME** is powered, which is
+   related to but not the same field as `LinkPolicy`, so it may not by itself
+   undo a bad link policy.
+6. **Full unprovision and re-provision.** If MEBx cannot be reached or the
+   password is unknown, the endpoint has to be unprovisioned and set up again,
+   which means re-recording its TLS fingerprint and updating the inventory --
+   this collection pins per machine, so an unprovision invalidates the pin.
+
+### Blast radius
+
+Nothing is destroyed and no data is lost -- the same as stages 11 and 12. The
+difference is **what recovery costs**, and it is the whole reason this section
+is a proposal:
+
+- Stage 11 and 12's worst case is a machine that needs someone to press a power
+  button.
+- This one's worst case is a machine that needs someone at a keyboard, in MEBx,
+  with a credential the playbooks do not use, potentially followed by a full
+  re-provision and a new TLS fingerprint in the inventory.
+
+The host operating system, its disks and its data are not touched in any
+scenario. Only the manageability plane is at risk -- but the manageability plane
+is the thing every other stage depends on, so stranding it takes the entire
+hardware qualification chain with it until someone visits the machine.
+
+**One further consideration for whoever decides.** Both lab machines are on the
+same management network and are reached by address from
+`tests/hardware/inventory.yml`. A stage that changed an address would have to
+update that inventory, or every subsequent stage in the same pipeline would
+target an endpoint that no longer exists. That is not a hazard to the hardware,
+but it is a good reason for any addressing stage to be the **last** thing in a
+pipeline, the way stage 12 already is, and to run against one machine at a time.

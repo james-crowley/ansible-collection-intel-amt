@@ -161,8 +161,8 @@ the two wrong tables noted above.
 
 This is the bulk of the collection's verification effort:
 
-- **1893 unit tests** (collected via `pytest` against the staged collection tree on
-  2026-07-30; the number drifts as tests are added, so treat it as a point
+- **2039 unit tests** (collected via `pytest` against the staged collection tree on
+  2026-08-01; the number drifts as tests are added, so treat it as a point
   measurement, not a promise) across `tests/unit/plugins/module_utils/`, `tests/unit/plugins/modules/`
   and `tests/unit/mock_servers/`, covering error classification/redaction, TLS trust
   policy, the WS-Man envelope/SOAP layer, the boot five-step sequence, the redirection
@@ -178,9 +178,9 @@ This is the bulk of the collection's verification effort:
   were the two highest-consequence ones. `media_session.py` (the detached daemon that
   holds credentials across a fork) was **50%** and is now **81%**; `ider.py` (the SCSI
   state machine) was **75%** and is now **92%**.
-- **9/9 integration targets** (`amt_baremetal_install_role`, `amt_boot`,
+- **10/10 integration targets** (`amt_baremetal_install_role`, `amt_boot`,
   `amt_event_log`, `amt_info`, `amt_info_hardware`, `amt_log_clear`, `amt_media`,
-  `amt_power`, `amt_redirection` under `tests/integration/targets/`) run end-to-end against local,
+  `amt_network`, `amt_power`, `amt_redirection` under `tests/integration/targets/`) run end-to-end against local,
   deterministic fixture servers: a mock WS-Man server (HTTP Digest, TLS with a
   generated self-signed certificate, canned per-resource-URI responses, fault
   injection for AMT error codes/malformed SOAP/401/timeouts) and a mock IDE-R server
@@ -474,6 +474,112 @@ exercises. What it cannot buy, by construction, is confidence that this collecti
 understanding of the protocol matches what a specific piece of real firmware does —
 see `docs/testing.md`'s "What CI does not prove" section, which is deliberately blunt
 about this.
+
+---
+
+### `amt_network` — Tier 2 only, and deliberately without a hardware stage
+
+`amt_network` (added 0.8.0, issue #111) is the collection's **first and only write
+path** to `AMT_EthernetPortSettings` and `AMT_GeneralSettings`. Everything about it
+is Tier 2. **Nothing in it has been exercised against real firmware, and no hardware
+stage is wired up** — this is the first mutating module in the collection for which
+that is a deliberate refusal rather than a backlog item.
+
+**Why there is no stage.** Every existing hardware stage's worst case is recoverable
+at the machine with a power button, a KVM console, or an AC unplug — stage 12's
+pre-flight brief says exactly that. A bad network write is not that: an AMT interface
+left with an address, mask, gateway or link policy that does not work on the lab
+network is unreachable over the network **entirely**, and recovery requires MEBx
+(`Ctrl+P` at boot, physical keyboard and monitor) with the **MEBx password**, which is
+a different credential from the AMT admin password the playbooks use. A wrong
+`LinkPolicy` is worse in one specific way: a stage could pass, be signed off, and
+strand the machine hours later, the next time the host sleeps. The full brief — what a
+stage would do, what it would look for, failure modes with machine state, six
+escalating recovery steps, blast radius — is in
+[`../tests/hardware/PREFLIGHT.md`](../tests/hardware/PREFLIGHT.md), written so a human
+can decide later. It is explicitly labelled as a proposal, and nothing in
+`.circleci/config.yml` refers to it.
+
+**What *is* Tier 1 here** — verified against an authoritative source, and worth
+separating out because the module's whole risk profile turns on it:
+
+- **The `LinkPolicy` write values.** `go-wsman-messages` v2.48.3,
+  `pkg/wsman/amt/ethernetport/{types,decoder}.go`. Re-derived from the vendor source
+  rather than reused from this collection's corrected *read* table on trust,
+  because a wrong table on the write side does not merely misreport — it can strand a
+  machine. The derivation and its conclusion are in
+  [`protocol-notes.md`](protocol-notes.md) §2.10: `SettingsRequest.LinkPolicy` and
+  `SettingsResponse.LinkPolicy` are the **same Go type** with one
+  `ValueMap={1, 14, 16, 224}` annotation and one set of four constants, so **the read
+  and write tables agree in all four entries.** That is a result, not an assumption.
+  The unit test asserts the literal integers rather than the constants they are built
+  from — asserting the constants would pass for any table at all, including the
+  inverted one this collection shipped in 0.2.0/0.3.0 (see the correction at the end
+  of Tier 1).
+- **The read-only property lists** (`MACAddress`, `LinkControl`, `SharedDynamicIP`,
+  `WLANLinkProtectionLevel`; `NetworkInterfaceEnabled`, `DigestRealm`, `PrivacyLevel`,
+  `PowerSource`), derived by diffing the vendor's response struct against its request
+  struct, each corroborated by that property's own "read-only" doc comment.
+- **The three properties required for the `Put`** (`DHCPEnabled`,
+  `PingResponseEnabled`, `WsmanOnlyMode`), each annotated verbatim in the vendor class
+  definitions.
+- **The `Put` selector asymmetry** — `AMT_EthernetPortSettings` requires an
+  `InstanceID` selector, `AMT_GeneralSettings` takes none — from the vendor library's
+  own code paths, corroborated by MeshCentral for the general-settings half.
+- **The array wire shape** (repeated plain elements, no wrapper), from the recorded
+  firmware response `responses/amt/ethernetport/put.xml`.
+
+**What is genuinely unestablished, and is marked as such rather than guessed:**
+
+- **Whether firmware rejects a `Put` that carries a read-only property.** The vendor
+  schema says those properties are not settable; it says nothing about what happens if
+  you send them. MeshCentral sends `AMT_GeneralSettings`' read-only properties back
+  and apparently succeeds. So the mock models the rejection behind **default-off**
+  knobs (`reject_ethernet_readonly_properties`,
+  `reject_general_readonly_properties`) rather than unconditionally — unlike the
+  `AMT_BootSettingData` delete list, whose rejection is hardware-observed
+  (`protocol-notes.md` §2.5) and whose knob is therefore default-on. Both new knobs
+  *are* exercised, in the mock's own unit tests through the real client and in the
+  integration target, which is the standard issue #92 set.
+- **Whether firmware rejects `DHCPEnabled=true` alongside static addressing.** MeshCmd
+  deletes those five properties before its own DHCP switch, which establishes that its
+  authors thought it mattered, not that firmware faults. Also a default-off knob.
+- **Whether `PingResponseEnabled: false` takes.** The vendor library marks that field
+  `omitempty`, so it cannot write `false` through its own request struct at all. This
+  collection builds the body itself and always emits the boolean. Unmeasured on
+  firmware.
+- **Whether a `LinkPolicy` write is honoured, and reads back as written.** Both lab
+  machines report `[1, 14]`; nothing has ever attempted to change it.
+
+**What mock coverage does buy here**, and it is more than usual, because the mock was
+extended specifically to be able to disagree with the client:
+
+- Both classes became **mutable instances** in the fixture server, so a `Put` is
+  observable by a later `Get` rather than being answered from a literal.
+- A **strict** server configuration faults an unlawful `Put` (read-only property, or
+  the DHCP contradiction) and can **silently discard** an otherwise-valid one — HTTP
+  200 with no effect, which is the one firmware behaviour no transport-level check can
+  catch and the entire reason `amt_network` re-reads after writing. The integration
+  target runs against both a permissive and a strict server for exactly that contrast.
+- The safety refusals (`allow_self_disconnect`, `allow_wake_capability_loss`) are each
+  tested in both directions — refused without the acknowledgement, permitted with it —
+  and each refusal is paired with a re-read proving the refused call mutated nothing.
+  A gate that refuses everything is as broken as one that refuses nothing.
+- `indeterminate: true` on an unobtainable confirmation, and
+  `unsupported_capability` on a confirmation that reports the old value, are tested as
+  **failures** rather than as successes with a caveat.
+
+**Mutation-tested, 2026-08-01.** 43 mutations against the unit suite and 8 against the
+integration target — the `LinkPolicy` inversion, each gate removed, each delete list
+emptied, the confirming re-read removed, `indeterminate` forced false, the unapplied
+detection removed, each new mock knob made inert, the array emission reverted, the
+check-mode bypass, and the `no_log` flip. **All 51 produced a red run**, and the
+restored baseline is green. One gap was found this way and closed: the empty-`link_policy`
+refusal existed with no test that could fail for it.
+
+That is the strongest statement available about this module, and it is still Tier 2. It
+says the implementation is self-consistent and matches a vendor-cited reading of the
+protocol. It does not say a single byte of it has ever reached Intel firmware.
 
 ---
 

@@ -22,5 +22,6 @@ action_groups:
     - amt_info
     - amt_log_clear
     - amt_media
+    - amt_network
     - amt_power
     - amt_redirection

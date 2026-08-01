@@ -322,8 +322,9 @@ ansible-galaxy collection install git+https://github.com/james-crowley/ansible-c
 | `amt_media` | Attach boot media over IDE-R (bootable ISO + writable image) | Yes |
 | `amt_event_log` | Read the firmware event log — why an unattended install failed | No |
 | `amt_log_clear` | Clear the firmware event log (irreversible; needs confirmation) | Yes |
+| `amt_network` | Set IPv4 addressing, DHCP mode, ping response, hostname/domain and `LinkPolicy` | Yes |
 
-All seven accept the same connection options, documented once in the
+All eight accept the same connection options, documented once in the
 `connection` doc fragment. Set them centrally with `module_defaults`:
 
 ```yaml
@@ -472,14 +473,23 @@ Nothing above is lab-specific. Point the variables at any AMT machine.
 | `amt_boot` `mode=once` | yes | new action token arms one reset | reports plan |
 | `amt_redirection` inspect | yes | always `false` | full read |
 | `amt_redirection` mutate | yes | effective config differs | reports plan |
+| `amt_network` | yes | any requested property differs | reports the exact `Put` bodies |
 
 Two rules the whole design depends on:
 
 - **An uncertain mutation is never retried automatically.** A timeout *after* a
   request was transmitted returns `indeterminate`, so the caller re-probes
-  instead of re-issuing a reset that may already have happened.
+  instead of re-issuing a reset that may already have happened. `amt_network`
+  extends this to a write whose *confirmation* could not be obtained, which is
+  the ordinary outcome of changing the address you are connected through.
 - **One-shot boot is never silently re-armed.** Re-arming takes a new explicit
   action token.
+- **A change that can cost you the endpoint is refused, not warned about.**
+  `amt_network` will not change the management interface's addressing without
+  `allow_self_disconnect: true`, and will not drop the last `LinkPolicy` Sx
+  value -- which stops the endpoint answering once the host sleeps -- without
+  `allow_wake_capability_loss: true`. Both refusals also fire in check mode, so
+  a dry run cannot bless a dangerous write.
 
 ## Error handling
 
@@ -547,7 +557,8 @@ one-time account/secret steps a maintainer needs.
 - [`docs/amt_info.md`](docs/amt_info.md), [`docs/amt_power.md`](docs/amt_power.md),
   [`docs/amt_boot.md`](docs/amt_boot.md), [`docs/amt_redirection.md`](docs/amt_redirection.md),
   [`docs/amt_media.md`](docs/amt_media.md), [`docs/amt_event_log.md`](docs/amt_event_log.md),
-  [`docs/amt_log_clear.md`](docs/amt_log_clear.md) — per-module reference: options, return
+  [`docs/amt_log_clear.md`](docs/amt_log_clear.md),
+  [`docs/amt_network.md`](docs/amt_network.md) — per-module reference: options, return
   values, examples, errors, and limitations.
 - [`docs/capability-matrix.md`](docs/capability-matrix.md) — exactly what is verified
   against real firmware evidence, what is only mock-tested, and what open risks are

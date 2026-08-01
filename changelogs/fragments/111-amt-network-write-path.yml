@@ -1,0 +1,169 @@
+---
+minor_changes:
+  - >-
+    New module C(amt_network) - configure Intel AMT network settings rather than only
+    reporting them. Writes C(AMT_EthernetPortSettings) instance 0 (O(dhcp_enabled),
+    O(ip_address), O(subnet_mask), O(default_gateway), O(primary_dns), O(secondary_dns),
+    O(link_policy)) and C(AMT_GeneralSettings) (O(ping_response_enabled),
+    O(rmcp_ping_response_enabled), O(hostname), O(domain_name)). Every option defaults to
+    "leave this alone" -- no defaults at all -- so a task that sets a hostname cannot
+    accidentally assert an addressing mode. C(amt_info) already reported all of these and
+    is unchanged; this is the write counterpart to it (issue #111).
+  - >-
+    C(amt_network) - B(an addressing change is refused, not warned about.) A change to
+    O(dhcp_enabled), O(ip_address), O(subnet_mask) or O(default_gateway) fails with
+    RV(ignore:error_class) V(invalid_state) unless O(allow_self_disconnect=true).
+    C(AMT_EthernetPortSettings) instance 0 is by definition the wired port AMT answers
+    WS-Man on, so changing its addressing changes the path carrying the request -- the
+    module is sawing the branch it is sitting on. This is the stance C(amt_media) takes on
+    C(ca_path): refuse an option that cannot be honoured safely rather than accept it and
+    quietly not deliver what the operator believes they asked for. O(primary_dns) and
+    O(secondary_dns) are deliberately B(not) gated -- those configure the endpoint's own
+    outbound resolution and cannot affect how a controller reaches it, and a gate that
+    fires for harmless changes is a gate that gets set routinely. O(subnet_mask) and
+    O(default_gateway) B(are) gated even though neither moves the address: a narrowed mask
+    or a wrong gateway removes the endpoint from a controller's path just as completely.
+  - >-
+    C(amt_network) - B(a write is confirmed by a re-read, or it is not reported as a
+    success.) A C(Put) answering HTTP 200 means firmware accepted the body, not that the
+    property took, so every written class is re-read and compared. If the confirming read
+    cannot be obtained -- which is the B(expected) outcome of a forced address change --
+    the task B(fails) carrying RV(ignore:indeterminate) V(true), reusing C(amt_media)'s
+    existing vocabulary rather than inventing a new one: it means B(re-probe, do not
+    retry). The classified error type is preserved rather than coerced to V(timeout),
+    because the likely case is an endpoint refusing connections at the old address, which
+    is V(connection). If the confirming read succeeds and reports the B(old) value,
+    firmware accepted the body and declined the property; that is settled rather than in
+    flight, so it fails with RV(ignore:error_class) V(unsupported_capability) and B(not)
+    C(indeterminate) -- following the rule issue #69 established for C(amt_media), where a
+    definite refusal is V(unsupported_capability) and only an absent verdict is V(timeout).
+    There is no "changed, but we are not sure" result shape.
+  - >-
+    C(amt_network) - B(does not re-probe at the new address itself), which was considered
+    and rejected. The module cannot know a DHCP-assigned address, and a fresh connection to
+    a different address is a new trust decision in a collection that requires a per-machine
+    TLS fingerprint; inventing a second connection whose pin nobody reviewed would trade an
+    honest C(indeterminate) for a confident guess. The caller re-probes with a second task
+    naming the address it now expects, which is also the task that gets to pin it. The
+    module's C(EXAMPLES) and C(docs/amt_network.md) both show that pattern, including the
+    C(failed_when) that tolerates exactly an indeterminate failure and nothing else.
+  - >-
+    C(amt_network) - O(link_policy) has its B(own) acknowledgement, O(allow_wake_capability_loss),
+    kept separate from O(allow_self_disconnect) because the consequences differ in kind and
+    an operator may reasonably permit one and not the other. A C(LinkPolicy) carrying
+    neither Sx value keeps the network link up only while the host is in S0, so the endpoint
+    stops answering WS-Man entirely once it sleeps or powers down -- at which point
+    C(amt_power) with C(state=on) can no longer reach it to bring it back. That is a change
+    an operator can make and B(cannot undo remotely.) Removing the last Sx value from a
+    policy that had one is therefore refused without that flag; adding Sx values, or
+    changing a policy that never had one, is not.
+  - >-
+    C(amt_network) - the four C(LinkPolicy) write values were B(re-derived from)
+    C(device-management-toolkit/go-wsman-messages) B(v2.48.3 rather than reused from this
+    collection's read table on trust), because a wrong table on the write side does not
+    merely misreport -- it can strand a machine. This collection shipped a C(LinkPolicy)
+    table wrong in three of five entries in 0.2.0 and 0.3.0, which inverted
+    RV(ignore:wake_on_lan_capable). The derivation:
+    C(pkg/wsman/amt/ethernetport/types.go) declares C(SettingsRequest.LinkPolicy) as the
+    B(same Go type) as C(SettingsResponse.LinkPolicy), carrying one schema annotation
+    (C(ValueMap={1, 14, 16, 224})), and C(decoder.go) defines exactly four constants against
+    it. B(Conclusion: the read and write tables agree in all four entries) -- V(s0_ac)=1,
+    V(sx_ac)=14, V(s0_dc)=16, V(sx_dc)=224 -- and that is a result of the derivation, not an
+    assumption behind it. The unit test asserts the literal integers rather than the
+    constants they are built from, because asserting the constants would pass for any table
+    at all, including the inverted one.
+  - >-
+    C(amt_network) - full C(check_mode). Both classes are read, the plan is computed,
+    B(every refusal is applied), and the exact C(Put) bodies a real run would send are
+    returned under RV(operation.desired) -- but no C(Put) is issued. A dry run that skipped
+    the safety refusals would be worse than no dry run, because it would report a dangerous
+    write as fine. Because the bodies are the finished ones rather than a summary, a
+    check-mode run also shows the read-only properties that were stripped and the static
+    addressing dropped for a DHCP switch.
+  - >-
+    C(amt_network) - refuses several caller mistakes B(before) the first C(Put), because
+    each of them strands the endpoint if it reaches firmware: an address that is not a
+    strict dotted quad (leading zeros rejected -- V(192.0.2.010) is octal to some resolvers
+    and decimal to others); a O(subnet_mask) that is not contiguous (V(255.255.0.255) parses
+    as an address and is not a mask, and an endpoint whose mask has a hole in it is
+    reachable from an arbitrary-looking subset of the network); a static configuration with
+    no address anywhere; a call with no setting at all, which would report C(changed=false)
+    and look like successful convergence; and an empty O(link_policy) list, which passes the
+    C(choices) validation but is unwritable. A O(default_gateway) that is off-link produces
+    a B(warning) rather than a refusal -- it is legal in point-to-point and proxy-ARP setups
+    and nothing here has evidence about how AMT firmware treats one, but it is also exactly
+    what a transposed octet looks like.
+  - >-
+    C(amt_network) - within one call, C(AMT_GeneralSettings) is written B(first) and
+    C(AMT_EthernetPortSettings) second. The ethernet C(Put) is the one that can end the
+    connection, so running it last means every non-addressing change requested in the same
+    task has already been written and confirmed before the risky one is issued. The reverse
+    order would make a self-disconnecting address change also lose the hostname change in
+    the same task, with no way to tell which of the two happened.
+  - >-
+    C(amt_network) - B(no hardware qualification stage, deliberately.) Every existing stage's
+    worst case is recoverable at the machine with a power button, a KVM console or an AC
+    unplug; a bad network write leaves the endpoint unreachable over the network entirely,
+    and recovery needs MEBx with the MEBx password -- a different credential from the one the
+    playbooks use. A wrong C(LinkPolicy) is worse still: a stage could pass, be signed off,
+    and strand the machine hours later the next time the host sleeps. A pre-flight brief in
+    C(tests/hardware/PREFLIGHT.md) states what a stage would do, what it would look for,
+    failure modes with the machine state each leaves behind, six escalating recovery steps
+    and the blast radius, so a human can decide later. It is explicitly labelled a proposal
+    and nothing in C(.circleci/config.yml) refers to it. Everything about this module is
+    therefore Tier 2 in C(docs/capability-matrix.md) terms, and its own documentation says so
+    rather than implying otherwise.
+  - >-
+    C(amt_network) - new integration target C(amt_network), which drives the real module
+    against B(two) mock WS-Man servers. A permissive one covers convergence, idempotence,
+    check mode and both refusals -- each refusal paired with a re-read proving the refused
+    call mutated nothing, and with an ungated change proving the gate is not simply refusing
+    everything. A B(strict) one, started with the new
+    C(--reject-ethernet-readonly-properties), C(--reject-general-readonly-properties),
+    C(--reject-static-addressing-with-dhcp) and C(--silently-discard-put) flags, proves the
+    read-modify-write body this module builds is one real firmware could accept rather than
+    one a permissive mock tolerated -- and that a C(Put) answered HTTP 200 and thrown away is
+    caught by the confirming re-read rather than reported as success.
+bugfixes:
+  - >-
+    C(module_utils/wsman.py) - a CIM B(array) property is now emitted as one element per
+    value, repeated, with no wrapper. It was previously passed to C(str()), so a Python list
+    went on the wire as its own C(repr) -- C(<LinkPolicy>[1, 14, 224]</LinkPolicy>) -- and
+    firmware would have stored that literal string. Nothing had surfaced it because no
+    C(Put) in this collection sent an array property before C(amt_network) needed to write
+    C(AMT_EthernetPortSettings.LinkPolicy): the C(AMT_BootSettingData) bodies delete both of
+    their array fields (C(boot.DELETE_BEFORE_PUT_FIELDS) drops C(BIOSLastStatus) and
+    C(UefiBootParametersArray)). The repeated-element shape is evidenced by the recorded
+    firmware response C(responses/amt/ethernetport/put.xml) in C(go-wsman-messages) v2.48.3
+    and by that library's own C(Put)-request assertion. An B(empty) sequence emits nothing at
+    all, which is the only rendering that follows from "one element per value"; what firmware
+    does with an absent array property is unestablished, which is why C(amt_network) refuses
+    an empty O(link_policy) rather than letting a caller reach that shape by accident.
+trivial:
+  - >-
+    C(module_utils/network.py) - new module_util holding the write path, its own file for the
+    same reason C(boot.py) is: it is a mutation whose failure mode is losing the endpoint, not
+    losing a fact. C(client.py) now imports C(ETHERNET_PORT_0_SELECTOR) from it instead of
+    keeping a private copy -- a selector string in two places can drift, and this collection
+    already has a table-in-two-places incident on this exact class.
+  - >-
+    Mock WS-Man server - C(AMT_EthernetPortSettings) and C(AMT_GeneralSettings) are now
+    B(mutable instances) rather than literals with two substitutable fields, so a C(Put) is
+    observable by a later C(Get). Read-only properties are preserved across a C(Put) (firmware
+    does not forget a MAC because a client did not send one), C(DigestRealm) is merged in from
+    C(AmtState.digest_realm) so no C(Put) can move it, and the ethernet C(Put) requires the
+    same exact C(InstanceID) selector its C(Get) does. The three rejection knobs and the
+    silent-discard knob are all B(default off) and each says why in a comment: unlike the
+    C(AMT_BootSettingData) delete list, whose rejection is hardware-observed, these rest on a
+    schema annotation that says a property is not settable and says nothing about what
+    firmware does if you send it -- and MeshCentral sends C(AMT_GeneralSettings)' read-only
+    properties back and apparently succeeds. All four knobs are exercised through the real
+    client, per the standard issue #92 set.
+  - >-
+    C(amt_network) was mutation-tested before merge: 43 mutations against the unit suite and
+    8 against the integration target -- the C(LinkPolicy) inversion, each gate removed, each
+    delete list emptied, the confirming re-read removed, C(indeterminate) forced false, the
+    unapplied detection removed, each new mock knob made inert, the array emission reverted,
+    the check-mode bypass, and the C(no_log) flip. All 51 produced a red run and the restored
+    baseline is green. One gap was found and closed this way: the empty-O(link_policy) refusal
+    existed with no test that could fail for it.
