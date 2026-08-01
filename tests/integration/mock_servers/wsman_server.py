@@ -112,6 +112,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from base64 import b64encode
 from collections.abc import Callable
@@ -132,6 +133,8 @@ ACTION_GET = "http://schemas.xmlsoap.org/ws/2004/09/transfer/Get"
 ACTION_GET_RESPONSE = "http://schemas.xmlsoap.org/ws/2004/09/transfer/GetResponse"
 ACTION_PUT = "http://schemas.xmlsoap.org/ws/2004/09/transfer/Put"
 ACTION_PUT_RESPONSE = "http://schemas.xmlsoap.org/ws/2004/09/transfer/PutResponse"
+ACTION_DELETE = "http://schemas.xmlsoap.org/ws/2004/09/transfer/Delete"
+ACTION_DELETE_RESPONSE = "http://schemas.xmlsoap.org/ws/2004/09/transfer/DeleteResponse"
 ACTION_ENUMERATE = "http://schemas.xmlsoap.org/ws/2004/09/enumeration/Enumerate"
 ACTION_ENUMERATE_RESPONSE = "http://schemas.xmlsoap.org/ws/2004/09/enumeration/EnumerateResponse"
 ACTION_PULL = "http://schemas.xmlsoap.org/ws/2004/09/enumeration/Pull"
@@ -140,6 +143,11 @@ ACTION_FAULT = "http://schemas.xmlsoap.org/ws/2004/08/addressing/fault"
 
 CIM_BASE = "http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2"
 AMT_BASE = "http://intel.com/wbem/wscim/1/amt-schema/1"
+IPS_BASE = "http://intel.com/wbem/wscim/1/ips-schema/1"
+#: The DMTF "common" namespace a CIM datetime/interval value's inner element sits
+#: in (docs/protocol-notes.md §2.10). Not a resource base -- it never appears in a
+#: ResourceURI, only inside an instance body.
+NS_CIM_COMMON = "http://schemas.dmtf.org/wbem/wscim/1/common"
 
 CIM_ASSOCIATED_POWER_MANAGEMENT_SERVICE = f"{CIM_BASE}/CIM_AssociatedPowerManagementService"
 CIM_POWER_MANAGEMENT_SERVICE = f"{CIM_BASE}/CIM_PowerManagementService"
@@ -164,6 +172,12 @@ AMT_REDIRECTION_SERVICE = f"{AMT_BASE}/AMT_RedirectionService"
 AMT_GENERAL_SETTINGS = f"{AMT_BASE}/AMT_GeneralSettings"
 AMT_SETUP_AND_CONFIGURATION_SERVICE = f"{AMT_BASE}/AMT_SetupAndConfigurationService"
 AMT_MESSAGE_LOG = f"{AMT_BASE}/AMT_MessageLog"
+# Alarm clock (docs/protocol-notes.md §2.10). The service owns AddAlarm; the
+# occurrence class is Enumerate-and-Delete only -- there is no Put on it in any
+# source, which is why this mock does not serve one.
+AMT_ALARM_CLOCK_SERVICE = f"{AMT_BASE}/AMT_AlarmClockService"
+AMT_TIME_SYNCHRONIZATION_SERVICE = f"{AMT_BASE}/AMT_TimeSynchronizationService"
+IPS_ALARM_CLOCK_OCCURRENCE = f"{IPS_BASE}/IPS_AlarmClockOccurrence"
 
 #: Fields firmware reports on Get but rejects if echoed back on Put
 #: (docs/protocol-notes.md §2.5). This is the single most important fault this
@@ -332,10 +346,18 @@ SELECTOR_REQUIRED_FOR_GET = frozenset({AMT_ETHERNET_PORT_SETTINGS})
 #: ``PositionToFirstRecord_OUTPUT``. Serving our own convenient ordering instead
 #: would be the mock asserting a shape no firmware produces -- which is the exact
 #: class of bug this file's ``_boot_capabilities_items`` docstring records.
+#: ``AMT_AlarmClockService.AddAlarm`` and
+#: ``AMT_TimeSynchronizationService.GetLowAccuracyTimeSynch`` are in this set for
+#: the same reason and on the same kind of evidence: ``responses/amt/alarmclock/
+#: addalarm.xml`` puts ``AlarmClock`` before ``ReturnValue``, and
+#: ``responses/amt/timesynchronization/getlowaccuracytimesynch.xml`` puts ``Ta0``
+#: before it.
 EXTRA_BEFORE_RETURN_VALUE = frozenset(
     {
         (AMT_MESSAGE_LOG, "GetRecords"),
         (AMT_MESSAGE_LOG, "PositionToFirstRecord"),
+        (AMT_ALARM_CLOCK_SERVICE, "AddAlarm"),
+        (AMT_TIME_SYNCHRONIZATION_SERVICE, "GetLowAccuracyTimeSynch"),
     }
 )
 
@@ -558,6 +580,54 @@ class AmtState:
     physical_memory_present: bool = True
     media_access_present: bool = True
 
+    # -- Alarm clock (docs/protocol-notes.md 2.10) -----------------------------
+    #
+    #: Configured alarms, keyed by ``InstanceID``. **Real, mutable, cross-request
+    #: state**, which is the whole reason the idempotence property is observable
+    #: here rather than merely asserted about a mocked object: ``AddAlarm`` inserts,
+    #: ``Delete`` removes, and a later ``Enumerate`` sees exactly what the previous
+    #: call did. A canned list could not tell a second run that reported
+    #: ``changed=false`` because convergence worked from one that reported it
+    #: because nothing was ever written.
+    #:
+    #: Each value is the parsed template: ``InstanceID``, ``ElementName``,
+    #: ``StartTime`` (the ``<Datetime>`` text verbatim), ``Interval`` (the ISO-8601
+    #: duration text verbatim) and ``DeleteOnCompletion``. Stored as the strings
+    #: firmware would echo, not as parsed times -- a mock that normalised them
+    #: could not reproduce a firmware that echoes back something other than what it
+    #: was sent, which is the documented way idempotence could fail here.
+    alarm_occurrences: dict[str, dict[str, object]] = field(default_factory=dict)
+    #: How many occurrences ``AddAlarm`` will accept before refusing. Default 5,
+    #: which is the limit go-wsman-messages documents ("The method would fail if 5
+    #: instances or more of IPS_AlarmClockOccurrence already exist in the system").
+    #: Mutable so a test can prove the client's own pre-check and this refusal agree
+    #: about where the boundary is, and can move it to reach the boundary cheaply.
+    alarm_occurrence_limit: int = 5
+    #: Set False to make both Get and Enumerate of the two alarm classes fault,
+    #: standing in for firmware with no alarm clock at all.
+    alarm_clock_present: bool = True
+    #: ``GetLowAccuracyTimeSynch``'s ``Ta0`` -- firmware's RTC, in Unix epoch
+    #: seconds. Settable so a test can serve a clock that disagrees with the
+    #: controller's by a known amount, which is the only way to show the past-date
+    #: check really consults *firmware's* clock rather than the controller's.
+    #: ``None`` omits ``Ta0`` from the response entirely, which is a shape no source
+    #: describes and which the client must treat as "firmware would not say".
+    #:
+    #: Defaults to the host's current time, deliberately, rather than to a frozen
+    #: constant: a mock whose clock is stuck in 2024 would refuse every alarm a test
+    #: wrote with a near-future time, and the failure would look like a bug in the
+    #: past-date check instead of in the fixture. A test that needs determinism sets
+    #: it explicitly.
+    time_sync_ta0: int | None = field(default_factory=lambda: int(time.time()))
+    #: ``AMT_TimeSynchronizationService.TimeSource`` / ``LocalTimeSyncEnabled``.
+    #: Defaults are the vendor fixture's (``0`` and ``0``).
+    time_sync_time_source: int = 0
+    time_sync_local_enabled: int = 0
+    #: Set False to make both verbs of ``AMT_TimeSynchronizationService`` fault.
+    #: Distinct from ``alarm_clock_present``: a firmware can hold alarms while
+    #: refusing to report its clock, and the client degrades differently for each.
+    time_sync_present: bool = True
+
 
 @dataclass
 class FaultConfig:
@@ -681,6 +751,40 @@ def _param_text(elem: ET.Element | None, local_name: str) -> str | None:
     """Text of the parameter :func:`_param` finds, or ``None`` if it is absent."""
     found = _param(elem, local_name)
     return found.text if found is not None else None
+
+
+def _param_in(elem: ET.Element | None, namespace: str, local_name: str) -> ET.Element | None:
+    """Like :func:`_param`, but with the child's namespace given rather than derived.
+
+    Needed for an **embedded instance**, where the wrapper and its children are in
+    deliberately *different* namespaces. ``AddAlarm``'s ``<AlarmTemplate>`` sits in
+    the ``AMT_AlarmClockService`` namespace while every property inside it is in the
+    ``IPS_AlarmClockOccurrence`` one, and ``StartTime``/``Interval``'s inner value
+    elements are in the DMTF common namespace -- three namespaces in one body. See
+    docs/protocol-notes.md §2.10 for the shape and the two sources it comes from.
+
+    :func:`_param`'s derive-the-namespace-from-the-wrapper rule is correct for a flat
+    parameter list and structurally cannot express that, which is the only reason this
+    exists. The namespace is still **checked exactly**, never ignored: an element
+    placed in the wrong one is not found, which is the same strictness for the same
+    reason :func:`_param`'s own docstring gives.
+    """
+    if elem is None:
+        return None
+    want = f"{{{namespace}}}{local_name}"
+    for child in elem:
+        if child.tag == want:
+            return child
+    return None
+
+
+def _param_text_in(elem: ET.Element | None, namespace: str, local_name: str) -> str | None:
+    """Text of the element :func:`_param_in` finds, stripped, or ``None`` if absent/empty."""
+    found = _param_in(elem, namespace, local_name)
+    if found is None:
+        return None
+    text = (found.text or "").strip()
+    return text or None
 
 
 def _endpoint_reference_instance_id(param: ET.Element) -> str | None:
@@ -1223,8 +1327,65 @@ def _get_card(state: AmtState) -> dict[str, object]:
     }
 
 
+def _get_alarm_clock_service(_state: AmtState) -> dict[str, object]:
+    """``AMT_AlarmClockService`` -- **FIRMWARE-DERIVED**, field set and values both.
+
+    Every value is verbatim from the real firmware response fixture
+    ``pkg/wsman/wsmantesting/responses/amt/alarmclock/get.xml``, which contains no
+    identifying data at all -- the five properties are the class name, the scoping
+    system's class and name, and a constant Intel product string.
+
+    **``NextAMTAlarmTime`` and ``AMTAlarmClockInterval`` are deliberately absent.**
+    go-wsman-messages' ``AlarmClockService`` struct declares both, and the captured
+    response from real firmware omits both -- even on a system that could have had
+    an alarm set. Serving them because a Go struct mentions them would be this mock
+    asserting a shape no firmware has been observed to produce, and it would hide
+    the exact thing the client has to cope with: a service instance that says
+    nothing about the alarms it holds, which is why convergence reads the
+    occurrence list instead. ``plugins/module_utils/alarm.py``'s ``get_service``
+    docstring records the same finding from the other side.
+    """
+    return {
+        "CreationClassName": "AMT_AlarmClockService",
+        "ElementName": "Intel(r) AMT Alarm Clock Service",
+        "Name": "Intel(r) AMT Alarm Clock Service",
+        "SystemCreationClassName": "CIM_ComputerSystem",
+        "SystemName": "ManagedSystem",
+    }
+
+
+def _get_time_synchronization_service(state: AmtState) -> dict[str, object]:
+    """``AMT_TimeSynchronizationService`` -- **FIRMWARE-DERIVED**, field set and values.
+
+    Verbatim from ``pkg/wsman/wsmantesting/responses/amt/timesynchronization/get.xml``,
+    which likewise carries nothing identifying. ``TimeSource`` and
+    ``LocalTimeSyncEnabled`` come from :class:`AmtState` so a test can serve a
+    defined non-default value and an undefined one, but their **defaults are that
+    fixture's** (``0`` and ``0``) rather than values picked here.
+
+    ``TimeSource`` 0 is the value that matters for the alarm clock and is why this
+    class is served at all: go-wsman-messages names it ``TimeSourceBiosRTC`` and
+    documents the property as "Determines if RTC was set to UTC by any
+    configuration SW", so a machine reporting 0 is one whose clock is whatever the
+    platform RTC holds -- not necessarily UTC. See docs/protocol-notes.md §2.10.
+    """
+    return {
+        "CreationClassName": "AMT_TimeSynchronizationService",
+        "ElementName": "Intel(r) AMT Time Synchronization Service",
+        "EnabledState": 5,
+        "LocalTimeSyncEnabled": state.time_sync_local_enabled,
+        "Name": "Intel(r) AMT Time Synchronization Service",
+        "RequestedState": 12,
+        "SystemCreationClassName": "CIM_ComputerSystem",
+        "SystemName": "Intel(r) AMT",
+        "TimeSource": state.time_sync_time_source,
+    }
+
+
 GET_HANDLERS: dict[str, Callable[[AmtState], dict[str, object]]] = {
     CIM_ASSOCIATED_POWER_MANAGEMENT_SERVICE: _get_power,
+    AMT_ALARM_CLOCK_SERVICE: _get_alarm_clock_service,
+    AMT_TIME_SYNCHRONIZATION_SERVICE: _get_time_synchronization_service,
     AMT_MESSAGE_LOG: _get_message_log,
     AMT_BOOT_SETTING_DATA: lambda state: dict(state.boot_setting_data),
     AMT_BOOT_CAPABILITIES: _get_boot_capabilities,
@@ -1471,8 +1632,130 @@ def _method_clear_log(state: AmtState, _body_elem: ET.Element | None) -> tuple[i
     return 0, ""
 
 
+#: The ``ReturnValue`` this mock uses when ``AddAlarm`` is refused.
+#:
+#: **INVENTED, and the only invented value in the alarm-clock handlers.** No source
+#: names any ``AddAlarm`` return code except ``0: Success`` -- go-wsman-messages'
+#: ``pkg/wsman/amt/alarmclock/decoder.go`` defines exactly one entry in
+#: ``returnValueToString``, and no captured response shows a failure. So a mock that
+#: must refuse *something* has to pick a number, and this one is chosen to be
+#: obviously not a DMTF code. It is served only for the two refusals real firmware is
+#: documented or reported to make (the occurrence limit, and a duplicate key); the
+#: client under test never decodes it, only reports it raw, which is exactly what it
+#: would have to do against firmware.
+ADD_ALARM_REFUSED_RETURN_VALUE = 2054
+
+
+def _method_add_alarm(state: AmtState, body_elem: ET.Element | None) -> tuple[int, str]:
+    """``AMT_AlarmClockService.AddAlarm`` -- create one ``IPS_AlarmClockOccurrence``.
+
+    Parses the embedded ``AlarmTemplate`` the same way firmware must: by local
+    element name, across three namespaces (the template in the
+    ``AMT_AlarmClockService`` namespace, its properties in the
+    ``IPS_AlarmClockOccurrence`` one, and ``Datetime``/``Interval`` in the DMTF
+    common one). See docs/protocol-notes.md §2.10 for the wire shape and the two
+    sources it is transcribed from.
+
+    Two refusals, both with evidence:
+
+    * **The occurrence limit.** go-wsman-messages' ``service.go`` states on this very
+      method: "The method would fail if 5 instances or more of
+      ``IPS_AlarmClockOccurrence`` already exist in the system."
+    * **A duplicate ``InstanceID``.** ``InstanceID`` is the instance key, so a second
+      instance under the same key cannot exist. What firmware *returns* for the
+      attempt is unknown; that it cannot succeed is not. This is what forces a client
+      changing an existing alarm to delete first -- and the reason
+      ``plugins/module_utils/alarm.py``'s replace path is delete-then-add rather than
+      add-over-the-top.
+
+    Deliberately **not** refused here: a past-dated ``StartTime``. MeshCentral's
+    meshcmd prints "Verify the alarm is for a future time" on failure, which is a
+    hint rather than a specification, and no fixture or class definition says what
+    firmware does. Inventing that rejection would make this mock the source of a
+    behaviour claim nothing supports -- and would make the client's own past-date
+    refusal untestable, since the mock would refuse first. The client refuses
+    past-dated alarms itself, before sending, and that is where the check is tested.
+
+    The success output carries ``AlarmClock`` (an endpoint reference to the created
+    instance) before ``ReturnValue``, matching
+    ``responses/amt/alarmclock/addalarm.xml``. See ``EXTRA_BEFORE_RETURN_VALUE``.
+    """
+    template = _param(body_elem, "AlarmTemplate")
+    if template is None:
+        # An AddAlarm with no template is schema-invalid, and real AMT answers HTTP
+        # 400 to a schema-invalid body rather than a SOAP fault (§2.5).
+        raise _schema_violation()
+
+    # Every property is read at its exact namespace, never by local name alone -- see
+    # _param_in. A client that put InstanceID in the AMT_AlarmClockService namespace
+    # instead of the IPS_AlarmClockOccurrence one fails here, which is what firmware's
+    # schema validation would do.
+    instance_id = _param_text_in(template, IPS_ALARM_CLOCK_OCCURRENCE, "InstanceID")
+    if not instance_id:
+        raise _schema_violation()
+    start_time = _param_text_in(_param_in(template, IPS_ALARM_CLOCK_OCCURRENCE, "StartTime"), NS_CIM_COMMON, "Datetime")
+    if not start_time:
+        raise _schema_violation()
+
+    if instance_id in state.alarm_occurrences:
+        return ADD_ALARM_REFUSED_RETURN_VALUE, ""
+    if len(state.alarm_occurrences) >= state.alarm_occurrence_limit:
+        return ADD_ALARM_REFUSED_RETURN_VALUE, ""
+
+    element_name = _param_text_in(template, IPS_ALARM_CLOCK_OCCURRENCE, "ElementName")
+    # An absent Interval is legitimate rather than a schema violation: MeshCentral's
+    # amt.js omits the element entirely for a one-shot alarm. Stored as None, which is
+    # then how the Enumerate reports it back -- so a client must cope with the property
+    # being missing, not merely with it being P0DT0H0M.
+    interval = _param_text_in(_param_in(template, IPS_ALARM_CLOCK_OCCURRENCE, "Interval"), NS_CIM_COMMON, "Interval")
+    delete_on_completion = (_param_text_in(template, IPS_ALARM_CLOCK_OCCURRENCE, "DeleteOnCompletion") or "").lower() in ("true", "1")
+
+    state.alarm_occurrences[instance_id] = {
+        "InstanceID": instance_id,
+        "ElementName": element_name or instance_id,
+        "StartTime": start_time,
+        "Interval": interval,
+        "DeleteOnCompletion": delete_on_completion,
+    }
+    # The reference address in the vendor's captured response is the literal string
+    # "default", which is what firmware really sent -- not a URL. Reproduced verbatim
+    # rather than tidied into something that looks more like an EPR.
+    extra = (
+        "<r:AlarmClock>"
+        "<r:Address>default</r:Address>"
+        "<r:ReferenceParameters>"
+        f"<w:ResourceURI>{escape(IPS_ALARM_CLOCK_OCCURRENCE)}</w:ResourceURI>"
+        f'<w:SelectorSet><w:Selector Name="InstanceID">{escape(instance_id)}</w:Selector></w:SelectorSet>'
+        "</r:ReferenceParameters>"
+        "</r:AlarmClock>"
+    )
+    return 0, extra
+
+
+def _method_get_low_accuracy_time_synch(state: AmtState, _body_elem: ET.Element | None) -> tuple[int, str]:
+    """``AMT_TimeSynchronizationService.GetLowAccuracyTimeSynch`` -- read firmware's RTC.
+
+    Returns ``Ta0``, Unix epoch seconds. The vendor's captured response
+    (``responses/amt/timesynchronization/getlowaccuracytimesynch.xml``) reports
+    ``1704586865``, which reads as 2024-01-07T00:21:05Z -- the same epoch and units
+    as the ``AMT_MessageLog`` record timestamps, which is what lets this collection
+    reuse that decoder's basis.
+
+    ``Ta0`` precedes ``ReturnValue`` in that fixture, so this method is in
+    ``EXTRA_BEFORE_RETURN_VALUE``. ``state.time_sync_ta0 is None`` omits ``Ta0``
+    entirely while still returning ``ReturnValue`` 0 -- a shape no source describes,
+    served so the client's "firmware would not say" branch is reachable over a real
+    socket rather than only where a unit test fakes the transport.
+    """
+    if state.time_sync_ta0 is None:
+        return 0, ""
+    return 0, f"<r:Ta0>{state.time_sync_ta0}</r:Ta0>"
+
+
 METHOD_HANDLERS: dict[tuple[str, str], Callable[[AmtState, ET.Element | None], tuple[int, str]]] = {
     (CIM_POWER_MANAGEMENT_SERVICE, "RequestPowerStateChange"): _method_request_power_state_change,
+    (AMT_ALARM_CLOCK_SERVICE, "AddAlarm"): _method_add_alarm,
+    (AMT_TIME_SYNCHRONIZATION_SERVICE, "GetLowAccuracyTimeSynch"): _method_get_low_accuracy_time_synch,
     (CIM_BOOT_CONFIG_SETTING, "ChangeBootOrder"): _method_change_boot_order,
     (CIM_BOOT_SERVICE, "SetBootConfigRole"): _method_set_boot_config_role,
     (AMT_REDIRECTION_SERVICE, "RequestStateChange"): _method_request_redirection_state_change,
@@ -1874,8 +2157,74 @@ def _media_access_device_items(state: AmtState) -> list[str]:
     return items
 
 
+def _alarm_occurrence_items(state: AmtState) -> list[str]:
+    """``IPS_AlarmClockOccurrence`` -- one item per configured alarm.
+
+    **FIRMWARE-DERIVED field set; values are whatever ``AddAlarm`` was sent.** The
+    five properties are exactly those on ``responses/ips/alarmclock/get.xml`` and
+    ``pull.xml``, and on go-wsman-messages' ``AlarmClockOccurrence`` struct.
+
+    Two things about that fixture are worth stating, because they are why this
+    handler is hand-rolled instead of going through ``_fields_to_instance_xml``:
+
+    * It is a **hand-written placeholder, not a firmware capture**. Its
+      ``StartTime`` is the literal string ``testdatetime`` and its ``InstanceID``
+      is ``testalarm``. So it establishes the *field set* and nothing about value
+      shapes -- unlike the hardware-inventory fixtures, which are real responses.
+    * It sends ``StartTime`` and ``Interval`` **flat** (``<g:StartTime>text</
+      g:StartTime>``), while go-wsman's parser for the same class expects the
+      nested ``<StartTime><Datetime>`` form the write path uses. The two disagree.
+
+    This mock serves the **nested** shape, because that is the shape the write path
+    is documented and tested to send, and a class that accepted one shape and
+    reported the other would be a claim nothing supports. The client parses both
+    (``alarm.decode_start_time``), so the flat shape is covered by unit tests
+    against a fake transport, where it can be labelled constructed rather than
+    served here as if firmware did it.
+
+    Empty when no alarm is configured -- a legitimate reading, not a fault, exactly
+    like a diskless machine's ``CIM_MediaAccessDevice``.
+    """
+    items: list[str] = []
+    for occurrence in state.alarm_occurrences.values():
+        interval = occurrence.get("Interval")
+        interval_xml = (
+            f'<r:Interval><p:Interval xmlns:p="{NS_CIM_COMMON}">{escape(str(interval))}</p:Interval></r:Interval>' if interval is not None else ""
+        )
+        items.append(
+            f'<r:IPS_AlarmClockOccurrence xmlns:r="{IPS_ALARM_CLOCK_OCCURRENCE}">'
+            f"<r:DeleteOnCompletion>{'true' if occurrence.get('DeleteOnCompletion') else 'false'}</r:DeleteOnCompletion>"
+            f"<r:ElementName>{escape(str(occurrence.get('ElementName') or ''))}</r:ElementName>"
+            f"<r:InstanceID>{escape(str(occurrence.get('InstanceID') or ''))}</r:InstanceID>"
+            f"{interval_xml}"
+            f'<r:StartTime><p:Datetime xmlns:p="{NS_CIM_COMMON}">{escape(str(occurrence.get("StartTime") or ""))}</p:Datetime></r:StartTime>'
+            "</r:IPS_AlarmClockOccurrence>"
+        )
+    return items
+
+
+def _alarm_clock_service_items(state: AmtState) -> list[str]:
+    """``AMT_AlarmClockService`` via ``Enumerate`` -- the same singleton ``Get`` serves.
+
+    Exists because the vendor ships ``enumerate.xml`` + ``pull.xml`` for this class
+    alongside ``get.xml``, so both verbs are evidenced, and because §2.7's
+    "``Enumerate`` is HTTP 400 on ``AMT_`` classes" finding is *not* exempted for it
+    -- a client on AMT 10-era firmware would have to use ``Get``, which is what this
+    collection does. Serving both keeps the mock able to be either generation.
+    """
+    return [_fields_to_instance_xml(AMT_ALARM_CLOCK_SERVICE, _get_alarm_clock_service(state))]
+
+
+def _time_synchronization_items(state: AmtState) -> list[str]:
+    """``AMT_TimeSynchronizationService`` via ``Enumerate``. Same reasoning as above."""
+    return [_fields_to_instance_xml(AMT_TIME_SYNCHRONIZATION_SERVICE, _get_time_synchronization_service(state))]
+
+
 ENUMERATE_HANDLERS: dict[str, Callable[[AmtState], list[str]]] = {
     CIM_BOOT_SOURCE_SETTING: _boot_source_items,
+    IPS_ALARM_CLOCK_OCCURRENCE: _alarm_occurrence_items,
+    AMT_ALARM_CLOCK_SERVICE: _alarm_clock_service_items,
+    AMT_TIME_SYNCHRONIZATION_SERVICE: _time_synchronization_items,
     AMT_BOOT_CAPABILITIES: _boot_capabilities_items,
     CIM_BIOS_ELEMENT: _bios_element_items,
     AMT_MESSAGE_LOG: _message_log_items,
@@ -1904,6 +2253,28 @@ HARDWARE_PRESENCE_ATTR: dict[str, str] = {
     CIM_PHYSICAL_MEMORY: "physical_memory_present",
     CIM_MEDIA_ACCESS_DEVICE: "media_access_present",
 }
+
+#: The alarm-clock classes a test can make absent, same contract as
+#: :data:`HARDWARE_PRESENCE_ATTR` and enforced by the same helper.
+#:
+#: Two flags, not one, because they degrade the client differently and a single flag
+#: could not tell the two apart: firmware with no alarm classes makes ``amt_alarm``
+#: fail ``unsupported_capability``, while firmware that holds alarms but will not
+#: report its clock makes it fall back to comparing the requested time against the
+#: *controller's* clock -- which the module says out loud in its refusal message. A
+#: combined flag would leave that second, quieter path unreachable.
+ALARM_PRESENCE_ATTR: dict[str, str] = {
+    AMT_ALARM_CLOCK_SERVICE: "alarm_clock_present",
+    IPS_ALARM_CLOCK_OCCURRENCE: "alarm_clock_present",
+    AMT_TIME_SYNCHRONIZATION_SERVICE: "time_sync_present",
+}
+
+#: Every class whose presence is switchable, hardware inventory and alarm clock
+#: alike. One dict so :meth:`WsmanMockServer._absence_fault` cannot cover one group
+#: and miss the other, and so ``Get`` and ``Enumerate`` cannot drift apart on which
+#: classes exist. The two sources are kept separate above because their docstrings
+#: are about different things.
+CLASS_PRESENCE_ATTR: dict[str, str] = {**HARDWARE_PRESENCE_ATTR, **ALARM_PRESENCE_ATTR}
 
 
 def generate_self_signed_tls_context(host: str) -> tuple[ssl.SSLContext, str, tempfile.TemporaryDirectory]:
@@ -2283,6 +2654,8 @@ class WsmanMockServer:
                     return self._handle_get(resource_uri, relates_to, selectors or {})
                 if action == ACTION_PUT:
                     return self._handle_put(resource_uri, relates_to, body_elem)
+                if action == ACTION_DELETE:
+                    return self._handle_delete(resource_uri, relates_to, selectors or {})
                 if action == ACTION_ENUMERATE:
                     return self._handle_enumerate(resource_uri, relates_to)
                 if action == ACTION_PULL:
@@ -2314,14 +2687,16 @@ class WsmanMockServer:
             body = _fault_body("UnsupportedCapability", f"No handler for action={action!r} resourceURI={resource_uri!r}")
             return 500, _envelope(ACTION_FAULT, relates_to, body)
 
-    def _hardware_absence_fault(self, resource_uri: str, relates_to: str) -> tuple[int, str] | None:
-        """A SOAP fault for a hardware class a test has switched off, else ``None``.
+    def _absence_fault(self, resource_uri: str, relates_to: str) -> tuple[int, str] | None:
+        """A SOAP fault for a class a test has switched off, else ``None``.
 
-        One helper rather than six ``if`` blocks per verb, so ``Get`` and
-        ``Enumerate`` cannot drift apart on which classes exist -- see
-        :data:`HARDWARE_PRESENCE_ATTR`.
+        One helper rather than an ``if`` block per class per verb, so ``Get``,
+        ``Enumerate`` and ``Delete`` cannot drift apart on which classes exist --
+        see :data:`CLASS_PRESENCE_ATTR`. Covers the hardware-inventory classes and
+        the alarm-clock ones alike; it was called ``_hardware_absence_fault`` when
+        the hardware group was the only switchable one.
         """
-        attribute = HARDWARE_PRESENCE_ATTR.get(resource_uri)
+        attribute = CLASS_PRESENCE_ATTR.get(resource_uri)
         if attribute is None or getattr(self.state, attribute):
             return None
         class_name = resource_uri.rsplit("/", 1)[-1]
@@ -2355,7 +2730,7 @@ class WsmanMockServer:
         if resource_uri == AMT_MESSAGE_LOG and not self.state.message_log_present:
             body = _fault_body("InvalidResourceURI", "AMT_MessageLog is not implemented on this firmware")
             return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
-        absent = self._hardware_absence_fault(resource_uri, relates_to)
+        absent = self._absence_fault(resource_uri, relates_to)
         if absent is not None:
             return absent
         if resource_uri in (CIM_CHASSIS, CIM_CARD) and self.faults.hardware_get_faults:
@@ -2385,6 +2760,46 @@ class WsmanMockServer:
         body = _fields_to_instance_xml(resource_uri, self.state.boot_setting_data)
         return 200, _envelope(ACTION_PUT_RESPONSE, relates_to, body, resource_uri=resource_uri)
 
+    def _handle_delete(self, resource_uri: str, relates_to: str, selectors: dict[str, str]) -> tuple[int, str]:
+        """WS-Transfer ``Delete``. Only ``IPS_AlarmClockOccurrence`` is deletable.
+
+        Deliberately narrow: it is the only class in this collection any code path
+        deletes, and the only one either prior-art source deletes. A mock that
+        answered ``Delete`` for everything would let a client delete something
+        firmware would refuse.
+
+        The instance is named entirely by the ``InstanceID`` selector, which is what
+        both go-wsman-messages (``message.Selector{Name: "InstanceID", ...}``) and
+        MeshCentral's meshcmd (``stack.Delete('IPS_AlarmClockOccurrence',
+        { InstanceID: ... })``) send. ``ElementName`` is **not** accepted as a
+        selector, because neither source sends it as one -- a client that keyed on
+        the friendly name must fail here rather than in production.
+
+        A ``Delete`` for a name that does not exist faults. That is not invented: the
+        instance is addressed by its key, and WS-Transfer has no "delete if present".
+        It is also what makes the client's read-then-decide ordering load-bearing
+        rather than decorative -- a module that deleted optimistically would fail on
+        an already-absent alarm, which is precisely the ``state=absent`` idempotence
+        case.
+
+        The response body is **empty**, matching the vendor's captured
+        ``responses/ips/alarmclock/delete.xml`` (``<a:Body></a:Body>``).
+        """
+        if resource_uri != IPS_ALARM_CLOCK_OCCURRENCE:
+            raise _UnknownResource
+        absent = self._absence_fault(resource_uri, relates_to)
+        if absent is not None:
+            return absent
+        instance_id = selectors.get("InstanceID")
+        if not instance_id:
+            body = _fault_body("InvalidSelectors", "IPS_AlarmClockOccurrence requires an InstanceID selector naming one instance")
+            return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
+        if instance_id not in self.state.alarm_occurrences:
+            body = _fault_body("InvalidSelectors", f"No IPS_AlarmClockOccurrence instance with InstanceID {instance_id!r}")
+            return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
+        del self.state.alarm_occurrences[instance_id]
+        return 200, _envelope(ACTION_DELETE_RESPONSE, relates_to, "", resource_uri=resource_uri)
+
     def _handle_enumerate(self, resource_uri: str, relates_to: str) -> tuple[int, str]:
         # AMT 10-era firmware, when a test asks for it. See
         # FaultConfig.enumerate_faults_for_amt_classes for why this is opt-in and why
@@ -2407,7 +2822,7 @@ class WsmanMockServer:
         # Same reasoning as the AMT_MessageLog line above, generalised: an absent
         # class must be absent for both verbs, or the client's Get-then-Enumerate
         # fallback still finds an answer on firmware that has no such class.
-        absent = self._hardware_absence_fault(resource_uri, relates_to)
+        absent = self._absence_fault(resource_uri, relates_to)
         if absent is not None:
             return absent
         items = handler(self.state)
@@ -2447,6 +2862,14 @@ class WsmanMockServer:
         handler = METHOD_HANDLERS.get((resource_uri, method_name))
         if handler is None:
             raise _UnknownResource
+        # A class a test has switched off must be absent for its *methods* too, not
+        # only for Get and Enumerate. Otherwise firmware with no alarm clock would
+        # still accept AddAlarm, and the "no such class" scenario would be
+        # self-contradictory -- the same mistake, one verb further along, that
+        # _handle_enumerate's AMT_MessageLog comment records.
+        absent = self._absence_fault(resource_uri, relates_to)
+        if absent is not None:
+            return absent
         if return_override is not None:
             return_value, extra = return_override, ""
         else:

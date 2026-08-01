@@ -49,7 +49,26 @@ refilled, and *no* sequence of requests against this mock can produce it, becaus
 `ClearLog` here empties the records and the counter together the way firmware's does. The
 defining property of the state is that `CurrentNumberOfRecords` and the `GetRecords` array
 disagree, and only a server that starts that way can have it. Real firmware does: issue
-#105. All are start-up flags
+#105.
+
+The alarm-clock flags (`--no-alarm-clock`, `--no-time-sync`, `--time-sync-ta0`,
+`--no-time-sync-ta0`, `--alarm-occurrence-limit`) are the same two kinds again.
+`--no-alarm-clock` and `--no-time-sync` are capability: which classes a firmware
+implements. They are two flags rather than one because they degrade `amt_alarm`
+differently -- no alarm classes is an `unsupported_capability` failure, while an alarm
+clock with no readable RTC makes the module fall back to comparing a requested wake
+time against the *controller's* clock, a quieter path a combined flag would make
+unreachable. `--time-sync-ta0` is a property of the endpoint's own hardware clock, and
+it is what makes the past-date check's *source* provable rather than assumed: set
+firmware's clock years ahead and a `start_time` the controller thinks is in the future
+becomes past-dated, which can only happen if the check really consulted firmware.
+`--alarm-occurrence-limit` moves the boundary `AddAlarm` refuses at, so the refusal is
+reachable without first setting five alarms. Alarms themselves are deliberately *not* a
+flag: `AddAlarm` and `Delete` mutate `AmtState.alarm_occurrences` for real and a later
+`Enumerate` observes it, which is what makes the idempotence assertion mean something
+rather than being a canned list read twice.
+
+All are start-up flags
 rather than a control channel -- a
 target that needs them starts a second mock process configured that way, which keeps
 every running server's behaviour fixed for its whole lifetime and therefore keeps a
@@ -172,6 +191,55 @@ def _parse_args() -> argparse.Namespace:
             "asserted against a parser a unit test mocked away"
         ),
     )
+    parser.add_argument(
+        "--no-alarm-clock",
+        action="store_true",
+        help=(
+            "Fault every verb of AMT_AlarmClockService and IPS_AlarmClockOccurrence, standing in "
+            "for firmware with no alarm clock at all. Distinct from --no-time-sync, which leaves "
+            "the alarm clock working but stops firmware reporting its own RTC"
+        ),
+    )
+    parser.add_argument(
+        "--no-time-sync",
+        action="store_true",
+        help=(
+            "Fault every verb of AMT_TimeSynchronizationService, standing in for firmware that "
+            "holds alarms but will not report its clock. The client then compares a requested "
+            "wake time against the CONTROLLER's clock and says so in any refusal -- a quieter "
+            "path than --no-alarm-clock and unreachable without its own flag"
+        ),
+    )
+    parser.add_argument(
+        "--time-sync-ta0",
+        type=int,
+        default=None,
+        help=(
+            "Serve this exact Unix epoch second as GetLowAccuracyTimeSynch's Ta0, instead of the "
+            "host's current time. This is how a test proves the past-date check consults "
+            "firmware's clock rather than the controller's: set a clock years ahead and a "
+            "start_time the controller thinks is in the future becomes past-dated to firmware"
+        ),
+    )
+    parser.add_argument(
+        "--no-time-sync-ta0",
+        action="store_true",
+        help=(
+            "Answer GetLowAccuracyTimeSynch with ReturnValue 0 and NO Ta0 element. A shape no "
+            "source describes; the client must treat it as 'firmware would not say' rather than "
+            "as a clock reading of zero, which would make every alarm look past-dated"
+        ),
+    )
+    parser.add_argument(
+        "--alarm-occurrence-limit",
+        type=int,
+        default=5,
+        help=(
+            "How many IPS_AlarmClockOccurrence instances AddAlarm accepts before refusing. "
+            "Default 5, the limit go-wsman-messages documents for the method. Lower it to reach "
+            "the boundary in a test without setting five alarms first"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -226,6 +294,20 @@ def main() -> None:
     # default server can produce a counter and an array that disagree. It has to be
     # how the endpoint starts.
     server.state.message_log_empty_slots = args.message_log_empty_slots
+    # Alarm clock. Which classes this firmware implements and what its RTC reads are
+    # both properties of the endpoint, so both are start-up flags: an alarm set against
+    # a clock that moved mid-run would be unattributable, which is the whole reason
+    # this file has no control channel.
+    server.state.alarm_clock_present = not args.no_alarm_clock
+    server.state.time_sync_present = not args.no_time_sync
+    server.state.alarm_occurrence_limit = args.alarm_occurrence_limit
+    if args.no_time_sync_ta0:
+        # Checked first: --no-time-sync-ta0 and --time-sync-ta0 are mutually exclusive
+        # intents, and "omit Ta0 entirely" is the narrower request, so it wins rather
+        # than being silently overwritten by a value.
+        server.state.time_sync_ta0 = None
+    elif args.time_sync_ta0 is not None:
+        server.state.time_sync_ta0 = args.time_sync_ta0
     if args.empty_message_log:
         # An event log that exists but is empty. Distinct from --no-message-log:
         # "the class is absent" is an unsupported_capability, while "the log holds
