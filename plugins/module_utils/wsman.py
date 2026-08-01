@@ -451,6 +451,37 @@ class WsmanClient:
                 # Source" in the protocol notes means send no element at all,
                 # which is also what MeshCmd does when it passes null.
                 continue
+            elif isinstance(value, (list, tuple)):
+                # A CIM array property is **one element per value**, repeated, with
+                # no wrapper. Not one element carrying a joined value: before this
+                # branch existed, a list fell through to `str(value)` and went on
+                # the wire as the Python repr `[1, 14, 224]`, which firmware would
+                # store as that literal string.
+                #
+                # Nothing sent an array until `amt_network` needed to write
+                # `AMT_EthernetPortSettings.LinkPolicy`. The Put bodies that came
+                # before it either carry no array property or delete the ones they
+                # read (`boot.DELETE_BEFORE_PUT_FIELDS` drops `BIOSLastStatus` and
+                # `UefiBootParametersArray`), so the defect had nothing to surface
+                # through.
+                #
+                # The shape is evidenced, not assumed: the recorded firmware response
+                # `go-wsman-messages` ships at
+                # `pkg/wsman/wsmantesting/responses/amt/ethernetport/put.xml` carries
+                # three consecutive `<g:LinkPolicy>` elements with no wrapper, and its
+                # Put-request assertion in `pkg/wsman/amt/ethernetport/settings_test.go`
+                # renders the same repeated shape from a `[]LinkPolicy`.
+                #
+                # An **empty** sequence therefore emits nothing at all, i.e. the
+                # property is absent from the body. That is the only rendering that
+                # follows from "one element per value", and it is deliberately not
+                # special-cased into an empty element: what firmware does with an
+                # absent array property is unestablished, so a caller must not be
+                # able to reach it by accident. `network.plan_network_change`
+                # refuses an empty `link_policy` for exactly that reason.
+                for item in value:
+                    item_el = ET.SubElement(parent, f"{{{uri}}}{name}")
+                    item_el.text = _coerce_param_text(item)
             else:
                 param_el = ET.SubElement(parent, f"{{{uri}}}{name}")
                 param_el.text = _coerce_param_text(value)

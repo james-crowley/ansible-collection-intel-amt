@@ -469,3 +469,79 @@ class TestNullMethodParametersAreOmitted:
         xml = self._body_xml({"Source": None, "Role": 1})
         assert "Source" not in xml
         assert "Role" in xml
+
+
+class TestArrayPropertiesAreRepeatedElements:
+    """A CIM array property must go on the wire as one element per value.
+
+    Before this behaviour existed, a list fell through to ``str(value)`` and was
+    transmitted as the Python repr -- ``<LinkPolicy>[1, 14, 224]</LinkPolicy>``.
+    Nothing surfaced it because no Put in this collection sent an array property
+    until ``amt_network`` needed to write
+    ``AMT_EthernetPortSettings.LinkPolicy``: the ``AMT_BootSettingData`` bodies
+    delete the two array fields they read (``boot.DELETE_BEFORE_PUT_FIELDS``
+    drops ``BIOSLastStatus`` and ``UefiBootParametersArray``).
+
+    The shape is evidenced rather than assumed. The recorded firmware response
+    ``go-wsman-messages`` ships at
+    ``pkg/wsman/wsmantesting/responses/amt/ethernetport/put.xml`` carries three
+    consecutive ``<g:LinkPolicy>`` elements with no wrapper, and that library's own
+    Put-request assertion in ``pkg/wsman/amt/ethernetport/settings_test.go``
+    renders the same repeated shape from a ``[]LinkPolicy``.
+    """
+
+    @staticmethod
+    def _put_body_xml(properties):
+        client = _make_client()
+        client._session.post.return_value = _soap_response("<g:AMT_EthernetPortSettings xmlns:g='x'/>")
+        client.put("AMT_EthernetPortSettings", properties)
+        sent = client._session.post.call_args.kwargs.get("data") or client._session.post.call_args.args[1]
+        return sent.decode() if isinstance(sent, bytes) else sent
+
+    def test_a_list_becomes_one_element_per_value(self):
+        xml = self._put_body_xml({"LinkPolicy": [1, 14, 224]})
+        assert xml.count("LinkPolicy") == 6, "three elements, each with an open and a close tag"
+        assert ">1<" in xml
+        assert ">14<" in xml
+        assert ">224<" in xml
+
+    def test_the_python_repr_never_reaches_the_wire(self):
+        # The exact defect: `str([1, 14, 224])`. Asserted on its own rather than
+        # only implied by the count above, because that is the string firmware
+        # would have stored.
+        xml = self._put_body_xml({"LinkPolicy": [1, 14, 224]})
+        assert "[1, 14, 224]" not in xml
+        assert "[" not in xml.split("Body")[-1]
+
+    def test_a_single_element_list_is_still_an_element_not_a_scalar(self):
+        xml = self._put_body_xml({"LinkPolicy": [1]})
+        assert xml.count("LinkPolicy") == 2
+        assert ">1<" in xml
+
+    def test_an_empty_list_emits_nothing(self):
+        # The only rendering that follows from "one element per value". What
+        # firmware does with an absent array property is unestablished, which is why
+        # `network.plan_network_change` refuses an empty `link_policy` rather than
+        # letting a caller reach this by accident.
+        xml = self._put_body_xml({"LinkPolicy": [], "DHCPEnabled": True})
+        assert "LinkPolicy" not in xml
+        assert "DHCPEnabled" in xml
+
+    def test_a_tuple_is_treated_the_same_as_a_list(self):
+        xml = self._put_body_xml({"LinkPolicy": (1, 14)})
+        assert xml.count("LinkPolicy") == 4
+
+    def test_a_string_is_not_treated_as_a_sequence_of_characters(self):
+        # `str` is iterable, so a naive isinstance check against Iterable would
+        # emit one element per character.
+        xml = self._put_body_xml({"IPAddress": "192.0.2.10"})
+        assert xml.count("IPAddress") == 2
+        assert ">192.0.2.10<" in xml
+
+    def test_booleans_inside_an_array_still_render_lowercase(self):
+        # `_coerce_param_text` is applied per item, not to the sequence, so the
+        # xsd:boolean lexical space is respected inside an array too.
+        xml = self._put_body_xml({"SomeFlags": [True, False]})
+        assert ">true<" in xml
+        assert ">false<" in xml
+        assert "True" not in xml

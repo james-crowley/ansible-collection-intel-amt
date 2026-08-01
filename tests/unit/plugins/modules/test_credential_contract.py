@@ -83,6 +83,7 @@ KNOWN_MODULES = frozenset(
         "amt_info",
         "amt_log_clear",
         "amt_media",
+        "amt_network",
         "amt_power",
         "amt_redirection",
     }
@@ -403,12 +404,46 @@ def _wire_media(monkeypatch, tmp_path) -> dict:
     return {"state": "attached", "floppy": str(floppy), "runtime_dir": str(tmp_path / "runtime")}
 
 
+def _wire_network(monkeypatch, _tmp_path) -> dict:
+    """An endpoint already converged on the value asked for, so the module reaches exit_json.
+
+    ``ping_response_enabled: true`` against firmware reporting ``"true"`` is the
+    cheapest successful path: it plans, finds nothing to change, and returns a
+    full result document without issuing a Put -- which is all this file needs.
+    Using a *converged* call rather than a real write also keeps this scenario
+    from depending on the confirming-read sequence, which is
+    ``test_amt_network.py``'s job.
+    """
+    amt_network = DISCOVERED_MODULES["amt_network"]
+    instances = {
+        "AMT_EthernetPortSettings": {
+            "InstanceID": "Intel(r) AMT Ethernet Port Settings 0",
+            "MACAddress": "00-00-5e-00-53-01",
+            "IPAddress": HOST,
+            "SubnetMask": "255.255.255.0",
+            "DHCPEnabled": "false",
+            "LinkPolicy": ["1", "14"],
+        },
+        "AMT_GeneralSettings": {
+            "InstanceID": "Intel(r) AMT: General Settings",
+            "HostName": "contract-test-host",
+            "PingResponseEnabled": "true",
+            "WsmanOnlyMode": "false",
+        },
+    }
+    client = _fake_wsman()
+    client.get.side_effect = lambda resource_class, **kwargs: instances[resource_class]
+    monkeypatch.setattr(amt_network, "build_wsman_client", lambda params: client)
+    return {"ping_response_enabled": True}
+
+
 SUCCESS_SCENARIOS = (
     ModuleScenario("amt_boot", extra_args={"device": "pxe", "action_token": "contract-test-token"}, wire=_wire_boot),
     ModuleScenario("amt_event_log", wire=_wire_event_log),
     ModuleScenario("amt_info", wire=_wire_info),
     ModuleScenario("amt_log_clear", wire=_wire_log_clear),
     ModuleScenario("amt_media", wire=_wire_media),
+    ModuleScenario("amt_network", wire=_wire_network),
     ModuleScenario("amt_power", wire=_wire_power),
     ModuleScenario("amt_redirection", wire=_wire_redirection),
 )

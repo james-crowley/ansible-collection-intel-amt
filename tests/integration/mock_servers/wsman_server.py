@@ -182,6 +182,70 @@ READONLY_BOOT_FIELDS = frozenset(
     }
 )
 
+#: ``AMT_EthernetPortSettings`` properties a Get returns and a Put may **not**
+#: carry, derived by diffing the vendor's two structs in
+#: ``go-wsman-messages`` ``pkg/wsman/amt/ethernetport/types.go``: these four are on
+#: ``SettingsResponse`` and absent from ``SettingsRequest``. All four say so in
+#: their own doc comments -- ``MACAddress`` "can only be read and can't be
+#: changed", ``LinkControl``/``WLANLinkProtectionLevel``/``SharedDynamicIP``
+#: "read-only property".
+#:
+#: **What is NOT established is whether firmware rejects a Put that carries them
+#: anyway**, which is why the toggle for this is default-*off*
+#: (``FaultConfig.reject_ethernet_readonly_properties``) whereas
+#: ``READONLY_BOOT_FIELDS``'s is default-on. The boot list has a hardware
+#: observation behind it (docs/protocol-notes.md §2.5: newer firmware rejects the
+#: Put); this one has a schema annotation, which says the properties are not
+#: settable and says nothing about what happens if you send them. MeshCmd deletes a
+#: superset of these before its own Put, which is a hint that it matters and not
+#: evidence of a rejection. Guessing one on by default is exactly the invention
+#: this file's Rejections note forbids.
+ETHERNET_READ_ONLY_PROPERTIES = frozenset(
+    {
+        "MACAddress",
+        "LinkControl",
+        "SharedDynamicIP",
+        "WLANLinkProtectionLevel",
+    }
+)
+
+#: ``AMT_GeneralSettings`` equivalents, from ``pkg/wsman/amt/general/types.go``:
+#: present on ``GeneralSettingsResponse``, absent from
+#: ``GeneralSettingsRequest``, and each annotated "This is a read-only property".
+#:
+#: Default-off for the same reason, and with a *stronger* counter-signal than the
+#: ethernet list has: MeshCentral Puts the entire Get body back including
+#: ``DigestRealm`` (``amtmanager.js``, ``agents/meshcmd.js``) and evidently
+#: succeeds, so on the firmware MeshCentral runs against these are tolerated.
+GENERAL_READ_ONLY_PROPERTIES = frozenset(
+    {
+        "NetworkInterfaceEnabled",
+        "DigestRealm",
+        "PrivacyLevel",
+        "PowerSource",
+    }
+)
+
+#: ``AMT_EthernetPortSettings`` static-addressing properties. Firmware documents
+#: ``IPAddress`` as settable "in static mode only"
+#: (``pkg/wsman/amt/ethernetport/types.go``), and MeshCmd deletes exactly these
+#: five immediately before a Put that enables DHCP
+#: (``agents/meshcmd.js``, ``performAmtNetConfig1``).
+#:
+#: Used by ``FaultConfig.reject_static_addressing_with_dhcp`` to model firmware
+#: that refuses the contradiction outright rather than silently picking a winner.
+#: Also default-off, same reason again: MeshCmd's deletion establishes that its
+#: authors thought it mattered, not that firmware faults.
+ETHERNET_STATIC_ADDRESS_PROPERTIES = frozenset(
+    {
+        "IPAddress",
+        "SubnetMask",
+        "DefaultGateway",
+        "PrimaryDNS",
+        "SecondaryDNS",
+    }
+)
+
 BOOT_SOURCE_NAMES = (
     "Intel(r) AMT: Force PXE Boot",
     "Intel(r) AMT: Force Hard-drive Boot",
@@ -307,6 +371,13 @@ ETHERNET_PORT_0_INSTANCE_ID = "Intel(r) AMT Ethernet Port Settings 0"
 #: resource URI. A ``Get`` carrying a ``SelectorSet`` that disagrees with these
 #: faults, rather than being answered with instance 0's data anyway -- a client
 #: that asks for a nonexistent instance must find out.
+#:
+#: The name says ``FOR_GET`` because that is all it governed until ``amt_network``
+#: added a write path. ``_put_ethernet_port_settings`` now checks the
+#: ``AMT_EthernetPortSettings`` entry too, and it must be the same table: a Put
+#: addressed to an instance a Get would refuse is a Put to nothing. The name is
+#: kept rather than churned across every reference for the sake of accuracy about
+#: one of its two callers.
 SELECTOR_MATCH_FOR_GET: dict[str, dict[str, str]] = {
     AMT_ETHERNET_PORT_SETTINGS: {"InstanceID": ETHERNET_PORT_0_INSTANCE_ID},
     CIM_COMPUTER_SYSTEM: {"Name": "ManagedSystem"},
@@ -466,6 +537,105 @@ def _default_boot_setting_data() -> dict[str, object]:
     }
 
 
+def _default_ethernet_port_settings() -> dict[str, object]:
+    """The instance a freshly-started mock reports for ``AMT_EthernetPortSettings`` 0.
+
+    **NAMES-ONLY** (docs/protocol-notes.md §2.7). Names come from the AMT 10.0.56
+    hardware property dump that section cites and are corroborated by
+    ``pkg/wsman/wsmantesting/responses/amt/ethernetport/get.xml``. Every value is
+    synthetic and from a documentation range (RFC 5737 ``192.0.2.0/24``, RFC 7042
+    documentation MAC) -- never a real address.
+
+    The MAC is deliberately **dash**-separated: real AMT 10 firmware was observed
+    returning dashes, and the vendor fixture reports ``c8-d9-d2-7a-1e-33``, so a
+    client that only handles colons must fail here rather than in production.
+    (That fixture's addresses are real-looking and are not reused.)
+
+    ``LinkPolicy`` is emitted as a **repeated plain element**. That is no longer merely
+    the schema-implied shape: the fixture above settles it, carrying two consecutive
+    ``<g:LinkPolicy>`` elements with no wrapper. ``parmstro``'s module code expects
+    ``<PolicyValue>`` children inside a wrapper instead, and their hardware notes record
+    only the decoded result (``[1, 14, 16]``) -- so that shape now has *no* supporting
+    evidence and the repeated-element shape has direct fixture evidence. This mock serves
+    the evidenced one. ``plugins/module_utils/models.py``'s ``_link_policy_values()``
+    tolerates both, which is harmless leniency in a parser, not a second candidate shape.
+
+    The instance starts **static** (``DHCPEnabled`` false with all five addressing
+    properties populated), which is the shape that makes a switch *to* DHCP
+    interesting: firmware documents ``IPAddress`` as settable "in static mode only"
+    and MeshCmd deletes all five before its own DHCP switch, so a client that
+    echoed a full static configuration back alongside ``DHCPEnabled=true`` has
+    something to get wrong here. It also carries ``LinkControl``,
+    ``SharedDynamicIP`` and ``WLANLinkProtectionLevel``, the three read-only
+    properties besides ``MACAddress`` that a Get returns and a Put may not carry
+    (see ``ETHERNET_READ_ONLY_PROPERTIES``) -- served precisely so a client under
+    test must actively strip them.
+    """
+    return {
+        "ElementName": "Intel(r) AMT Ethernet Port Settings",
+        "InstanceID": ETHERNET_PORT_0_INSTANCE_ID,
+        "MACAddress": "00-00-5E-00-53-01",
+        "IPAddress": "192.0.2.10",
+        "SubnetMask": "255.255.255.0",
+        "DefaultGateway": "192.0.2.1",
+        "PrimaryDNS": "192.0.2.2",
+        "SecondaryDNS": "192.0.2.3",
+        "DHCPEnabled": False,
+        "LinkIsUp": True,
+        "IpSyncEnabled": False,
+        "SharedMAC": True,
+        "SharedStaticIp": True,
+        "LinkPolicy": [1, 14, 16],
+        # Read-only on real firmware per the vendor request struct -- must be
+        # deleted before Put. LinkControl 2 = HOST and WLANLinkProtectionLevel 1 =
+        # None, both from pkg/wsman/amt/ethernetport/decoder.go's constants; the
+        # second instance in responses/amt/ethernetport/pull.xml reports exactly
+        # this pair.
+        "LinkControl": 2,
+        "SharedDynamicIP": True,
+        "WLANLinkProtectionLevel": 1,
+    }
+
+
+def _default_general_settings() -> dict[str, object]:
+    """The instance a freshly-started mock reports for ``AMT_GeneralSettings``.
+
+    **NAMES-ONLY**. Every name is on the real firmware response fixture
+    ``pkg/wsman/wsmantesting/responses/amt/general/get.xml`` and in the class
+    definition ``pkg/wsman/amt/general/types.go``; the values are this mock's own,
+    and the hostname/domain are deliberately obviously-synthetic.
+
+    ``DigestRealm`` is filled in by :func:`_get_general_settings` from
+    ``AmtState.digest_realm`` rather than stored here, so a Put can never move it:
+    it is read-only, and it is also the value several other tests identify this
+    endpoint by.
+
+    ``PowerSource``/``PrivacyLevel`` are on the real instance and are deliberately
+    **not** served: this collection does not surface them, because nothing
+    documents what their integers mean (§2.7). ``WsmanOnlyMode`` *is* served, and
+    has to be -- the class definition marks it required for the Put command, so a
+    firmware that did not report it would make a lawful read-modify-write
+    impossible.
+    """
+    return {
+        "ElementName": "Intel(r) AMT General Settings",
+        "InstanceID": "Intel(r) AMT: General Settings",
+        "NetworkInterfaceEnabled": True,
+        "HostName": "mock-amt-host",
+        "DomainName": "example.invalid",
+        "PingResponseEnabled": True,
+        "SharedFQDN": True,
+        "AMTNetworkEnabled": 1,
+        "RmcpPingResponseEnabled": True,
+        "PreferredAddressFamily": 0,
+        "WsmanOnlyMode": False,
+        # Hardware-dumped on AMT 10.0.56 alongside the fields above
+        # (docs/protocol-notes.md §2.7).
+        "IdleWakeTimeout": 1,
+        "DDNSUpdateEnabled": False,
+    }
+
+
 @dataclass
 class AmtState:
     """Mutable firmware-like state. A `Put` or method call here is what makes
@@ -484,15 +654,25 @@ class AmtState:
     boot_source_count: int = 5
     digest_realm: str = "Digest:A4000000000000000000000000000000"
     boot_setting_data: dict[str, object] = field(default_factory=_default_boot_setting_data)
-    #: AMT_EthernetPortSettings instance 0 (docs/protocol-notes.md §2.7). The MAC
-    #: is deliberately **dash**-separated and from the RFC 7042 documentation
-    #: range: real AMT 10 firmware was observed returning dashes, so a client that
-    #: only handles colons must fail here rather than in production.
-    ethernet_mac_address: str = "00-00-5E-00-53-01"
-    ethernet_link_policy: list[int] = field(default_factory=lambda: [1, 14, 16])
+    #: AMT_EthernetPortSettings instance 0 (docs/protocol-notes.md §2.7 and §2.10),
+    #: as one mutable instance rather than a handful of scalars.
+    #:
+    #: It became a dict when ``amt_network`` gained a Put path: a Put replaces the
+    #: whole instance, so a mock whose Get body was a literal with two
+    #: substitutable fields could not observe one. The same reasoning already
+    #: applies to ``boot_setting_data`` above, and this is now the same shape.
+    ethernet_settings: dict[str, object] = field(default_factory=lambda: dict(_default_ethernet_port_settings()))
     #: Set False to make the instance-0 Get fault, standing in for firmware that
-    #: does not implement the class (or a machine with no such port).
+    #: does not implement the class (or a machine with no such port). Also faults
+    #: a Put: a class that does not exist cannot be written either, and faulting
+    #: only the read would let a write "succeed" against absent firmware.
     ethernet_port_present: bool = True
+    #: AMT_GeneralSettings, likewise one mutable instance, for the same reason.
+    #: ``digest_realm`` remains a separate attribute because the realm is an
+    #: identity of the endpoint that several tests key on by name, and because a
+    #: Put must never be able to change it -- it is read-only (see
+    #: ``GENERAL_READ_ONLY_PROPERTIES``).
+    general_settings: dict[str, object] = field(default_factory=lambda: dict(_default_general_settings()))
     #: CIM_ComputerSystem. OperationalStatus is a CIM array, so it is a list here.
     enabled_state: int = 2  # DMTF: enabled
     requested_state: int = 12  # DMTF: not applicable -- what AMT 10 reports
@@ -568,6 +748,35 @@ class FaultConfig:
     #: Toggle for the read-only-field Put rejection. Default on: this is what
     #: real firmware does, and turning it off is the exception, not the rule.
     reject_boot_readonly_fields: bool = True
+
+    #: Opt-in: fault a ``Put AMT_EthernetPortSettings`` that carries any of
+    #: :data:`ETHERNET_READ_ONLY_PROPERTIES`. Default **off**, unlike
+    #: ``reject_boot_readonly_fields`` above, and the asymmetry is deliberate --
+    #: see that constant's comment for the evidence difference. Armed, this is the
+    #: only way to test that a client actually strips the read-only properties from
+    #: its read-modify-write body rather than echoing the Get back wholesale.
+    reject_ethernet_readonly_properties: bool = False
+
+    #: Opt-in: the same for ``Put AMT_GeneralSettings`` and
+    #: :data:`GENERAL_READ_ONLY_PROPERTIES`.
+    reject_general_readonly_properties: bool = False
+
+    #: Opt-in: fault a ``Put AMT_EthernetPortSettings`` that sets
+    #: ``DHCPEnabled=true`` **and** carries any of
+    #: :data:`ETHERNET_STATIC_ADDRESS_PROPERTIES`. Models firmware that refuses the
+    #: contradiction rather than silently choosing which half to honour. Default
+    #: off, because which of those two firmware does is not established.
+    reject_static_addressing_with_dhcp: bool = False
+
+    #: Opt-in: accept a ``Put`` with HTTP 200 and then **discard it**, so a
+    #: following ``Get`` reports the previous values. This is not a malformed
+    #: request and not a fault: it is firmware that answers a write and does not
+    #: honour the property, which is a real behaviour a client cannot distinguish
+    #: from success without re-reading. Keyed by resource URI so a test can make
+    #: one class silently refuse while the other applies -- which is what
+    #: distinguishes "this firmware will not write that property" from "the Put
+    #: never arrived".
+    silently_discard_put_for: set[str] = field(default_factory=set)
 
     #: Opt-in: answer **HTTP 400** to ``Enumerate`` on every ``AMT_``-prefixed resource,
     #: standing in for AMT 10-era firmware.
@@ -926,63 +1135,25 @@ def _get_redirection(state: AmtState) -> dict[str, object]:
 
 
 def _get_general_settings(state: AmtState) -> dict[str, object]:
-    return {
-        "ElementName": "Intel(r) AMT General Settings",
-        "InstanceID": "Intel(r) AMT: General Settings",
-        "NetworkInterfaceEnabled": True,
-        "DigestRealm": state.digest_realm,
-        "HostName": "mock-amt-host",
-        "DomainName": "example.invalid",
-        "PingResponseEnabled": True,
-        "SharedFQDN": True,
-        "AMTNetworkEnabled": 1,
-        "RmcpPingResponseEnabled": True,
-        "PreferredAddressFamily": 0,
-        # Hardware-dumped on AMT 10.0.56 alongside the fields above
-        # (docs/protocol-notes.md §2.7). PowerSource/PrivacyLevel are also on the
-        # real instance but are deliberately not served here: this collection does
-        # not surface them, because nothing documents what their integers mean.
-        "IdleWakeTimeout": 1,
-        "DDNSUpdateEnabled": False,
-    }
+    """``AMT_GeneralSettings`` -- **NAMES-ONLY**. See :func:`_default_general_settings`.
+
+    ``DigestRealm`` is merged in here rather than living in the mutable instance,
+    so no ``Put`` can move it. It is read-only on real firmware and it is how
+    several other tests identify this endpoint.
+    """
+    return {**state.general_settings, "DigestRealm": state.digest_realm}
 
 
 def _get_ethernet_port_settings(state: AmtState) -> dict[str, object]:
-    """``AMT_EthernetPortSettings`` instance 0 -- **NAMES-ONLY** (docs/protocol-notes.md §2.7).
+    """``AMT_EthernetPortSettings`` instance 0 -- **NAMES-ONLY**.
 
-    Names come from the AMT 10.0.56 hardware property dump §2.7 cites and are corroborated
-    by ``pkg/wsman/wsmantesting/responses/amt/ethernetport/get.xml``. Every value is
-    synthetic and from a documentation range (RFC 5737 ``192.0.2.0/24``, RFC 7042
-    documentation MAC) -- never a real address.
-
-    ``LinkPolicy`` is emitted as a **repeated plain element**. That is no longer merely
-    the schema-implied shape: the fixture above settles it, carrying two consecutive
-    ``<g:LinkPolicy>`` elements with no wrapper. ``parmstro``'s module code expects
-    ``<PolicyValue>`` children inside a wrapper instead, and their hardware notes record
-    only the decoded result (``[1, 14, 16]``) -- so that shape now has *no* supporting
-    evidence and the repeated-element shape has direct fixture evidence. This mock serves
-    the evidenced one. ``plugins/module_utils/models.py``'s ``_link_policy_values()``
-    tolerates both, which is harmless leniency in a parser, not a second candidate shape.
-
-    The same fixture independently corroborates §2.7's dash-separated MAC observation:
-    it reports ``MACAddress`` as ``c8-d9-d2-7a-1e-33``. (Note that fixture's addresses are
-    *real-looking* and are not reused here -- see ``AmtState.ethernet_mac_address``.)
+    The field set, provenance and wire shape are documented on
+    :func:`_default_ethernet_port_settings`, which is where a freshly-started
+    mock's values come from. This serves whatever the instance currently holds,
+    so a ``Put`` is observable here -- which is the whole point of the state
+    being a dict.
     """
-    return {
-        "ElementName": "Intel(r) AMT Ethernet Port Settings",
-        "InstanceID": ETHERNET_PORT_0_INSTANCE_ID,
-        "MACAddress": state.ethernet_mac_address,
-        "IPAddress": "192.0.2.10",
-        "SubnetMask": "255.255.255.0",
-        "DefaultGateway": "192.0.2.1",
-        "PrimaryDNS": "192.0.2.2",
-        "SecondaryDNS": "192.0.2.3",
-        "DHCPEnabled": False,
-        "LinkIsUp": True,
-        "IpSyncEnabled": False,
-        "SharedMAC": True,
-        "LinkPolicy": list(state.ethernet_link_policy),
-    }
+    return dict(state.ethernet_settings)
 
 
 def _get_bios_element(state: AmtState) -> dict[str, object]:
@@ -2282,7 +2453,7 @@ class WsmanMockServer:
                 if action == ACTION_GET:
                     return self._handle_get(resource_uri, relates_to, selectors or {})
                 if action == ACTION_PUT:
-                    return self._handle_put(resource_uri, relates_to, body_elem)
+                    return self._handle_put(resource_uri, relates_to, body_elem, selectors or {})
                 if action == ACTION_ENUMERATE:
                     return self._handle_enumerate(resource_uri, relates_to)
                 if action == ACTION_PULL:
@@ -2369,21 +2540,153 @@ class WsmanMockServer:
         body = _fields_to_instance_xml(resource_uri, fields)
         return 200, _envelope(ACTION_GET_RESPONSE, relates_to, body, resource_uri=resource_uri)
 
-    def _handle_put(self, resource_uri: str, relates_to: str, body_elem: ET.Element | None) -> tuple[int, str]:
-        if resource_uri != AMT_BOOT_SETTING_DATA:
-            raise _UnknownResource
-        incoming = {_local_name(child.tag): (child.text or "") for child in (body_elem or [])}
+    def _handle_put(self, resource_uri: str, relates_to: str, body_elem: ET.Element | None, selectors: dict[str, str]) -> tuple[int, str]:
+        if resource_uri == AMT_BOOT_SETTING_DATA:
+            return self._put_boot_setting_data(resource_uri, relates_to, body_elem)
+        if resource_uri == AMT_ETHERNET_PORT_SETTINGS:
+            return self._put_ethernet_port_settings(resource_uri, relates_to, body_elem, selectors)
+        if resource_uri == AMT_GENERAL_SETTINGS:
+            return self._put_general_settings(resource_uri, relates_to, body_elem)
+        raise _UnknownResource
+
+    def _incoming_properties(self, body_elem: ET.Element | None) -> dict[str, object]:
+        """The Put body as a property mapping, preserving repeated elements as a list.
+
+        A single-element ``LinkPolicy`` and a three-element one must not collapse
+        to the same thing: ``LinkPolicy`` is an array, and a client that sent one
+        value where it meant three would otherwise be indistinguishable from one
+        that got it right. ``_fields_to_instance_xml`` already renders a list back
+        out as repeated elements, so a value that arrives as a list round-trips.
+        """
+        incoming: dict[str, object] = {}
+        # `body_elem or []`, not `body_elem is not None`, is a real trap here: an
+        # Element with no children is currently falsy and ElementTree warns that this
+        # will change. It happens to give the right answer today and would silently
+        # start iterating a None tomorrow.
+        for child in list(body_elem) if body_elem is not None else []:
+            name = _local_name(child.tag)
+            value = child.text or ""
+            if name not in incoming:
+                incoming[name] = value
+            elif isinstance(incoming[name], list):
+                incoming[name].append(value)  # type: ignore[union-attr]
+            else:
+                incoming[name] = [incoming[name], value]
+        return incoming
+
+    def _put_response(self, resource_uri: str, relates_to: str, instance: dict[str, object]) -> tuple[int, str]:
+        """A ``PutResponse`` echoing the whole stored instance.
+
+        FIRMWARE-DERIVED shape: ``responses/amt/ethernetport/put.xml`` carries a
+        full ``<g:AMT_EthernetPortSettings>`` body -- including read-only
+        ``MACAddress`` and ``SharedDynamicIP``, which the *request* may not carry.
+        So the response is the instance as it now stands, not an echo of the
+        request, and this collection's client reads it through
+        ``_single_instance`` either way.
+        """
+        body = _fields_to_instance_xml(resource_uri, instance)
+        return 200, _envelope(ACTION_PUT_RESPONSE, relates_to, body, resource_uri=resource_uri)
+
+    def _readonly_rejection(self, resource_uri: str, relates_to: str, offending: list[str]) -> tuple[int, str]:
+        body = _fault_body(
+            "InvalidParameter",
+            "Put rejected: read-only field(s) present: " + ", ".join(offending),
+        )
+        return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
+
+    def _put_boot_setting_data(self, resource_uri: str, relates_to: str, body_elem: ET.Element | None) -> tuple[int, str]:
+        incoming = {_local_name(child.tag): (child.text or "") for child in (list(body_elem) if body_elem is not None else [])}
         if self.faults.reject_boot_readonly_fields:
             offending = sorted(READONLY_BOOT_FIELDS & incoming.keys())
             if offending:
+                return self._readonly_rejection(resource_uri, relates_to, offending)
+        self.state.boot_setting_data.update(incoming)
+        return self._put_response(resource_uri, relates_to, self.state.boot_setting_data)
+
+    def _put_ethernet_port_settings(self, resource_uri: str, relates_to: str, body_elem: ET.Element | None, selectors: dict[str, str]) -> tuple[int, str]:
+        """``Put AMT_EthernetPortSettings`` -- selector-addressed, and replacing the instance.
+
+        The selector is **required and checked**, unlike the general-settings Put
+        below. That asymmetry is the vendor's: ``ethernetport.Settings.Put()``
+        overrides the generic selector-less Put specifically to add an
+        ``InstanceID`` selector, with the comment "each instance must be addressed
+        by an InstanceID selector, which the generic Put does not provide"
+        (``pkg/wsman/amt/ethernetport/settings.go``), while ``general`` does not
+        override it at all and so sends no ``SelectorSet``
+        (``internal/message/base.go``). A mock that accepted an unaddressed write
+        to an indexed class would let a client that forgot the selector pass here
+        and fail on firmware.
+
+        A ``Put`` **replaces** the instance rather than patching it -- which is
+        what ``Put`` means, and what makes the client's read-modify-write
+        obligatory. So the incoming body becomes the instance, with the read-only
+        properties carried over from the previous one: firmware does not forget a
+        MAC address because a client did not send it.
+        """
+        if not self.state.ethernet_port_present:
+            body = _fault_body("InvalidResourceURI", "AMT_EthernetPortSettings is not implemented on this firmware")
+            return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
+
+        expected = SELECTOR_MATCH_FOR_GET[AMT_ETHERNET_PORT_SETTINGS]
+        if not selectors:
+            body = _fault_body("InvalidSelectors", "AMT_EthernetPortSettings requires a SelectorSet naming one instance")
+            return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
+        mismatched = {name: value for name, value in selectors.items() if expected.get(name) != value}
+        if mismatched:
+            body = _fault_body("InvalidSelectors", f"No instance matches selector(s) {sorted(mismatched)}")
+            return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
+
+        incoming = self._incoming_properties(body_elem)
+
+        if self.faults.reject_ethernet_readonly_properties:
+            offending = sorted(ETHERNET_READ_ONLY_PROPERTIES & incoming.keys())
+            if offending:
+                return self._readonly_rejection(resource_uri, relates_to, offending)
+
+        if self.faults.reject_static_addressing_with_dhcp and str(incoming.get("DHCPEnabled", "")).strip().lower() in ("true", "1"):
+            offending = sorted(ETHERNET_STATIC_ADDRESS_PROPERTIES & incoming.keys())
+            if offending:
                 body = _fault_body(
                     "InvalidParameter",
-                    "Put rejected: read-only field(s) present: " + ", ".join(offending),
+                    "Put rejected: DHCPEnabled=true cannot be combined with static addressing field(s): " + ", ".join(offending),
                 )
                 return 500, _envelope(ACTION_FAULT, relates_to, body, resource_uri=resource_uri)
-        self.state.boot_setting_data.update(incoming)
-        body = _fields_to_instance_xml(resource_uri, self.state.boot_setting_data)
-        return 200, _envelope(ACTION_PUT_RESPONSE, relates_to, body, resource_uri=resource_uri)
+
+        if resource_uri in self.faults.silently_discard_put_for:
+            # Accepted and thrown away. See FaultConfig.silently_discard_put_for.
+            return self._put_response(resource_uri, relates_to, self.state.ethernet_settings)
+
+        preserved = {name: value for name, value in self.state.ethernet_settings.items() if name in ETHERNET_READ_ONLY_PROPERTIES}
+        self.state.ethernet_settings = {**incoming, **preserved}
+        return self._put_response(resource_uri, relates_to, self.state.ethernet_settings)
+
+    def _put_general_settings(self, resource_uri: str, relates_to: str, body_elem: ET.Element | None) -> tuple[int, str]:
+        """``Put AMT_GeneralSettings`` -- no selector, because the vendor sends none.
+
+        Deliberately does **not** require a ``SelectorSet``, and deliberately does
+        not reject one either: go-wsman-messages' generic Put sends none, and
+        nothing establishes that firmware refuses one for a singleton class.
+        Faulting a selector this mock has no evidence firmware rejects would be
+        the mock asserting a rejection firmware may not perform.
+
+        ``DigestRealm`` is not stored (``_get_general_settings`` merges it in from
+        ``AmtState.digest_realm``), so even a Put that carried it cannot move it --
+        which is correct for a read-only property and is a stronger guarantee than
+        the opt-in rejection knob gives.
+        """
+        incoming = self._incoming_properties(body_elem)
+
+        if self.faults.reject_general_readonly_properties:
+            offending = sorted(GENERAL_READ_ONLY_PROPERTIES & incoming.keys())
+            if offending:
+                return self._readonly_rejection(resource_uri, relates_to, offending)
+
+        if resource_uri in self.faults.silently_discard_put_for:
+            return self._put_response(resource_uri, relates_to, _get_general_settings(self.state))
+
+        preserved = {name: value for name, value in self.state.general_settings.items() if name in GENERAL_READ_ONLY_PROPERTIES}
+        self.state.general_settings = {**incoming, **preserved}
+        return self._put_response(resource_uri, relates_to, _get_general_settings(self.state))
 
     def _handle_enumerate(self, resource_uri: str, relates_to: str) -> tuple[int, str]:
         # AMT 10-era firmware, when a test asks for it. See

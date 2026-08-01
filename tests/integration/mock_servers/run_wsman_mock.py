@@ -161,6 +161,47 @@ def _parse_args() -> argparse.Namespace:
         help="How many CIM_MediaAccessDevice instances to serve",
     )
     parser.add_argument(
+        "--reject-ethernet-readonly-properties",
+        action="store_true",
+        help=(
+            "Fault a Put AMT_EthernetPortSettings that carries MACAddress, LinkControl, "
+            "SharedDynamicIP or WLANLinkProtectionLevel -- the four the vendor request struct "
+            "marks read-only. Whether real firmware rejects them is NOT established (unlike the "
+            "AMT_BootSettingData list, which is hardware-observed), so this is opt-in; armed, it "
+            "is the only way to prove a client strips them rather than echoing the Get back"
+        ),
+    )
+    parser.add_argument(
+        "--reject-general-readonly-properties",
+        action="store_true",
+        help=(
+            "The same for Put AMT_GeneralSettings and NetworkInterfaceEnabled/DigestRealm/"
+            "PrivacyLevel/PowerSource. Also opt-in, and with a counter-signal: MeshCentral Puts "
+            "the whole Get body back including DigestRealm and evidently succeeds"
+        ),
+    )
+    parser.add_argument(
+        "--reject-static-addressing-with-dhcp",
+        action="store_true",
+        help=(
+            "Fault a Put AMT_EthernetPortSettings that sets DHCPEnabled=true while also carrying "
+            "IPAddress/SubnetMask/DefaultGateway/PrimaryDNS/SecondaryDNS. Models firmware that "
+            "refuses the contradiction rather than silently picking a winner"
+        ),
+    )
+    parser.add_argument(
+        "--silently-discard-put",
+        action="append",
+        default=[],
+        choices=("ethernet", "general"),
+        help=(
+            "Answer a Put to this class with HTTP 200 and then discard it, so a following Get "
+            "reports the previous values. Not a fault and not a malformed request: firmware that "
+            "accepts a write and does not honour the property, which a client cannot tell from "
+            "success without re-reading. Repeatable"
+        ),
+    )
+    parser.add_argument(
         "--baseboard-serial",
         choices=("populated", "empty", "absent"),
         default="populated",
@@ -178,7 +219,11 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     sys.path.insert(0, args.mock_servers_dir)
-    from wsman_server import WsmanMockServer  # local import: only resolvable after the sys.path insert above
+    from wsman_server import (  # local import: only resolvable after the sys.path insert above
+        AMT_ETHERNET_PORT_SETTINGS,
+        AMT_GENERAL_SETTINGS,
+        WsmanMockServer,
+    )
 
     server = WsmanMockServer(
         username=args.username,
@@ -209,6 +254,14 @@ def main() -> None:
     if args.no_storage_class:
         server.state.media_access_present = False
     server.faults.hardware_get_faults = args.hardware_get_faults
+    # Write-path behaviours (amt_network). All four describe what this firmware
+    # *does with a Put*, which is a property of the endpoint and not something a
+    # client can change, so all four are start-up flags like the ones above.
+    server.faults.reject_ethernet_readonly_properties = args.reject_ethernet_readonly_properties
+    server.faults.reject_general_readonly_properties = args.reject_general_readonly_properties
+    server.faults.reject_static_addressing_with_dhcp = args.reject_static_addressing_with_dhcp
+    for which in args.silently_discard_put:
+        server.faults.silently_discard_put_for.add(AMT_ETHERNET_PORT_SETTINGS if which == "ethernet" else AMT_GENERAL_SETTINGS)
     server.state.memory_dimm_count = args.memory_dimm_count
     server.state.storage_device_count = args.storage_device_count
     # Whether this firmware fills in CIM_Card.SerialNumber, and if not, how it says
