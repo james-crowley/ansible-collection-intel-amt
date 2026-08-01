@@ -1,0 +1,555 @@
+---
+# Copyright (c) 2026 Jim Crowley
+# GNU General Public License v3.0 or later (see LICENSE or https://www.gnu.org/licenses/gpl-3.0.txt)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Drives the real amt_network module against the local mock WS-Man server.
+#
+# Two servers, because the interesting behaviours split by firmware *generation*
+# rather than by request:
+#
+#   1. A default server. Accepts a lawful Put and applies it, so convergence,
+#      idempotence, check mode and the two safety refusals are all observable
+#      against one mutable instance shared across requests.
+#   2. A server started with --reject-ethernet-readonly-properties
+#      --reject-general-readonly-properties --reject-static-addressing-with-dhcp
+#      --silently-discard-put general. Those describe what a firmware *does with a
+#      Put*, which no client request can change, so they are start-up flags. The
+#      first three prove the module's read-modify-write body is lawful; the fourth
+#      proves the confirming re-read is load-bearing -- a Put answered 200 and
+#      thrown away must fail with unsupported_capability, not report success.
+#
+# There is no hardware stage for this module, on purpose. See the target's
+# aliases file and tests/hardware/PREFLIGHT.md.
+
+- name: Create a scratch directory for this target's runtime files
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: amt_network_integration_
+  register: scratch_dir
+  delegate_to: localhost
+
+- name: Set mock-server paths for this run
+  ansible.builtin.set_fact:
+    mock_servers_dir: "{{ role_path }}/../../mock_servers"
+    plain_ready_file: "{{ scratch_dir.path }}/wsman_plain_ready.json"
+    strict_ready_file: "{{ scratch_dir.path }}/wsman_strict_ready.json"
+
+- name: Start the default plaintext mock WS-Man server
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ plain_ready_file }} \
+      > {{ scratch_dir.path }}/wsman_plain.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: plain_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Start a strict mock WS-Man server that rejects an unlawful Put and discards a general-settings one
+  ansible.builtin.shell: |
+    set -e
+    nohup {{ ansible_playbook_python }} {{ mock_servers_dir }}/run_wsman_mock.py \
+      --mock-servers-dir {{ mock_servers_dir }} --ready-file {{ strict_ready_file }} \
+      --reject-ethernet-readonly-properties \
+      --reject-general-readonly-properties \
+      --reject-static-addressing-with-dhcp \
+      --silently-discard-put general \
+      > {{ scratch_dir.path }}/wsman_strict.log 2>&1 &
+    echo $!
+  args:
+    executable: /bin/bash
+  register: strict_start
+  changed_when: false
+  delegate_to: localhost
+
+- name: Wait for both mock servers to report ready
+  ansible.builtin.wait_for:
+    path: "{{ item }}"
+    state: present
+    timeout: 15
+  loop:
+    - "{{ plain_ready_file }}"
+    - "{{ strict_ready_file }}"
+  delegate_to: localhost
+
+- name: Read mock server connection info and pids
+  ansible.builtin.set_fact:
+    plain_info: "{{ lookup('ansible.builtin.file', plain_ready_file) | from_json }}"
+    strict_info: "{{ lookup('ansible.builtin.file', strict_ready_file) | from_json }}"
+    plain_pid: "{{ plain_start.stdout | trim }}"
+    strict_pid: "{{ strict_start.stdout | trim }}"
+
+- name: Exercise amt_network against the mock servers
+  block:
+    # -- The ungated path: nothing here can affect how this task reaches the endpoint --
+
+    - name: Set the two ping toggles and the hostname (no acknowledgement required)
+      james_crowley.intel_amt.amt_network:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        ping_response_enabled: false
+        rmcp_ping_response_enabled: false
+        hostname: amt-integration-host
+      delegate_to: localhost
+      no_log: true
+      register: general_write
+
+    - name: Assert the general-settings write was applied and confirmed
+      ansible.builtin.assert:
+        that:
+          - general_write.changed
+          - general_write.indeterminate == false
+          - general_write.written_classes == ['AMT_GeneralSettings']
+          - general_write.addressing_change == false
+          - general_write.general.ping_response_enabled == false
+          - general_write.general.rmcp_ping_response_enabled == false
+          - general_write.general.hostname == 'amt-integration-host'
+          - general_write.operation.schema == 'intel-amt-operation/v1'
+          - general_write.operation.action == 'amt_network'
+          - general_write.operation.error_class is none
+          # The read-only properties really are stripped from the body an operator
+          # can inspect, not only from the one that went on the wire.
+          - "'DigestRealm' not in general_write.operation.desired.AMT_GeneralSettings"
+          - "'NetworkInterfaceEnabled' not in general_write.operation.desired.AMT_GeneralSettings"
+          # Nothing to write on the other class -- null, not an empty dict, which
+          # would read as "we sent an empty Put".
+          - general_write.operation.desired.AMT_EthernetPortSettings is none
+
+    - name: Idempotence -- the same values again report changed=false and write nothing
+      james_crowley.intel_amt.amt_network:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        ping_response_enabled: false
+        rmcp_ping_response_enabled: false
+        hostname: amt-integration-host
+      delegate_to: localhost
+      no_log: true
+      register: general_again
+
+    - name: Assert the repeat is a no-op
+      ansible.builtin.assert:
+        that:
+          - general_again.changed == false
+          - general_again.changes == []
+          - general_again.written_classes == []
+      # The comparison happens across the wire representation: firmware reports
+      # "false" as element text and the option is the bool false. A module that
+      # compared them naively would report changed=true here forever.
+
+    # -- link_policy: the one option that strands an endpoint without disconnecting you --
+
+    - name: Read the starting link policy
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: before_policy
+
+    - name: Assert the mock starts wake-capable, so taking it away is a real change
+      ansible.builtin.assert:
+        that:
+          - before_policy.amt.network.link_policy == [1, 14, 16]
+          - before_policy.amt.network.wake_on_lan_capable
+
+    - name: Add the Sx DC value, keeping wake capability (no acknowledgement required)
+      james_crowley.intel_amt.amt_network:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        link_policy: [s0_ac, sx_ac, sx_dc]
+      delegate_to: localhost
+      no_log: true
+      register: policy_widened
+
+    - name: Assert the policy was written as repeated integers and still names Sx
+      ansible.builtin.assert:
+        that:
+          - policy_widened.changed
+          - policy_widened.wake_capability_loss == false
+          - policy_widened.network.link_policy == [1, 14, 224]
+          - policy_widened.network.link_policy_names == ['s0_ac', 'sx_ac', 'sx_dc']
+          - policy_widened.network.wake_on_lan_capable
+      # 224 surviving the round trip is what proves LinkPolicy went on the wire as
+      # three repeated elements rather than as one stringified Python list.
+
+    - name: Refusal -- dropping the last Sx value without the acknowledgement
+      james_crowley.intel_amt.amt_network:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        link_policy: [s0_ac, s0_dc]
+      delegate_to: localhost
+      no_log: true
+      register: wake_loss_refused
+      ignore_errors: true
+
+    - name: Assert the wake-capability refusal fired with invalid_state
+      ansible.builtin.assert:
+        that:
+          - wake_loss_refused.failed
+          - wake_loss_refused.error_class == 'invalid_state'
+          - "'allow_wake_capability_loss' in wake_loss_refused.msg"
+
+    - name: Confirm the refused call mutated nothing
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: after_refusal
+
+    - name: Assert the policy is still what the widening set it to
+      ansible.builtin.assert:
+        that:
+          - after_refusal.amt.network.link_policy == [1, 14, 224]
+          - after_refusal.amt.network.wake_on_lan_capable
+
+    - name: The acknowledgement permits the same change
+      james_crowley.intel_amt.amt_network:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        link_policy: [s0_ac, s0_dc]
+        allow_wake_capability_loss: true
+      delegate_to: localhost
+      no_log: true
+      register: wake_loss_allowed
+
+    - name: Assert wake capability was actually lost, observed through amt_info's own decoder
+      ansible.builtin.assert:
+        that:
+          - wake_loss_allowed.changed
+          - wake_loss_allowed.wake_capability_loss
+          - wake_loss_allowed.network.link_policy == [1, 16]
+          - wake_loss_allowed.network.wake_on_lan_capable == false
+      # Read back through the same decoder amt_info publishes, so this is also the
+      # end-to-end check that the write-side and read-side LinkPolicy tables agree
+      # about which values mean Sx. A crossed table would write 16 for 'sx_ac' and
+      # leave wake_on_lan_capable true here.
+
+    - name: Restore a wake-capable policy so later tasks start from a sane endpoint
+      james_crowley.intel_amt.amt_network:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        link_policy: [s0_ac, sx_ac, s0_dc]
+      delegate_to: localhost
+      no_log: true
+
+    # -- The gated path: addressing --
+
+    - name: Refusal -- a static address change without the acknowledgement
+      james_crowley.intel_amt.amt_network:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        ip_address: 198.51.100.7
+      delegate_to: localhost
+      no_log: true
+      register: address_refused
+      ignore_errors: true
+
+    - name: Assert the self-disconnect refusal fired and named the property
+      ansible.builtin.assert:
+        that:
+          - address_refused.failed
+          - address_refused.error_class == 'invalid_state'
+          - "'allow_self_disconnect' in address_refused.msg"
+          - "'IPAddress' in address_refused.msg"
+
+    - name: Refusal -- DNS servers are deliberately NOT gated
+      james_crowley.intel_amt.amt_network:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        primary_dns: 192.0.2.53
+        secondary_dns: 192.0.2.54
+      delegate_to: localhost
+      no_log: true
+      register: dns_write
+
+    - name: Assert the DNS change went through with no acknowledgement at all
+      ansible.builtin.assert:
+        that:
+          - dns_write.changed
+          - dns_write.addressing_change == false
+          - dns_write.network.primary_dns == '192.0.2.53'
+          - dns_write.network.secondary_dns == '192.0.2.54'
+      # The negative control on the gate. A gate that fired here would be set
+      # routinely, which is the same as not having one.
+
+    - name: Usage error -- a malformed address is refused before any Put
+      james_crowley.intel_amt.amt_network:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        ip_address: 192.0.2.010
+        allow_self_disconnect: true
+      delegate_to: localhost
+      no_log: true
+      register: bad_address
+      ignore_errors: true
+
+    - name: Assert the leading-zero octet was rejected
+      ansible.builtin.assert:
+        that:
+          - bad_address.failed
+          - bad_address.error_class == 'invalid_state'
+          - "'not a dotted-quad' in bad_address.msg"
+
+    - name: Usage error -- a netmask with a hole in it is refused
+      james_crowley.intel_amt.amt_network:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        subnet_mask: 255.255.0.255
+        allow_self_disconnect: true
+      delegate_to: localhost
+      no_log: true
+      register: bad_mask
+      ignore_errors: true
+
+    - name: Assert the non-contiguous mask was rejected
+      ansible.builtin.assert:
+        that:
+          - bad_mask.failed
+          - "'not a contiguous netmask' in bad_mask.msg"
+
+    - name: Usage error -- a call with no setting at all
+      james_crowley.intel_amt.amt_network:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: no_setting
+      ignore_errors: true
+
+    - name: Assert an empty call is refused rather than reported as converged
+      ansible.builtin.assert:
+        that:
+          - no_setting.failed
+          - "'no setting to apply' in no_setting.msg"
+
+    # -- Check mode, including that the refusals still apply in a dry run --
+
+    - name: Check mode previews a forced DHCP switch without issuing it
+      james_crowley.intel_amt.amt_network:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        dhcp_enabled: true
+        allow_self_disconnect: true
+      delegate_to: localhost
+      no_log: true
+      check_mode: true
+      register: dhcp_plan
+
+    - name: Assert the plan is the finished Put body, with the static addressing dropped
+      ansible.builtin.assert:
+        that:
+          - dhcp_plan.changed
+          - dhcp_plan.written_classes == []
+          - dhcp_plan.addressing_change
+          - dhcp_plan.operation.desired.AMT_EthernetPortSettings.DHCPEnabled
+          - "'IPAddress' not in dhcp_plan.operation.desired.AMT_EthernetPortSettings"
+          - "'SubnetMask' not in dhcp_plan.operation.desired.AMT_EthernetPortSettings"
+          - "'MACAddress' not in dhcp_plan.operation.desired.AMT_EthernetPortSettings"
+          - dhcp_plan.operation.observed.AMT_EthernetPortSettings is none
+
+    - name: Confirm check mode changed nothing on the endpoint
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: after_check_mode
+
+    - name: Assert the endpoint is still static
+      ansible.builtin.assert:
+        that:
+          - after_check_mode.amt.network.dhcp_enabled == false
+          - after_check_mode.amt.network.ip_address == '192.0.2.10'
+
+    - name: Check mode still applies the self-disconnect refusal
+      james_crowley.intel_amt.amt_network:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        dhcp_enabled: true
+      delegate_to: localhost
+      no_log: true
+      check_mode: true
+      register: dhcp_plan_refused
+      ignore_errors: true
+
+    - name: Assert a dry run does not quietly bless a dangerous write
+      ansible.builtin.assert:
+        that:
+          - dhcp_plan_refused.failed
+          - "'allow_self_disconnect' in dhcp_plan_refused.msg"
+
+    # -- The strict server: a firmware that policies its own Put --
+
+    - name: The module's read-modify-write body is lawful on strict firmware
+      james_crowley.intel_amt.amt_network:
+        host: 127.0.0.1
+        port: "{{ strict_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        dhcp_enabled: true
+        allow_self_disconnect: true
+      delegate_to: localhost
+      no_log: true
+      register: strict_dhcp
+
+    - name: Assert the DHCP switch was accepted and confirmed on strict firmware
+      ansible.builtin.assert:
+        that:
+          - strict_dhcp.changed
+          - strict_dhcp.indeterminate == false
+          - strict_dhcp.network.dhcp_enabled
+      # This server faults a Put that carries a read-only property OR that combines
+      # DHCPEnabled=true with static addressing. That it succeeded is the assertion:
+      # the body the module built is one real firmware could accept, not merely one
+      # a permissive mock tolerated.
+
+    - name: A Put the endpoint accepts and discards must not be reported as a success
+      james_crowley.intel_amt.amt_network:
+        host: 127.0.0.1
+        port: "{{ strict_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+        hostname: never-actually-applied
+      delegate_to: localhost
+      no_log: true
+      register: discarded
+      ignore_errors: true
+
+    - name: Assert the confirming re-read caught it, with the right classification
+      ansible.builtin.assert:
+        that:
+          - discarded.failed
+          - discarded.error_class == 'unsupported_capability'
+          - "'HostName' in discarded.msg"
+          # Settled, not in flight: the confirming read succeeded and reported the
+          # old value, so there is nothing to re-probe.
+          - discarded.indeterminate is not defined or discarded.indeterminate == false
+      # Firmware answered HTTP 200 and did nothing. Only the confirming read can
+      # catch this, so this task is what proves the re-read is load-bearing rather
+      # than decorative.
+
+    # -- Credentials --
+
+    - name: Fault injection -- wrong password is refused with error_class=authentication
+      james_crowley.intel_amt.amt_network:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: definitely-the-wrong-password
+        use_tls: false
+        allow_insecure_transport: true
+        hostname: should-never-be-written
+      delegate_to: localhost
+      no_log: true
+      register: bad_password
+      ignore_errors: true
+
+    - name: Assert the wrong-password call failed with error_class=authentication
+      ansible.builtin.assert:
+        that:
+          - bad_password.failed
+          - bad_password.error_class == 'authentication'
+
+    - name: Confirm the failed-auth call wrote nothing
+      james_crowley.intel_amt.amt_info:
+        host: 127.0.0.1
+        port: "{{ plain_info.port }}"
+        username: admin
+        password: test-password-not-real
+        use_tls: false
+        allow_insecure_transport: true
+      delegate_to: localhost
+      no_log: true
+      register: after_bad_password
+
+    - name: Assert the hostname is still the one the first task set
+      ansible.builtin.assert:
+        that:
+          - after_bad_password.amt.hostname == 'amt-integration-host'
+  always:
+    - name: Stop both mock WS-Man servers
+      ansible.builtin.command: "kill {{ item }}"
+      loop:
+        - "{{ plain_pid }}"
+        - "{{ strict_pid }}"
+      delegate_to: localhost
+      ignore_errors: true  # noqa: ignore-errors -- best-effort cleanup; the assertions above are what must pass.
+      changed_when: false
+
+    - name: Remove the scratch directory
+      ansible.builtin.file:
+        path: "{{ scratch_dir.path }}"
+        state: absent
+      delegate_to: localhost

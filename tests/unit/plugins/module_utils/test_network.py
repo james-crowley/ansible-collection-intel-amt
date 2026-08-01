@@ -89,7 +89,7 @@ def _options(**supplied) -> dict:
     Mirrors what ``AnsibleModule`` actually hands the planner: absent options are
     ``None``, not missing keys.
     """
-    options = {name: None for name in (*network.ETHERNET_OPTION_TO_PROPERTY, *network.GENERAL_OPTION_TO_PROPERTY)}
+    options = dict.fromkeys((*network.ETHERNET_OPTION_TO_PROPERTY, *network.GENERAL_OPTION_TO_PROPERTY))
     options.update(supplied)
     return options
 

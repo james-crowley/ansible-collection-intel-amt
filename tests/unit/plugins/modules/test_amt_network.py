@@ -186,7 +186,8 @@ class TestSuccessfulConvergence:
         client = _client([*_PLAN_READS, ("AMT_EthernetPortSettings", _ethernet(DefaultGateway="198.51.100.1"))])
         _set_module_args({**BASE_ARGS, "default_gateway": "198.51.100.1", "allow_self_disconnect": True})
         warnings: list[str] = []
-        with patch.object(amt_network, "build_wsman_client", return_value=client), patch.object(basic.AnsibleModule, "warn", lambda _self, msg: warnings.append(msg)):
+        record_warning = lambda _self, msg: warnings.append(msg)  # noqa: E731 -- one-line stub, a def here would read as a fixture
+        with patch.object(amt_network, "build_wsman_client", return_value=client), patch.object(basic.AnsibleModule, "warn", record_warning):
             with pytest.raises(AnsibleExitJson):
                 amt_network.main()
         assert len(warnings) == 1

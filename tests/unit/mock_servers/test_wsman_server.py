@@ -2013,7 +2013,7 @@ class TestRealClientNetworkWritePath:
     @staticmethod
     def _plan(client, **options):
         ethernet, general = network.read_network_state(client)
-        supplied = {name: None for name in (*network.ETHERNET_OPTION_TO_PROPERTY, *network.GENERAL_OPTION_TO_PROPERTY)}
+        supplied = dict.fromkeys((*network.ETHERNET_OPTION_TO_PROPERTY, *network.GENERAL_OPTION_TO_PROPERTY))
         supplied.update(options)
         return network.plan_network_change(
             ethernet_instance=ethernet,

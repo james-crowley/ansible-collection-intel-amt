@@ -1,0 +1,10 @@
+# Drives the real amt_network module against the local mock WS-Man server. No network
+# access, no privilege escalation, and no destructive action against anything -- see
+# docs/testing.md.
+#
+# There is deliberately NO hardware stage for this module: a bad network write can
+# strand an endpoint until someone visits MEBx. tests/hardware/PREFLIGHT.md carries the
+# pre-flight brief a human would need in order to decide otherwise, and nothing in
+# .circleci/config.yml wires one up.
+needs/file/tests/integration/mock_servers/wsman_server.py
+needs/file/tests/integration/mock_servers/run_wsman_mock.py
