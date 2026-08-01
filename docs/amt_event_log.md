@@ -103,15 +103,24 @@ returned too, because an unexpected record length is itself a finding. A record 
 failed to decode is never treated as an empty slot: "we could not read these bytes" is
 not "we read them and they were empty".
 
-**Padding is observed on one generation, in one log state.** No source consulted here
-describes it — not the response fixtures in [`protocol-notes.md`](protocol-notes.md)
-§2.8, not MeshCentral, not `go-wsman-messages`. It was measured on AMT 16.1.30 on a
-freshly cleared log; `amt-lab-02` (AMT 19.0.5) has only ever been read on a log nobody
-had cleared, so whether it pads is unknown. Empty slots are therefore **skipped rather
-than treated as end-of-data**: on the one machine measured they were contiguous and
-strictly trailing, but "padding is always trailing" rests on that single observation,
-and stopping at the first one would silently discard every record after an interleaved
-slot on a generation that placed one there.
+**Padding is observed on one generation, in one log state — and a second machine's
+immediate post-clear read adds a timing refinement, not a second confirmation.** No
+source consulted here describes this behaviour — not the response fixtures in
+[`protocol-notes.md`](protocol-notes.md) §2.8, not MeshCentral, not
+`go-wsman-messages`. The 205 padding entries were measured on AMT 16.1.30, on a log
+that had been cleared and then **partly refilled** with roughly 18 new records.
+`amt-lab-02` (AMT 19.0.5) has since had its own log cleared (`amt_log_clear`'s stage
+10) and re-read **immediately** afterwards, before anything had a chance to refill it,
+and that read showed `empty_slots: 0` — no padding at all. Read together, these two
+data points suggest the padding correlates with the log having **refilled** since the
+clear, not with the clear by itself: an immediate post-clear read may show none, and
+whether AMT 19.0.5 pads a *refilled* log the way 16.1.30 does is still unmeasured.
+That is stated as an observation from two data points, not a firmware rule. Empty
+slots are therefore **skipped rather than treated as end-of-data**: on the one machine
+measured with padding present, the padding was contiguous and strictly trailing, but
+"padding is always trailing" rests on that single observation, and stopping at the
+first one would silently discard every record after an interleaved slot on a
+generation that placed one there.
 
 ### Raw bytes are always returned
 

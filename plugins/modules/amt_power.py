@@ -45,25 +45,31 @@ options:
         requested would be worse than always issuing it, so these two always send.
       - >-
         They are wired to the CIM C(RequestPowerStateChange) codes 3, 4 and 7
-        respectively -- correct per the DMTF/C(go-wsman-messages) mapping. B(On the one
-        machine that has ever been asked -- AMT 16.1.30, hardware qualification stage
-        11, 2026-07-31 -- firmware refused all three): this module raised
+        respectively -- correct per the DMTF/C(go-wsman-messages) mapping. B(On both
+        machines this collection has ever asked -- AMT 16.1.30, hardware qualification
+        stage 11, 2026-07-31, CircleCI pipeline 208; and AMT 19.0.5, the same stage,
+        CircleCI workflow b7865873-40b2-43b5-825f-be5ebba704fc -- firmware refused all
+        three, identically, on both): this module raised
         C(error_class=remote_operation) for every one of V(sleep-light), V(sleep-deep)
-        B(and) V(hibernate), which that qualification stage's own three-way
-        classification records as C(outcome=firmware_refused) -- AMT rejected the
-        request itself, before it ever reached the platform. The machine was left
-        C(on) and healthy throughout. This is a statement about that one firmware
-        version on that one machine, not a claim that AMT never supports sleep or
-        hibernate -- see C(docs/capability-matrix.md) for the full result and its scope.
+        B(and) V(hibernate) on each machine, which that qualification stage's own
+        three-way classification records as C(outcome=firmware_refused) -- AMT rejected
+        the request itself, before it ever reached the platform, on both firmware
+        generations. Both machines were left C(on) and healthy throughout. This
+        reproduces across two firmware generations three majors apart on the same
+        hardware family, which materially strengthens the finding beyond a single
+        machine -- but it is still a statement about these two firmware versions, not a
+        claim that AMT never supports sleep or hibernate in general. Two generations is
+        repeatability, not a compatibility guarantee -- see
+        C(docs/capability-matrix.md) for the full result and its scope.
       - >-
         Sleep and hibernate additionally depend on the B(target operating system)
         supporting the corresponding ACPI state and on it being enabled in firmware;
         where it is not, AMT answers the request with a non-zero return code, which
         this module reports as C(error_class=remote_operation) rather than silently
-        treating as success. The 2026-07-31 result above means that on at least one real
-        endpoint, that non-zero return code comes from firmware refusing the request
-        outright, before any platform ever gets a chance to honour or decline the ACPI
-        transition itself.
+        treating as success. The result above means that on both real endpoints tested,
+        that non-zero return code comes from firmware refusing the request outright,
+        before any platform ever gets a chance to honour or decline the ACPI transition
+        itself.
       - >-
         A machine that is powered off cannot be put to sleep. AMT rejects such a
         request rather than ignoring it, so it surfaces as

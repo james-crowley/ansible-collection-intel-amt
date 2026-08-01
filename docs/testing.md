@@ -292,11 +292,24 @@ That document cites each run by workflow and job; this list is about interpreter
   number is recorded for job 2976, and none is inferred from ordering. This is the only
   run listed here that did not end green, and the defect it found is the seventh in
   `docs/capability-matrix.md`'s hardware-defect table.
+- **Machine 2, stages 10-12.** The last gap among the newest four stages: `amt-lab-02`
+  had never run `amt_log_clear`, sleep/hibernate, or wake-from-off. All three now have,
+  and all three passed, with the same outcomes machine 1 recorded: `amt_log_clear`
+  archived and cleared 110 records, with an independent re-read confirming empty;
+  sleep-light/sleep-deep/hibernate were all `firmware_refused`; wake-from-off answered
+  WS-Man 3/3 and accepted a wake request. CircleCI workflow
+  `b7865873-40b2-43b5-825f-be5ebba704fc`. No pipeline number and no individual job
+  UUIDs are recorded for this run, for the same reason job 2976 above carries neither.
+  One refinement: the independent re-read taken immediately after this run's clear
+  showed `empty_slots: 0`, unlike machine 1's later read (after partial refill), which
+  showed 205 -- see `docs/capability-matrix.md`'s stage 9/10 subsection for what that
+  does and does not establish about timing versus firmware generation.
 
 None of the first four runs above cover stages 9-12 at all -- "all eight" in each of
 those bullets means all eight that existed on that date, not all twelve that exist
 now. The fifth run covers stages 9-12, but only on machine 1; the sixth adds stage 9
-on machine 2. See "Qualification order" below.
+on machine 2; the seventh adds stages 10-12 on machine 2, closing the last per-stage
+machine gap among stages 9-12. See "Qualification order" below.
 
 Machine 2's run **clears GHSA-w8p5-mx5w-cpqj [HIGH] for the lab runner**: the 2.17
 line it previously used is EOL and permanently affected, and the runner is now
@@ -372,8 +385,13 @@ sleep/hibernate actions; stage 12 found AMT answering WS-Man and accepting a wak
 request while self-reporting off. **Stage 9 has since also run against machine 2, and
 been re-run against machine 1 on the log stage 10 had cleared — where it failed and
 found a real defect** (issue #105, `amt_event_log` counting firmware's zero-filled empty
-record slots as records). Stages 10, 11 and 12 have still never run against machine 2 —
-see `docs/capability-matrix.md` Tier 4 for what that leaves open.
+record slots as records). **Stages 10, 11 and 12 have since also run against machine 2**
+(workflow `b7865873-40b2-43b5-825f-be5ebba704fc`), with the same outcomes on each: the
+log clear reproduced, both sleep/hibernate refusals reproduced, and wake-from-off
+reproduced. Every one of stages 9-12 has now run on both machines — see
+`docs/capability-matrix.md` Tier 4 for what is still left open (the padding-on-refill
+question for 19.0.5, and wake-from-off's independent-confirmation step, which no CI run
+on either machine can supply).
 
 **A failing qualification stage is the tier working.** Stage 9's failure is the reason
 issue #105 exists, and no unit or mock test in this repository could have produced it —
@@ -415,20 +433,25 @@ Being explicit, because the gap matters:
   could make the two disagree, and the bug lived entirely in the case where they do.
 - Real firmware differs across AMT generations and SKUs. Anything version
   dependent is unverified until step 1 runs on that generation.
-- **`amt_event_log` and `amt_log_clear` have now run against real hardware.** Stage 9
-  (read-only) and stage 10 (irreversible) both ran against `amt-lab-01`, AMT 16.1.30, on
-  2026-07-31 (pipeline 208) and both passed: stage 9's `AMT_MessageLog` iteration read
-  all 205 records to completion with zero decode errors, confirming the 21-byte layout
-  against records a real ME actually wrote; stage 10 archived those records, invoked
-  `ClearLog`, and independently re-read the log to confirm empty rather than trusting
-  `ClearLog`'s own return value. **Stage 9 has since passed on `amt-lab-02` (AMT 19.0.5,
-  110 records, pipeline 226) as well, so `amt_event_log` rests on two generations.**
-  Stage 10 has not run there, so `amt_log_clear` still rests on one. What no green run on
-  either machine covers is the **empty-slot padding**: only 16.1.30 has ever been read on
-  a freshly cleared log, which is the state that produced issue #105, so whether 19.0.5
-  pads freed record slots at all is unmeasured, and no source describes the behaviour.
-  See Tier 3 in [`capability-matrix.md`](capability-matrix.md) for the full result and
-  Tier 4 for what machine-2 repeatability would still add.
+- **`amt_event_log` and `amt_log_clear` have now run against real hardware on both
+  machines.** Stage 9 (read-only) and stage 10 (irreversible) first ran against
+  `amt-lab-01`, AMT 16.1.30, on 2026-07-31 (pipeline 208) and both passed: stage 9's
+  `AMT_MessageLog` iteration read all 205 records to completion with zero decode
+  errors, confirming the 21-byte layout against records a real ME actually wrote;
+  stage 10 archived those records, invoked `ClearLog`, and independently re-read the
+  log to confirm empty rather than trusting `ClearLog`'s own return value. **Stage 9
+  has since passed on `amt-lab-02` (AMT 19.0.5, 110 records, pipeline 226) as well, and
+  stage 10 has since passed there too** (workflow
+  `b7865873-40b2-43b5-825f-be5ebba704fc`, same archive-clear-reread sequence on its own
+  110 records), so both modules now rest on two generations. What no green run on
+  either machine settles is the **empty-slot padding's relationship to firmware
+  generation versus timing**: machine 1's 205 padding entries were read on a log that
+  had partly refilled after its clear, while machine 2's immediate post-clear re-read
+  showed `empty_slots: 0` — consistent with padding correlating with refill timing
+  rather than with the clear alone, but that is an observation from two data points,
+  not a firmware rule, and whether 19.0.5 pads a refilled log the way 16.1.30 does
+  remains unmeasured. See Tier 3 in [`capability-matrix.md`](capability-matrix.md) for
+  the full result and Tier 4 for what remains open.
 - **A post-clear read does *not* serve deleted records, and that was tested rather than
   assumed.** The over-count in issue #105 was first read as firmware serving records
   `ClearLog` had deleted, which would have made every post-clear `amt_event_log` read
@@ -438,41 +461,49 @@ Being explicit, because the gap matters:
   reads are unreliable" warning, because that claim is disproven, not merely
   unsubstantiated. See [`capability-matrix.md`](capability-matrix.md), "The hypothesis
   that `GetRecords` serves records `ClearLog` deleted — tested and refuted".
-- **Stage 11 found that AMT 16.1.30 refuses `amt_power`'s sleep and hibernate actions
-  outright.** The same 2026-07-31 run issued `sleep-light`, `sleep-deep` and
-  `hibernate` against `amt-lab-01` for the first time any hardware stage had issued
-  any of them, and firmware answered `outcome: firmware_refused` /
+- **Stage 11 found that real firmware refuses `amt_power`'s sleep and hibernate
+  actions outright — on both machines.** The 2026-07-31 run issued `sleep-light`,
+  `sleep-deep` and `hibernate` against `amt-lab-01` for the first time any hardware
+  stage had issued any of them, and firmware answered `outcome: firmware_refused` /
   `error_class: remote_operation` for all three, before any request reached the
-  platform. The machine was left `on` and healthy. That is a measured result on one
-  machine, one firmware version — not a general claim about AMT's sleep/hibernate
-  support. See [`docs/amt_power.md`](amt_power.md) and Tier 3 of
+  platform. The machine was left `on` and healthy. The same stage ran again against
+  `amt-lab-02` (workflow `b7865873-40b2-43b5-825f-be5ebba704fc`), with the identical
+  refusal on all three and the same healthy `on` outcome. This is the most
+  consequential update: the finding reproduces across **two firmware generations
+  three majors apart**, which materially strengthens it — though it remains
+  repeatability, not a general claim about AMT's sleep/hibernate support everywhere.
+  See [`docs/amt_power.md`](amt_power.md) and Tier 3 of
   [`capability-matrix.md`](capability-matrix.md).
 - **Stage 12 found AMT answering WS-Man, and accepting a wake request, while
-  reporting itself powered off.** Also 2026-07-31, against `amt-lab-01`: 3
-  reachability probes while AMT self-reported off, 0 failures, a wake request
-  accepted, and the machine restored to `on`. `operator_attestation` is `null`, as it
-  will be on every unattended CI run — nothing reachable from CI independently
-  confirms genuine physical power-off. See Tier 4 in
+  reporting itself powered off — on both machines.** First against `amt-lab-01`
+  (2026-07-31): 3 reachability probes while AMT self-reported off, 0 failures, a wake
+  request accepted, and the machine restored to `on`. Then against `amt-lab-02`
+  (workflow `b7865873-40b2-43b5-825f-be5ebba704fc`), identically. `operator_attestation`
+  is `null` on both runs, as it will be on every unattended CI run on either machine
+  — nothing reachable from CI independently confirms genuine physical power-off, and
+  two machines agreeing does not close that gap. See Tier 4 in
   [`capability-matrix.md`](capability-matrix.md) for exactly what remains open.
 
 This collection is protocol-complete, test-covered, and **hardware-qualified on two
-machines for five of its seven modules, and on one machine for the remaining two** —
-precisely: **all eight (of the stages that existed at the time) against AMT 16.1.30
-(`amt-lab-01`, 2026-07-28) and all eight against AMT 19.0.5 (`amt-lab-02`,
-2026-07-29)**, each run limited to the machine it qualified (`hardware-limit`), so
-neither touched the other, **plus stages 9-12 against `amt-lab-01` alone
-(2026-07-31, pipeline 208)**. A read-only re-run against machine 1 on 2026-07-29
-then read that machine with v0.2.0's fact code, which closed the last coverage
-difference between the two for the original eight stages: `amt_info`'s network and
-system-state facts are now confirmed populated on both generations rather than on
-19.0.5 alone. Qualification found six defects the first two tiers could not have
-found, which is the concrete argument for this tier existing
-rather than a theoretical one.
+machines for all seven of its modules** — precisely: **all eight (of the stages that
+existed at the time) against AMT 16.1.30 (`amt-lab-01`, 2026-07-28) and all eight
+against AMT 19.0.5 (`amt-lab-02`, 2026-07-29)**, each run limited to the machine it
+qualified (`hardware-limit`), so neither touched the other, **plus stages 9-12 against
+`amt-lab-01` (2026-07-31, pipeline 208) and again against `amt-lab-02`** (stage 9 in
+pipeline 226; stages 10-12 in workflow `b7865873-40b2-43b5-825f-be5ebba704fc`). A
+read-only re-run against machine 1 on 2026-07-29 then read that machine with v0.2.0's
+fact code, which closed the last coverage difference between the two for the original
+eight stages: `amt_info`'s network and system-state facts are now confirmed populated
+on both generations rather than on 19.0.5 alone. Qualification found seven defects the
+first two tiers could not have found, which is the concrete argument for this tier
+existing rather than a theoretical one.
 
 What it still does not cover is listed as Tier 4 in
 [`capability-matrix.md`](capability-matrix.md): a non-zero IDE-R write, whether a
-PXE exchange actually occurred, AMT's internal one-shot role bit, the sleep and
-hibernate power actions, whether either endpoint answers WS-Man at all while
-powered off (both report `wake_on_lan_capable: true`, but no stage powers a machine
-off, confirms it, and then tries to reach it), and any firmware generation other than
-those two.
+PXE exchange actually occurred, AMT's internal one-shot role bit, whether a target OS
+genuinely enters S1/S3/S4/S5 (moot on both machines while firmware itself refuses the
+request), independent confirmation of genuine physical power-off during wake-from-off
+(both machines answer WS-Man and accept a wake request while self-reporting off, but
+neither reading is independent of AMT's own report), whether AMT 19.0.5 pads freed
+event-log slots the way 16.1.30 does on a refilled log, and any firmware generation
+other than those two.
