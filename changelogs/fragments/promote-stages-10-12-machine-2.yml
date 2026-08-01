@@ -12,8 +12,9 @@ known_issues:
     "the one machine that has ever been asked". That entry is no longer accurate and
     cannot be edited where it was published, so it is superseded here rather than
     silently left stale. Hardware qualification stage 11 has since run against
-    C(amt-lab-02) (AMT B(19.0.5), CircleCI workflow
-    C(b7865873-40b2-43b5-825f-be5ebba704fc)) as well, and every one of
+    C(amt-lab-02) (AMT B(19.0.5), CircleCI pipeline B(244), workflow
+    C(b7865873-40b2-43b5-825f-be5ebba704fc), job C(hardware-sleep-hibernate)
+    B(3170)) as well, and every one of
     V(sleep-light), V(sleep-deep) and V(hibernate) came back
     C(error_class=remote_operation) / C(outcome=firmware_refused) there too, identically
     to C(amt-lab-01) (AMT B(16.1.30)): AMT rejected each request itself, before it ever
@@ -34,7 +35,8 @@ known_issues:
 minor_changes:
   - >-
     docs/capability-matrix.md - C(amt_log_clear) has now run against C(amt-lab-02) (AMT
-    19.0.5, CircleCI workflow C(b7865873-40b2-43b5-825f-be5ebba704fc)) and passed: the
+    19.0.5, CircleCI pipeline B(244), workflow C(b7865873-40b2-43b5-825f-be5ebba704fc),
+    job C(hardware-log-clear) B(3168)) and passed: the
     same archive-then-clear-then-independently-reread sequence machine 1 ran, on its own
     B(110) records (C(records_before: 110), C(records_after: 0), C(cleared: true),
     C(return_value: 0)), with the independent re-read confirming
@@ -44,7 +46,19 @@ minor_changes:
     removed; wake-from-off's Tier 4 entry is unchanged in substance, because two
     machines self-reporting the same power state is not independent confirmation of
     genuine physical power-off -- see the dedicated Tier 3 subsections and the note
-    below.
+    below. B(Every Tier 3 row this run touches now cites the job that produced it),
+    not only the workflow: stage 9's read-only floor ran as job B(3158), and stages
+    10-12 as jobs B(3168)/B(3170)/B(3172) -- the standard already set for machine 1's
+    pipeline B(208) run, and the tracked complaint about Tier 3 rows citing no run ID
+    at all.
+  - >-
+    docs/capability-matrix.md - the C(SHA256SUMS) manifest for this run was B(checked),
+    not merely confirmed present. It exists in the artifacts of jobs 3168, 3170 and
+    3172; job 3170's artifact was downloaded and verified directly --
+    C(shasum -a 256 -c SHA256SUMS) reported
+    C(amt-lab-02-qualify_sleep_hibernate.json: OK). That is the property issue #90
+    exists to give -- a manifest verifying against the B(published bytes) -- stated at
+    that strength rather than inferred from "every hardware job now emits one".
   - >-
     docs/capability-matrix.md - a B(timing refinement) on the issue #105 padding
     finding, from a second data point. Machine 2's own C(amt_log_clear) run re-read its
@@ -59,7 +73,8 @@ minor_changes:
     treat the first one as end-of-data) is unaffected either way.
   - >-
     docs/capability-matrix.md - wake-from-off (stage 12) has also now run against
-    C(amt-lab-02), with the identical shape to machine 1's result:
+    C(amt-lab-02) (job C(hardware-wake-from-off) B(3172)), with the identical shape to
+    machine 1's result:
     C(off_confirmed_by_amt) reporting C(off), B(3) reachability probes with B(0)
     failures, C(wake_request_accepted: true), and C(restored_to) reporting C(on) again.
     B(The remaining gap is deliberately left untouched by this run): C(off_confirmed_by_amt)

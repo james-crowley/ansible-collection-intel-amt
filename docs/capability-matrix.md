@@ -32,9 +32,9 @@ implying a higher tier than it earns:
    a per-file SHA-256 digest. A sixth run re-ran stage 9 against **both** machines on
    a log machine 1's stage-10 clear had emptied, and **found a real defect** —
    `amt_event_log` was counting firmware's zero-filled empty record slots as records
-   (issue #105); machine 2 passed the identical stage cleanly. A seventh run,
-   CircleCI workflow `b7865873-40b2-43b5-825f-be5ebba704fc`, put stages 10, 11 and 12
-   to **machine 2** for the first time — the same three stages the fifth run had put
+   (issue #105); machine 2 passed the identical stage cleanly. A seventh run, CircleCI
+   pipeline **244**, workflow `b7865873-40b2-43b5-825f-be5ebba704fc`, put stages 10,
+   11 and 12 to **machine 2** for the first time — the same three stages the fifth run had put
    to machine 1 alone — and all three passed: `amt_log_clear` archived and cleared
    110 records the same way machine 1's 205 had; `sleep-light`, `sleep-deep` and
    `hibernate` were again all `firmware_refused`; and wake-while-off again answered
@@ -238,9 +238,9 @@ too — and a later stage-9 re-run against machine 1, on a log stage 10 had clea
 **found a real defect in `amt_event_log`'s record accounting** (issue #105).
 `amt_event_log` and `amt_log_clear` are no longer listed again in Tier 4 in their
 entirety — see the dedicated Tier 3 subsections below for the evidence and citations.
-Stage 10 has since also run against machine 2 (workflow
-`b7865873-40b2-43b5-825f-be5ebba704fc`) and passed, so both modules now carry
-two-generation coverage like the rest of Tier 3.
+Stage 10 has since also run against machine 2 (CircleCI pipeline 244, workflow
+`b7865873-40b2-43b5-825f-be5ebba704fc`, job `hardware-log-clear` **3168**) and passed,
+so both modules now carry two-generation coverage like the rest of Tier 3.
 
 **That defect is the strongest argument in this document for why this tier is separate
 from Tier 2, so it belongs here as well as in Tier 3.** The mock WS-Man server derived
@@ -577,12 +577,18 @@ do not let a reader check:
 - **`amt-lab-02` (machine 2), AMT 19.0.5 — stages 10, 11 and 12.** All three passed.
   This closes the machine-2 gap the fifth run's bullet above left open:
   `amt_log_clear`, sleep/hibernate, and wake-from-off have now each run on both
-  generations. CircleCI workflow `b7865873-40b2-43b5-825f-be5ebba704fc`, against
-  `amt-lab-02`. **No pipeline number and no individual job UUIDs are recorded for
-  this run here**, for the same reason job 2976 above carries neither: they were not
-  captured at the time, and this document does not infer an identifier from
-  ordering. The workflow UUID is what it can cite, and it is cited. See the
-  dedicated Tier 3 subsections below for what each stage measured on machine 2.
+  generations. CircleCI **pipeline 244**, workflow
+  `b7865873-40b2-43b5-825f-be5ebba704fc`; jobs `hardware-tests` (job **3158**, the
+  read-only stage 9/1/3/8 floor this run's mutating approvals gate on),
+  `hardware-log-clear` (job **3168**, stage 10), `hardware-sleep-hibernate` (job
+  **3170**, stage 11), `hardware-wake-from-off` (job **3172**, stage 12), all
+  succeeded. **Digest-checked, not merely digest-present**: `hardware-evidence/SHA256SUMS`
+  is present in the artifacts of jobs 3168, 3170 and 3172, and job 3170's artifact was
+  downloaded and verified directly — `shasum -a 256 -c SHA256SUMS` reported
+  `amt-lab-02-qualify_sleep_hibernate.json: OK` — so this run's manifest is confirmed
+  against the published bytes, the property issue #90 exists to give, not just
+  confirmed to exist. See the dedicated Tier 3 subsections below for what each stage
+  measured on machine 2.
 
 So power control, IDE-R media, the writable-image path and native one-time PXE are
 verified on **two machines across two firmware generations**, not one — and
@@ -851,7 +857,8 @@ above (now retitled to match).
 
 **Evidence, machine 2.** Stage 9 ran against `amt-lab-02`, AMT 19.0.5, in CircleCI
 pipeline **226** (see "Stage 9 found a real defect" below). Stage 10 has since also run
-against `amt-lab-02`, workflow `b7865873-40b2-43b5-825f-be5ebba704fc`, and passed.
+against `amt-lab-02`, CircleCI pipeline **244**, workflow
+`b7865873-40b2-43b5-825f-be5ebba704fc`, job `hardware-log-clear` **3168**, and passed.
 
 **Stage 9, read-only.** A single `GetRecords` batch read the log to completion:
 `total_records: 205`, `records_read: 205`, `batches: 1`, `stop_reason:
@@ -1036,9 +1043,10 @@ than treating the first one as end-of-data.
 This was the first time any hardware stage issued `sleep-light`, `sleep-deep` or
 `hibernate` — stage 4 exercised only `on`/`off`.
 
-**Evidence, machine 2.** Stage 11 ran again, CircleCI workflow
-`b7865873-40b2-43b5-825f-be5ebba704fc`, against `amt-lab-02`, AMT 19.0.5. **All three
-actions came back refused, identically to machine 1:**
+**Evidence, machine 2.** Stage 11 ran again, CircleCI pipeline **244**, workflow
+`b7865873-40b2-43b5-825f-be5ebba704fc`, job `hardware-sleep-hibernate` **3170**,
+against `amt-lab-02`, AMT 19.0.5. **All three actions came back refused, identically
+to machine 1:**
 
 | requested `state` | `expected_normalized` | outcome (machine 1) | outcome (machine 2) | `error_class` | restored |
 |---|---|---|---|---|---|
@@ -1096,9 +1104,9 @@ powered a machine off and then tried to reach it.
 - `restored_to: {normalized: "on", raw: 2}`
 - `operator_attestation: null`
 
-**Evidence, machine 2.** Stage 12 ran again, CircleCI workflow
-`b7865873-40b2-43b5-825f-be5ebba704fc`, against `amt-lab-02`, AMT 19.0.5, with the
-identical shape:
+**Evidence, machine 2.** Stage 12 ran again, CircleCI pipeline **244**, workflow
+`b7865873-40b2-43b5-825f-be5ebba704fc`, job `hardware-wake-from-off` **3172**, against
+`amt-lab-02`, AMT 19.0.5, with the identical shape:
 
 - `before: {normalized: "on", raw: 2}`
 - `off_confirmed_by_amt: {normalized: "off", raw: 8}`
@@ -1153,8 +1161,8 @@ check. What is recorded now, and what still is not:
   machine 2" resolves to one job UUID. The rows are not repeated with their own
   citations because a stage row that named its own job would have to name two — one
   per machine — and the run list already distinguishes them by date.
-- **Pipeline numbers exist for four of the seven runs**, #93, 167, 208 and 226. For
-  machine 1's 2026-07-28 qualification and its 2026-07-29 read-only re-run, the
+- **Pipeline numbers exist for five of the seven runs**, #93, 167, 208, 226 and 244.
+  For machine 1's 2026-07-28 qualification and its 2026-07-29 read-only re-run, the
   workflow and job UUIDs were recovered and are recorded above, but the pipeline
   number was not: the API surface used to recover them returns run, workflow and job
   UUIDs and does not expose the pipeline number, and no commit message recorded it at
@@ -1165,27 +1173,31 @@ check. What is recorded now, and what still is not:
   **job 2976 is cited with no workflow UUID and no pipeline number**, because neither
   was captured and the rule above forbids reconstructing them from the fact that 226
   came earlier. Its evidence file is named instead, which is what a reader can
-  actually go and fetch. The seventh run (stages 10-12, machine 2) is cited by
-  workflow UUID only, for the same reason: no pipeline number and no individual job
-  UUIDs were captured for it.
-- **Runs from now on carry a digest; the first four do not, permanently.** This used to
-  read "no artifact digest is recorded anywhere" (issue #90). Every hardware job now
-  emits `hardware-evidence/SHA256SUMS` — a SHA-256 per published evidence file,
-  computed by the job itself immediately after `tests/hardware/redact-evidence.py` runs
-  and before `store_artifacts` publishes, so the digest covers exactly the bytes a
-  reader can fetch. A reader who downloads a future run's evidence can re-hash it and
-  check the result against that run's cited manifest, which closes the original
-  complaint for every run from here on. **Pipeline 208 (stages 9-12, machine 1,
-  2026-07-31) is the first run this applies to**, so it is also the first Tier 3 run
-  in this document whose citation includes a manifest a reader can actually check
-  against, and the seventh run (workflow `b7865873-40b2-43b5-825f-be5ebba704fc`) is
-  later than it, so the same job configuration applies there too. **The four runs
-  before pipeline 208 cannot be given one retroactively, and are explicitly digest-less
-  rather than silently left without one**: their artifacts can still be hashed *as
-  served today*, but that would only prove what CircleCI is serving now, not what this
-  document's authors actually read at the time — the one thing a digest is for. That
-  gap is permanent for those four, the same way the two limits above it are not
-  fixable after the fact.
+  actually go and fetch. The seventh run (stages 10-12, machine 2) does not share that
+  gap: it is cited by pipeline number, workflow UUID, and the individual job number for
+  each of the three stages, per the run-list entry above — the standard this tier's own
+  tracked complaint about run-less citations asks for.
+- **Runs from now on carry a digest, and one has now been checked against the
+  published bytes rather than merely confirmed present.** This used to read "no
+  artifact digest is recorded anywhere" (issue #90). Every hardware job now emits
+  `hardware-evidence/SHA256SUMS` — a SHA-256 per published evidence file, computed by
+  the job itself immediately after `tests/hardware/redact-evidence.py` runs and before
+  `store_artifacts` publishes, so the digest covers exactly the bytes a reader can
+  fetch. **Pipeline 208 (stages 9-12, machine 1, 2026-07-31) is the first run this
+  applies to**, so it is also the first Tier 3 run in this document whose citation
+  includes a manifest a reader can actually check against. `SHA256SUMS` is present in
+  the artifacts of pipeline 244's jobs 3168, 3170 and 3172 (stages 10-12, machine 2)
+  too, and job 3170's artifact was downloaded and verified directly: `shasum -a 256 -c
+  SHA256SUMS` reported `amt-lab-02-qualify_sleep_hibernate.json: OK`. That is the
+  property issue #90 exists to give, checked rather than inferred from the job
+  configuration — a manifest *verifying against the published bytes*, not merely a
+  file named `SHA256SUMS` having been uploaded. **The four runs before pipeline 208
+  cannot be given one retroactively, and are explicitly digest-less rather than
+  silently left without one**: their artifacts can still be hashed *as served today*,
+  but that would only prove what CircleCI is serving now, not what this document's
+  authors actually read at the time — the one thing a digest is for. That gap is
+  permanent for those four, the same way the two limits above it are not fixable after
+  the fact.
 
 ## Tier 4: Still unproven
 
@@ -1421,7 +1433,7 @@ generations in Tier 3 above.
 | 11.x+ Enterprise | Yes | Present | Present | Present | **Inferred** — not tested |
 | 12.x+ | Yes, enhanced | Present | Present | Present | **Inferred** — not tested |
 | **16.1.30** (machine 1) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages as they existed then** (2026-07-28). `amt_info`'s network/system-state facts came back fully populated on a read-only re-run (2026-07-29). Stages 9-12 then ran here for the first time (2026-07-31, pipeline 208): `amt_event_log`/`amt_log_clear` passed; `sleep-light`/`sleep-deep`/`hibernate` were all refused by firmware; wake-while-off answered WS-Man 3/3 and accepted a wake request. A later stage-9 re-run on a log the stage-10 clear had emptied returned **223 `RecordArray` entries against `CurrentNumberOfRecords: 18`** — 205 of them zero-filled padding for freed slots (issue #105, job 2976). Padding is observed on this generation and unmeasured on every other, this table's rows included |
-| **19.0.5** (machine 2) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages as they existed then** (2026-07-29). Capability flags were read live and all four came back `true`; the network/system-state facts came back fully populated here too. Stage 9 passed here (110 records, `records_read == total_records`, pipeline 226). Stages 10-12 then ran here for the first time (workflow `b7865873-40b2-43b5-825f-be5ebba704fc`): `amt_log_clear` archived and cleared the same 110 records, with an independent re-read confirming empty; `sleep-light`/`sleep-deep`/`hibernate` were all refused by firmware, identically to machine 1; wake-while-off answered WS-Man 3/3 and accepted a wake request, also identically to machine 1. That immediate post-clear re-read showed `empty_slots: 0` — no padding — consistent with padding correlating with log refill timing rather than with the clear alone (see the stage 9/10 subsection), but whether 19.0.5 pads a refilled log the way 16.1.30 does remains unmeasured |
+| **19.0.5** (machine 2) | Yes, pinned | Verified | Advertised | Verified | **Hardware-verified, all eight stages as they existed then** (2026-07-29). Capability flags were read live and all four came back `true`; the network/system-state facts came back fully populated here too. Stage 9 passed here (110 records, `records_read == total_records`, pipeline 226). Stages 10-12 then ran here for the first time (CircleCI pipeline **244**, workflow `b7865873-40b2-43b5-825f-be5ebba704fc`; jobs `hardware-log-clear` **3168**, `hardware-sleep-hibernate` **3170**, `hardware-wake-from-off` **3172**): `amt_log_clear` archived and cleared the same 110 records, with an independent re-read confirming empty; `sleep-light`/`sleep-deep`/`hibernate` were all refused by firmware, identically to machine 1; wake-while-off answered WS-Man 3/3 and accepted a wake request, also identically to machine 1. That immediate post-clear re-read showed `empty_slots: 0` — no padding — consistent with padding correlating with log refill timing rather than with the clear alone (see the stage 9/10 subsection), but whether 19.0.5 pads a refilled log the way 16.1.30 does remains unmeasured |
 
 "Present" in the IDE-R/SOL/PXE columns means "AMT's published feature set for this
 generation includes it," per `docs/protocol-notes.md` §1.1 and Intel's own
@@ -1455,9 +1467,10 @@ whether running something would close it:
   pads freed record slots on a refilled log the way 16.1.30 does, and independent
   confirmation of physical power-off for stage 12. Stages 9 through 12 have each now
   run against both machines — pipeline 208 and the read-only-corollary run against
-  machine 1 (2026-07-31), pipeline 226 (stage 9, machine 2), and workflow
-  `b7865873-40b2-43b5-825f-be5ebba704fc` (stages 10-12, machine 2) — so machine-2
-  repeatability is closed for `amt_log_clear` and for the sleep/hibernate request path.
+  machine 1 (2026-07-31), pipeline 226 (stage 9, machine 2), and pipeline 244, workflow
+  `b7865873-40b2-43b5-825f-be5ebba704fc` (stages 10-12, machine 2, jobs 3168/3170/3172)
+  — so machine-2 repeatability is closed for `amt_log_clear` and for the
+  sleep/hibernate request path.
   What is left in this half of Tier 4 is narrower: the padding-on-refill question for
   19.0.5, which needs a read on machine 2 after its own cleared log has had time to
   refill, and the independent-confirmation step for stage 12, which no CI run — on

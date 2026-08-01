@@ -297,13 +297,18 @@ That document cites each run by workflow and job; this list is about interpreter
   and all three passed, with the same outcomes machine 1 recorded: `amt_log_clear`
   archived and cleared 110 records, with an independent re-read confirming empty;
   sleep-light/sleep-deep/hibernate were all `firmware_refused`; wake-from-off answered
-  WS-Man 3/3 and accepted a wake request. CircleCI workflow
-  `b7865873-40b2-43b5-825f-be5ebba704fc`. No pipeline number and no individual job
-  UUIDs are recorded for this run, for the same reason job 2976 above carries neither.
-  One refinement: the independent re-read taken immediately after this run's clear
-  showed `empty_slots: 0`, unlike machine 1's later read (after partial refill), which
-  showed 205 -- see `docs/capability-matrix.md`'s stage 9/10 subsection for what that
-  does and does not establish about timing versus firmware generation.
+  WS-Man 3/3 and accepted a wake request. CircleCI pipeline **244**, workflow
+  `b7865873-40b2-43b5-825f-be5ebba704fc`; jobs `hardware-tests` (**3158**, the read-only
+  stage 9/1/3/8 floor this run's approvals gate on), `hardware-log-clear` (**3168**,
+  stage 10), `hardware-sleep-hibernate` (**3170**, stage 11), `hardware-wake-from-off`
+  (**3172**, stage 12). `SHA256SUMS` is present in jobs 3168, 3170 and 3172's
+  artifacts, and job 3170's was downloaded and verified directly (`shasum -a 256 -c
+  SHA256SUMS` reported `amt-lab-02-qualify_sleep_hibernate.json: OK`) -- checked
+  against the published bytes, not merely confirmed present. One refinement: the
+  independent re-read taken immediately after this run's clear showed `empty_slots: 0`,
+  unlike machine 1's later read (after partial refill), which showed 205 -- see
+  `docs/capability-matrix.md`'s stage 9/10 subsection for what that does and does not
+  establish about timing versus firmware generation.
 
 None of the first four runs above cover stages 9-12 at all -- "all eight" in each of
 those bullets means all eight that existed on that date, not all twelve that exist
@@ -386,9 +391,11 @@ request while self-reporting off. **Stage 9 has since also run against machine 2
 been re-run against machine 1 on the log stage 10 had cleared — where it failed and
 found a real defect** (issue #105, `amt_event_log` counting firmware's zero-filled empty
 record slots as records). **Stages 10, 11 and 12 have since also run against machine 2**
-(workflow `b7865873-40b2-43b5-825f-be5ebba704fc`), with the same outcomes on each: the
-log clear reproduced, both sleep/hibernate refusals reproduced, and wake-from-off
-reproduced. Every one of stages 9-12 has now run on both machines — see
+(pipeline 244, workflow `b7865873-40b2-43b5-825f-be5ebba704fc`, jobs
+`hardware-log-clear` 3168, `hardware-sleep-hibernate` 3170, `hardware-wake-from-off`
+3172), with the same outcomes on each: the log clear reproduced, both sleep/hibernate
+refusals reproduced, and wake-from-off reproduced. Every one of stages 9-12 has now
+run on both machines — see
 `docs/capability-matrix.md` Tier 4 for what is still left open (the padding-on-refill
 question for 19.0.5, and wake-from-off's independent-confirmation step, which no CI run
 on either machine can supply).
@@ -441,9 +448,10 @@ Being explicit, because the gap matters:
   stage 10 archived those records, invoked `ClearLog`, and independently re-read the
   log to confirm empty rather than trusting `ClearLog`'s own return value. **Stage 9
   has since passed on `amt-lab-02` (AMT 19.0.5, 110 records, pipeline 226) as well, and
-  stage 10 has since passed there too** (workflow
-  `b7865873-40b2-43b5-825f-be5ebba704fc`, same archive-clear-reread sequence on its own
-  110 records), so both modules now rest on two generations. What no green run on
+  stage 10 has since passed there too** (pipeline 244, workflow
+  `b7865873-40b2-43b5-825f-be5ebba704fc`, job `hardware-log-clear` 3168, same
+  archive-clear-reread sequence on its own 110 records), so both modules now rest on
+  two generations. What no green run on
   either machine settles is the **empty-slot padding's relationship to firmware
   generation versus timing**: machine 1's 205 padding entries were read on a log that
   had partly refilled after its clear, while machine 2's immediate post-clear re-read
@@ -467,8 +475,9 @@ Being explicit, because the gap matters:
   stage had issued any of them, and firmware answered `outcome: firmware_refused` /
   `error_class: remote_operation` for all three, before any request reached the
   platform. The machine was left `on` and healthy. The same stage ran again against
-  `amt-lab-02` (workflow `b7865873-40b2-43b5-825f-be5ebba704fc`), with the identical
-  refusal on all three and the same healthy `on` outcome. This is the most
+  `amt-lab-02` (pipeline 244, workflow `b7865873-40b2-43b5-825f-be5ebba704fc`, job
+  `hardware-sleep-hibernate` 3170), with the identical refusal on all three and the
+  same healthy `on` outcome. This is the most
   consequential update: the finding reproduces across **two firmware generations
   three majors apart**, which materially strengthens it — though it remains
   repeatability, not a general claim about AMT's sleep/hibernate support everywhere.
@@ -478,7 +487,8 @@ Being explicit, because the gap matters:
   reporting itself powered off — on both machines.** First against `amt-lab-01`
   (2026-07-31): 3 reachability probes while AMT self-reported off, 0 failures, a wake
   request accepted, and the machine restored to `on`. Then against `amt-lab-02`
-  (workflow `b7865873-40b2-43b5-825f-be5ebba704fc`), identically. `operator_attestation`
+  (pipeline 244, workflow `b7865873-40b2-43b5-825f-be5ebba704fc`, job
+  `hardware-wake-from-off` 3172), identically. `operator_attestation`
   is `null` on both runs, as it will be on every unattended CI run on either machine
   — nothing reachable from CI independently confirms genuine physical power-off, and
   two machines agreeing does not close that gap. See Tier 4 in
@@ -490,7 +500,8 @@ existed at the time) against AMT 16.1.30 (`amt-lab-01`, 2026-07-28) and all eigh
 against AMT 19.0.5 (`amt-lab-02`, 2026-07-29)**, each run limited to the machine it
 qualified (`hardware-limit`), so neither touched the other, **plus stages 9-12 against
 `amt-lab-01` (2026-07-31, pipeline 208) and again against `amt-lab-02`** (stage 9 in
-pipeline 226; stages 10-12 in workflow `b7865873-40b2-43b5-825f-be5ebba704fc`). A
+pipeline 226; stages 10-12 in pipeline 244, workflow
+`b7865873-40b2-43b5-825f-be5ebba704fc`). A
 read-only re-run against machine 1 on 2026-07-29 then read that machine with v0.2.0's
 fact code, which closed the last coverage difference between the two for the original
 eight stages: `amt_info`'s network and system-state facts are now confirmed populated

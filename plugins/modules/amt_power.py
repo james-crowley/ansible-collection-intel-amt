@@ -47,9 +47,10 @@ options:
         They are wired to the CIM C(RequestPowerStateChange) codes 3, 4 and 7
         respectively -- correct per the DMTF/C(go-wsman-messages) mapping. B(On both
         machines this collection has ever asked -- AMT 16.1.30, hardware qualification
-        stage 11, 2026-07-31, CircleCI pipeline 208; and AMT 19.0.5, the same stage,
-        CircleCI workflow b7865873-40b2-43b5-825f-be5ebba704fc -- firmware refused all
-        three, identically, on both): this module raised
+        stage 11, 2026-07-31, CircleCI pipeline 208, job hardware-sleep-hibernate 2576;
+        and AMT 19.0.5, the same stage, CircleCI pipeline 244, workflow
+        b7865873-40b2-43b5-825f-be5ebba704fc, job hardware-sleep-hibernate 3170 --
+        firmware refused all three, identically, on both): this module raised
         C(error_class=remote_operation) for every one of V(sleep-light), V(sleep-deep)
         B(and) V(hibernate) on each machine, which that qualification stage's own
         three-way classification records as C(outcome=firmware_refused) -- AMT rejected

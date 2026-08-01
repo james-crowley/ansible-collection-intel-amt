@@ -118,9 +118,10 @@ return value. Stage 9 has since also run against `amt-lab-02`, AMT 19.0.5 (110
 records, pipeline 226), and a re-run against machine 1 on a log stage 10 had
 emptied **found a real defect** — `amt_event_log` was counting firmware's
 zero-filled empty record slots as records (issue #105, fixed in 0.7.1). Stage 10
-has since also run against `amt-lab-02` (CircleCI workflow
-`b7865873-40b2-43b5-825f-be5ebba704fc`) and reproduced the identical sequence on
-its own 110 records, so both modules now carry the two-generation coverage the
+has since also run against `amt-lab-02` (CircleCI pipeline 244, workflow
+`b7865873-40b2-43b5-825f-be5ebba704fc`, job `hardware-log-clear` 3168) and
+reproduced the identical sequence on its own 110 records, so both modules now
+carry the two-generation coverage the
 other five modules have. See [`docs/amt_event_log.md`](docs/amt_event_log.md),
 [`docs/amt_log_clear.md`](docs/amt_log_clear.md), and Tier 3 of
 [`docs/capability-matrix.md`](docs/capability-matrix.md) for the full result.
@@ -131,9 +132,10 @@ are selectable and carry the correct CIM codes, but the first time any hardware
 stage issued any of them (2026-07-31, `amt-lab-01`, AMT 16.1.30, same run as
 above), firmware refused all three (`error_class=remote_operation`) before the
 request ever reached the platform. The machine was left `on` and healthy. Stage 11
-ran again against `amt-lab-02`, AMT 19.0.5 (workflow
-`b7865873-40b2-43b5-825f-be5ebba704fc`), with the identical refusal on all three,
-and that machine was left `on` and healthy too. This is the most consequential
+ran again against `amt-lab-02`, AMT 19.0.5 (pipeline 244, workflow
+`b7865873-40b2-43b5-825f-be5ebba704fc`, job `hardware-sleep-hibernate` 3170), with
+the identical refusal on all three, and that machine was left `on` and healthy
+too. This is the most consequential
 update in this run: the finding is no longer one machine's result, it reproduces
 across **two firmware generations three majors apart** — that materially
 strengthens it, though two generations is still repeatability, not a
@@ -145,8 +147,9 @@ capability matrix.
 reporting itself powered off — on both machines.** First on `amt-lab-01`
 (2026-07-31): 3 reachability probes while AMT self-reported `off`, 0 failures, a
 wake request accepted, and the machine restored to `on`. Then on `amt-lab-02`
-(workflow `b7865873-40b2-43b5-825f-be5ebba704fc`), identically: 3 probes, 0
-failures, wake accepted, restored to `on`. This strengthens the previous position
+(pipeline 244, workflow `b7865873-40b2-43b5-825f-be5ebba704fc`, job
+`hardware-wake-from-off` 3172), identically: 3 probes, 0 failures, wake accepted,
+restored to `on`. This strengthens the previous position
 considerably, but `off_confirmed_by_amt` is AMT's own self-report, not independent
 confirmation of genuine physical power-off — nothing reachable from unattended CI
 can supply that, on either machine. Two machines agreeing does not close that gap;

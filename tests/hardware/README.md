@@ -289,15 +289,17 @@ result. Stage 9 has since run against `amt-lab-02` too (pipeline 226, 110 record
 a re-run against machine 1 on a log stage 10 had emptied **found a real defect**
 (`amt_event_log` counting firmware's zero-filled empty record slots as records, issue
 #105, fixed in 0.7.1). Stage 10 has since also run against `amt-lab-02` (CircleCI
-workflow `b7865873-40b2-43b5-825f-be5ebba704fc`), archiving and clearing its own 110
-records the same way. Both modules are now hardware-qualified **on both machines**.
+pipeline 244, workflow `b7865873-40b2-43b5-825f-be5ebba704fc`, job
+`hardware-log-clear` 3168), archiving and clearing its own 110 records the same way.
+Both modules are now hardware-qualified **on both machines**.
 
 Stages 11 and 12 close two further gaps the original eight stages never reached:
 `amt_power`'s sleep-light/sleep-deep/hibernate states (stage 4 covers only on/off), and
 whether the endpoint can actually be reached and woken over WS-Man while genuinely
 powered off (no earlier stage ever tried). Both first ran on 2026-07-31, against
-`amt-lab-01`, and have since also run against `amt-lab-02` (workflow
-`b7865873-40b2-43b5-825f-be5ebba704fc`). Stage 11's result is a clean negative on both
+`amt-lab-01`, and have since also run against `amt-lab-02` (pipeline 244, workflow
+`b7865873-40b2-43b5-825f-be5ebba704fc`, jobs `hardware-sleep-hibernate` 3170 and
+`hardware-wake-from-off` 3172). Stage 11's result is a clean negative on both
 machines: AMT refused all three sleep/hibernate requests outright, before they reached
 the platform, on 16.1.30 and again on 19.0.5 -- the same refusal reproduced across two
 firmware generations three majors apart, which is the most consequential update here.
@@ -386,7 +388,7 @@ Stated precisely, because which run established what still matters:
 | `amt-lab-01` | AMT 16.1.30 | Read-only re-run (1, 3, 8), nothing mutated | 2026-07-29 |
 | `amt-lab-01` | AMT 16.1.30 | **9, 10, 11, 12** -- all four, first real-firmware run of any of them | 2026-07-31 |
 | `amt-lab-02` | AMT 19.0.5 | **9** -- passed cleanly, 110 records | pipeline 226 |
-| `amt-lab-02` | AMT 19.0.5 | **10, 11, 12** -- all three, same outcomes as machine 1 | workflow `b7865873-40b2-43b5-825f-be5ebba704fc` |
+| `amt-lab-02` | AMT 19.0.5 | **10, 11, 12** -- all three, same outcomes as machine 1 | pipeline 244, jobs 3168/3170/3172 |
 
 **"All eight" in the first two rows means all eight that existed at the time.**
 Stages 9-12 were added after both of those runs. They have now run at least once
@@ -417,8 +419,9 @@ correction: through 0.3.0 this collection decoded `14` as `s0_dc` and reported
 `false` here, from a value table that was wrong (see
 [`docs/capability-matrix.md`](../../docs/capability-matrix.md) Tier 1). Stage 12
 (`qualify_wake_from_off.yml`) has now made that measurement for real, first against
-`amt-lab-01` on 2026-07-31 and since against `amt-lab-02` too (workflow
-`b7865873-40b2-43b5-825f-be5ebba704fc`): on **both** machines, WS-Man answered 3
+`amt-lab-01` on 2026-07-31 and since against `amt-lab-02` too (pipeline 244, workflow
+`b7865873-40b2-43b5-825f-be5ebba704fc`, job `hardware-wake-from-off` 3172): on
+**both** machines, WS-Man answered 3
 reachability probes out of 3 while AMT self-reported the machine off, a wake request
 was accepted, and the machine came back on. Read the playbook's own header and
 [`PREFLIGHT.md`](PREFLIGHT.md) for the honest limit on what even these passing runs

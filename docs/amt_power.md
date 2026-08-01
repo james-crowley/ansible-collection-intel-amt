@@ -41,8 +41,9 @@ three — identically.** Hardware qualification stage 11 issued each action agai
 "remote_operation"` — AMT rejected the request itself, before it ever reached the
 platform. The machine was reported `on` before, during and after every attempt, and
 was left healthy. Stage 11 ran again against `amt-lab-02`, AMT 19.0.5 (CircleCI
-workflow `b7865873-40b2-43b5-825f-be5ebba704fc`), with the same result on all three
-actions and the machine left `on` and healthy there too. This is the most
+pipeline 244, workflow `b7865873-40b2-43b5-825f-be5ebba704fc`, job
+`hardware-sleep-hibernate` 3170), with the same result on all three actions and the
+machine left `on` and healthy there too. This is the most
 consequential update to this section: the finding is no longer one machine's
 result, it reproduces across **two firmware generations three majors apart**, on
 the same hardware family. See [`capability-matrix.md`](capability-matrix.md) for
@@ -212,8 +213,9 @@ turn a successful request into a reported failure — see
   `amt-lab-01`, AMT 16.1.30, for the first time any hardware stage had issued any of
   them (stage 4 only ever covered `on` and `off`), and firmware refused every one
   (`error_class=remote_operation`) before the request reached the platform. Stage 11
-  ran again against `amt-lab-02`, AMT 19.0.5 (workflow
-  `b7865873-40b2-43b5-825f-be5ebba704fc`), with the identical refusal on all three.
+  ran again against `amt-lab-02`, AMT 19.0.5 (pipeline 244, workflow
+  `b7865873-40b2-43b5-825f-be5ebba704fc`, job `hardware-sleep-hibernate` 3170), with
+  the identical refusal on all three.
   That is a measured result reproduced on two firmware generations three majors
   apart, not a general claim about AMT — any generation outside these two has never
   been asked, and two generations is repeatability, not a compatibility guarantee.

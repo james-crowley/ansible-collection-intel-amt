@@ -14,9 +14,10 @@ Clear the Intel AMT event log.
 > passed: 205 records archived to disk first, `ClearLog` reported `records_before: 205`
 > / `records_after: 0`, and an independent re-read afterwards confirmed the log empty
 > rather than trusting `ClearLog`'s own return value. Stage 10 has since also run
-> against `amt-lab-02`, AMT 19.0.5 (CircleCI workflow
-> `b7865873-40b2-43b5-825f-be5ebba704fc`), and reproduced the identical sequence on its
-> own 110 records: `records_before: 110` / `records_after: 0`, with an independent
+> against `amt-lab-02`, AMT 19.0.5 (CircleCI pipeline 244, workflow
+> `b7865873-40b2-43b5-825f-be5ebba704fc`, job `hardware-log-clear` 3168), and
+> reproduced the identical sequence on its own 110 records: `records_before: 110` /
+> `records_after: 0`, with an independent
 > re-read confirming empty. That second run's independent `amt_event_log` re-read,
 > taken *immediately* after the clear, reported `empty_slots: 0` — see "A read after a
 > clear is trustworthy" below for what that does and does not say about padding. See
@@ -194,9 +195,10 @@ success; that is the specific behaviour this module exists not to repeat.
 
 - **Verified against real firmware on both lab generations.** Stage 10 passed against
   `amt-lab-01` (AMT 16.1.30, 2026-07-31, pipeline 208) and again against `amt-lab-02`
-  (AMT 19.0.5, workflow `b7865873-40b2-43b5-825f-be5ebba704fc`), including the
-  independent re-read that confirmed the log empty on each. Any generation outside
-  these two remains untested — two generations is repeatability, not a compatibility
+  (AMT 19.0.5, pipeline 244, workflow `b7865873-40b2-43b5-825f-be5ebba704fc`, job
+  `hardware-log-clear` 3168), including the independent re-read that confirmed the log
+  empty on each. Any generation outside these two remains untested — two generations
+  is repeatability, not a compatibility
   guarantee. See [`capability-matrix.md`](capability-matrix.md) Tier 3.
 - The method name, its empty parameter list, and the container properties the receipt is
   built from are third-party-sourced. Each fact names its source in
