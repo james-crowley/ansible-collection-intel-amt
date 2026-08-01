@@ -148,6 +148,23 @@ class TestLinkPolicyWriteTable:
         with pytest.raises(ValueError, match="unknown link_policy name"):
             network.decode_link_policy_option(["always_on"])
 
+    def test_an_empty_link_policy_list_is_refused_rather_than_written_as_an_absent_property(self):
+        # An empty array emits no elements at all (wsman._append_params), so the Put
+        # body would simply omit LinkPolicy and firmware would be asked nothing.
+        # `link_policy: []` passes the module's `choices` validation, so it is
+        # reachable from a playbook and has to be refused here.
+        with pytest.raises(InvalidStateError) as excinfo:
+            _plan(link_policy=[])
+        assert excinfo.value.error_class == ErrorClass.INVALID_STATE
+        assert "empty list" in str(excinfo.value)
+        assert "Omit the option entirely" in str(excinfo.value)
+
+    def test_a_non_empty_link_policy_list_is_not_caught_by_that_refusal(self):
+        # The negative control: the refusal is about emptiness, not about
+        # link_policy being suspicious.
+        plan = _plan(link_policy=["s0_ac", "sx_ac"])
+        assert plan.ethernet_put["LinkPolicy"] == [1, 14]
+
     def test_an_unrecognised_raw_value_renders_unknown_with_its_integer(self):
         # Never a bare "unknown": 0 is not a member of this enum, so collapsing an
         # unnamed value onto the word alone would discard the only evidence there is.
