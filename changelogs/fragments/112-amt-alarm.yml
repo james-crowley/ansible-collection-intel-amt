@@ -1,0 +1,181 @@
+---
+minor_changes:
+  - >-
+    New module M(james_crowley.intel_amt.amt_alarm) - manage Intel AMT scheduled-wake
+    alarms. AMT can power a machine on by itself at a wall-clock time, with nothing
+    installed on the target, and nothing in this collection exposed it (issue #112). An
+    alarm is B(desired state) rather than an action, so the module converges: a second run
+    with the same arguments reports C(changed=false). O(amt_alarm:state=present) creates
+    or replaces the alarm named by O(amt_alarm:name), V(absent) removes it, and V(query)
+    -- the default -- reads every configured alarm and changes nothing. Full C(check_mode)
+    support. Backed by C(AMT_AlarmClockService.AddAlarm) and C(IPS_AlarmClockOccurrence),
+    decoded per C(docs/protocol-notes.md) §2.10; see C(docs/amt_alarm.md).
+  - >-
+    C(amt_alarm) - B(O(amt_alarm:start_time) must carry a timezone, and a value without
+    one is refused) with C(error_class=invalid_state) rather than being guessed at. This is
+    not pedantry: the two existing implementations of this firmware class B(disagree) about
+    what an unqualified wall-clock time means. C(go-wsman-messages) v2.48.3
+    (C(pkg/wsman/amt/alarmclock/service.go)) calls C(.UTC()) before formatting, so its
+    23:59 is 23:59 UTC; MeshCentral's C(agents/meshcmd.js) builds the string from B(local)
+    date components (C(getFullYear)/C(getHours)/...) and appends a literal C(Z), so its
+    23:59 is 23:59 wherever the operator happens to be, mislabelled as UTC. Either
+    assumption would silently wake one population's machines wrong by exactly the
+    controller's UTC offset -- a defect that surfaces as "the patch window ran at the wrong
+    hour", not as an error. The wire format follows C(go-wsman-messages), which is this
+    collection's cited authority and is the same tie-break §2.8 already applies to the
+    event log's timestamp rendering. V(2026-08-02T03:00:00Z) and
+    V(2026-08-02T03:00:00-04:00) are both accepted and mean different instants.
+  - >-
+    C(amt_alarm) - reports firmware's B(own) real-time clock next to every result, from
+    C(AMT_TimeSynchronizationService.GetLowAccuracyTimeSynch), whose C(Ta0) is Unix epoch
+    seconds -- the same units and epoch M(james_crowley.intel_amt.amt_event_log) already
+    decodes, corroborated by the vendor's captured C(1704586865) reading as
+    2024-01-07T00:21:05Z. RV(amt_alarm:firmware_clock.skew_seconds) is
+    C(firmware - controller), so B(positive means firmware is ahead), and it is reported
+    rather than corrected for: an alarm whose time had been silently adjusted for skew
+    would be impossible to reason about, and C(SetHighAccuracyTimeSynch) writes to flash.
+    RV(amt_alarm:firmware_clock.time_source) is the field that matters -- C(0)
+    (V(bios_rtc)) means firmware is reading the platform RTC, which on a machine whose
+    BIOS keeps B(local) time is B(not) UTC. So "AMT keeps UTC" is a fact about how a
+    machine was set up, not about AMT, and this is how a caller finds out which.
+    RV(amt_alarm:firmware_clock) is V(null) on firmware that does not implement the
+    service, which degrades the past-date check rather than failing the run.
+  - >-
+    C(amt_alarm) - idempotence rests on a real key. C(InstanceID) on
+    C(IPS_AlarmClockOccurrence) is B(caller-supplied), not firmware-assigned --
+    C(go-wsman-messages)' C(types.go) types it "the instance key, set by the caller of
+    C(AMT_AlarmClockService.AddAlarm)" -- and both other implementations go further and
+    make one caller-supplied name serve as B(both) C(InstanceID) and C(ElementName):
+    Intel's own Console assigns C(alarm.InstanceID = alarm.ElementName) outright, and
+    MeshCentral's meshcmd passes its C(--add) argument as both. O(amt_alarm:name) therefore
+    becomes both fields, and convergence matches on C(InstanceID) and nothing else.
+    Matching on C(ElementName) -- which MeshCentral's own code does, getting away with it
+    only because it sets the two equal -- would find an alarm this module could then not
+    delete, since C(Delete)'s selector is the key.
+  - >-
+    C(amt_alarm) - convergence compares B(three) fields, not just the time:
+    C(start_time), C(interval_minutes) and C(delete_on_completion). Comparing the time
+    alone would silently leave a one-shot alarm where a daily one was asked for, and a
+    C(delete_on_completion) mismatch leaves an occurrence behind after it fires, counting
+    against firmware's five-alarm cap. A difference in any of the three reports
+    C(alarm_operation: replace) and issues C(Delete) B(then) C(AddAlarm), in that order,
+    because B(there is no C(Put) on the occurrence class) in any source and C(AddAlarm)
+    for an C(InstanceID) that already exists cannot succeed -- the key has to be freed
+    before it can be reclaimed. The machine has no alarm for one WS-Man round trip in
+    between, and this module cannot make that window zero.
+  - >-
+    C(amt_alarm) - a past-dated O(amt_alarm:start_time) is B(refused) with
+    C(error_class=invalid_state) unless O(amt_alarm:allow_past_start_time=true), and the
+    refusal is B(this collection's judgement, not a firmware state report) -- the message
+    says so, because otherwise an operator goes hunting for a firmware setting to change.
+    B(No source available to this project establishes what firmware actually does with a
+    past-dated alarm.) MeshCentral prints "Verify the alarm is for a future time" when
+    C(AddAlarm) fails, which is a hint in an error message rather than a specification and
+    does not say which of the two happened; C(go-wsman-messages) defines exactly one
+    return value for the method (C(0: Success)) so it cannot say either; no captured
+    firmware response shows a rejection of any kind; and Intel's Console performs no
+    client-side check at all. Fires immediately, rejected, and sits forever are all
+    consistent with everything known -- and one of them is an unscheduled reboot from a
+    stale playbook variable, which is why the module refuses rather than finding out on
+    somebody's hardware. B(The comparison is made against firmware's clock), not the
+    controller's, because the machine holding the alarm is the one that decides whether
+    the time has passed; where firmware will not report its clock the controller's is used
+    and the message says the comparison may be wrong by the RTC's drift. An alarm that
+    already B(matches) desired state is never refused for being past, so a recurring alarm
+    whose last C(StartTime) has gone by still reports C(ok).
+  - >-
+    C(amt_alarm) - the recurrence option is named O(amt_alarm:interval_minutes), with its
+    unit in the name deliberately. The wire value is an ISO-8601 duration
+    (C(P1DT23H59M)) and both vendor implementations model the underlying quantity as an
+    integer count of minutes, but a bare C(interval: 24) is ambiguous between hours and
+    minutes in a way a wake-up time cannot afford. The encoded duration appears in
+    RV(amt_alarm:operation.desired.interval) so the translation is visible. Seconds are
+    truncated to V(00), honouring the undocumented constraint MeshCentral's meshcmd
+    records against its own construction of this value ("seconds must be 00") -- reported
+    by prior art and by nothing else, honoured because the cost is a truncated seconds
+    field and the cost of ignoring it is an alarm firmware may refuse. The value actually
+    sent is in the receipt, so the truncation is not silent.
+  - >-
+    C(amt_alarm) - firmware holds at most five alarms, and the limit is pre-checked rather
+    than discovered. C(go-wsman-messages)' C(service.go) states on C(AddAlarm): "The
+    method would fail if 5 instances or more of C(IPS_AlarmClockOccurrence) already exist
+    in the system." Nothing in any source says what B(code) that failure returns -- the
+    method's C(returnValueToString) has exactly one entry -- so an opaque C(ReturnValue)
+    this collection could not name is worse than a client-side refusal that names the
+    limit, its source, and the alarms already present. Replacing an existing alarm at the
+    limit is still allowed, since a replace frees the key before claiming it.
+  - >-
+    C(amt_alarm) - reading configured alarms is C(state: query) on this module and is
+    deliberately B(not) a new C(gather_subset) value on
+    M(james_crowley.intel_amt.amt_info). C(amt_info)'s subset resolution adds every valid
+    subset when a caller supplies no positive entry, so C(gather_subset: ['all']) or
+    C(gather_subset: ['!memory']) in a play written today would silently start reading
+    C(IPS_AlarmClockOccurrence) and paying the round trips for it -- and those two forms
+    are the ones people actually write. An alarm is also configuration this collection
+    B(writes), not inventory: every existing subset reads a C(CIM_*) physical-asset class
+    describing the machine, whereas an alarm describes what somebody asked the machine to
+    do. C(amt_alarm) has to read the alarm list to converge anyway, so the read path lives
+    in the module that owns the identity semantics.
+  - >-
+    C(amt_alarm) - RV(amt_alarm:service) reports C(AMT_AlarmClockService)'s own summary
+    and is deliberately not depended on. C(NextAMTAlarmTime) and C(AMTAlarmClockInterval)
+    are declared by C(go-wsman-messages)' struct and are B(absent from the only captured
+    firmware response for the class), so both may be V(null) on real hardware --
+    meaning "firmware did not report it", B(not) "no alarm is set".
+    RV(amt_alarm:alarms), from enumerating the occurrence class, is the authoritative
+    reading.
+  - >-
+    C(plugins/module_utils/wsman.py) - new C(WsmanClient.delete()), implementing
+    WS-Transfer C(Delete). The instance is named entirely by the C(SelectorSet) header,
+    the body is empty, and the response body is empty too (per the vendor's captured
+    C(DeleteResponse)), so there is nothing to return and a caller wanting proof the
+    instance is gone must re-read. B(Never retried): a retry after a lost response would
+    delete an instance a different caller had since recreated under the same key, which is
+    possible precisely because the key is caller-supplied.
+  - >-
+    C(plugins/module_utils/wsman.py) - new C(EmbeddedInstance), for a method parameter
+    that is a nested property bag rather than a scalar. C(AddAlarm)'s only input is an
+    embedded C(IPS_AlarmClockOccurrence) whose body spans B(three namespaces): the
+    C(AlarmTemplate) wrapper in the method's, its properties in the occurrence class's,
+    and C(Datetime)/C(Interval) in the DMTF B(common) namespace
+    (C(http://schemas.dmtf.org/wbem/wscim/1/common)), which appears nowhere else in this
+    collection and is not derivable from any class name. An instance's C(namespace)
+    governs its B(children), not its own tag, which is what makes the three-namespace body
+    expressible by nesting. A C(None) property is omitted entirely rather than emitted
+    empty, the same rule flat parameters already follow and for the same hardware-verified
+    reason: real AMT 16.1.30 answers HTTP 400 to an empty element where it accepts an
+    absent one.
+  - >-
+    C(tests/integration/mock_servers/wsman_server.py) - serves C(AMT_AlarmClockService),
+    C(IPS_AlarmClockOccurrence) and C(AMT_TimeSynchronizationService), plus the
+    WS-Transfer C(Delete) verb. C(AmtState.alarm_occurrences) is real, mutable,
+    cross-request state, which is what makes the idempotence property B(observable) rather
+    than merely asserted: C(AddAlarm) inserts, C(Delete) removes, and a later C(Enumerate)
+    sees exactly what the previous call did. A canned alarm list would report
+    C(changed=false) whether or not the first run wrote anything -- which is the entire
+    claim. Every property of the C(AddAlarm) template is read at its B(exact) namespace,
+    so a client that flattened any of the three fails here rather than on firmware; three
+    tests post hand-built bodies to assert that strictness directly, including a
+    correctly-namespaced positive control. Two refusals are implemented, each with
+    evidence: the documented five-occurrence limit, and a duplicate C(InstanceID) (which
+    is what forces the module's replace path to delete first). A past-dated C(StartTime)
+    is deliberately B(not) refused -- inventing that rejection would make this mock the
+    source of a behaviour claim nothing supports, and would make the client's own check
+    untestable.
+  - >-
+    C(tests/integration/mock_servers/run_wsman_mock.py) - new C(--no-alarm-clock),
+    C(--no-time-sync), C(--time-sync-ta0), C(--no-time-sync-ta0) and
+    C(--alarm-occurrence-limit). The first two are separate flags rather than one because
+    they degrade C(amt_alarm) differently: no alarm classes is an
+    C(unsupported_capability) failure, while an alarm clock with no readable RTC makes the
+    module fall back to the controller's clock and say so -- a quieter path a combined flag
+    would leave unreachable. C(--time-sync-ta0) is what makes the past-date check's
+    B(source) provable rather than assumed: set firmware's clock 100 days ahead and a
+    C(start_time) the controller thinks is in the future becomes past-dated, which can only
+    happen if the check really consulted firmware. The C(amt_alarm) integration target
+    pairs it with a negative control -- a time in firmware's own future, accepted -- since
+    otherwise the refusal would be satisfied by a check that rejected everything.
+    C(AmtState.time_sync_ta0) defaults to the host's current time rather than to the vendor
+    fixture's frozen 2024 value, because a mock stuck in the past would refuse every
+    near-future alarm a test wrote and the failure would look like a bug in the check
+    instead of in the fixture.

@@ -2273,7 +2273,7 @@ class TestRealClientAlarmClock:
         )
         response = _post(server, _envelope(f"{AMT_ALARM_CLOCK_SERVICE}/AddAlarm", AMT_ALARM_CLOCK_SERVICE, good))
         assert response.status_code == 200
-        assert _find_text(ET.fromstring(response.content), "ReturnValue") == "0"
+        assert _find_text(ET.fromstring(response.content), "ReturnValue") == "0"  # noqa: S314 -- test fixture's own response
         assert list(server.state.alarm_occurrences) == ["nightly"]
 
     def test_the_amt10_enumerate_fault_mode_does_not_reach_the_ips_class(self):

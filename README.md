@@ -164,6 +164,22 @@ can supply that, on either machine. Two machines agreeing does not close that ga
 it is exactly as open as it was with one. See Tier 4 of the capability matrix for
 exactly what remains open.
 
+**`amt_alarm` has never touched real firmware, and there is deliberately no hardware
+stage for it.** Two reasons, and the first is not solved by patience: proving an alarm
+fires needs wall-clock time to pass, so the shortest honest test is "set an alarm two
+minutes out, then poll" — the slowest stage in the suite, whose failure mode ("it has
+not fired *yet*") is indistinguishable from a real failure without waiting longer
+still. And it only means anything with the machine powered **off**, since a running
+machine cannot tell "fired immediately" from "sat forever" — which needs the stage-12
+behaviour above, established on `amt-lab-01` only. So the module is covered by mock
+coverage driven through the real client and by an integration target that includes the
+idempotence case, and **nothing about firmware's actual alarm behaviour is claimed**.
+One consequence ships unresolved and is documented rather than guessed at: no source
+available to this project establishes what firmware does with a **past-dated** alarm,
+so `amt_alarm` refuses one itself and says the refusal is ours. See
+[`docs/amt_alarm.md`](docs/amt_alarm.md) and
+[`docs/protocol-notes.md`](docs/protocol-notes.md) §2.10.8.
+
 The 0.5.0 hardware/asset inventory has now been read from both machines too: all
 six `CIM_` classes answered on 16.1.30 and 19.0.5, so serial number, model,
 manufacturer, processors, DIMMs and disks are hardware-verified for existence and
@@ -322,8 +338,9 @@ ansible-galaxy collection install git+https://github.com/james-crowley/ansible-c
 | `amt_media` | Attach boot media over IDE-R (bootable ISO + writable image) | Yes |
 | `amt_event_log` | Read the firmware event log — why an unattended install failed | No |
 | `amt_log_clear` | Clear the firmware event log (irreversible; needs confirmation) | Yes |
+| `amt_alarm` | Scheduled wake at a wall-clock time; converges as desired state | Optional |
 
-All seven accept the same connection options, documented once in the
+All eight accept the same connection options, documented once in the
 `connection` doc fragment. Set them centrally with `module_defaults`:
 
 ```yaml
@@ -547,7 +564,8 @@ one-time account/secret steps a maintainer needs.
 - [`docs/amt_info.md`](docs/amt_info.md), [`docs/amt_power.md`](docs/amt_power.md),
   [`docs/amt_boot.md`](docs/amt_boot.md), [`docs/amt_redirection.md`](docs/amt_redirection.md),
   [`docs/amt_media.md`](docs/amt_media.md), [`docs/amt_event_log.md`](docs/amt_event_log.md),
-  [`docs/amt_log_clear.md`](docs/amt_log_clear.md) — per-module reference: options, return
+  [`docs/amt_log_clear.md`](docs/amt_log_clear.md),
+  [`docs/amt_alarm.md`](docs/amt_alarm.md) — per-module reference: options, return
   values, examples, errors, and limitations.
 - [`docs/capability-matrix.md`](docs/capability-matrix.md) — exactly what is verified
   against real firmware evidence, what is only mock-tested, and what open risks are

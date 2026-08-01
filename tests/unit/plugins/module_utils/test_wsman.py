@@ -559,7 +559,7 @@ class TestEmbeddedInstanceParameters:
         client.invoke("AMT_AlarmClockService", "AddAlarm", params)
         call = client._session.post.call_args
         sent = call.kwargs.get("data") or call.args[1]
-        return ET.fromstring(sent)
+        return ET.fromstring(sent)  # noqa: S314 -- the client's own envelope, built in-process
 
     def test_the_wrapper_is_named_in_the_enclosing_namespace_and_its_children_in_its_own(self):
         root = self._sent_root(
@@ -601,9 +601,7 @@ class TestEmbeddedInstanceParameters:
         accepted; an embedded instance that emitted ``<Interval/>`` would reintroduce
         exactly the bug that blocked IDE-R boot.
         """
-        root = self._sent_root(
-            {"AlarmTemplate": EmbeddedInstance(namespace=self.NS_OCCURRENCE, properties={"InstanceID": "nightly", "Interval": None})}
-        )
+        root = self._sent_root({"AlarmTemplate": EmbeddedInstance(namespace=self.NS_OCCURRENCE, properties={"InstanceID": "nightly", "Interval": None})})
         template = root.find(f".//{{{self.NS_METHOD}}}AlarmTemplate")
         assert [child.tag for child in template] == [f"{{{self.NS_OCCURRENCE}}}InstanceID"]
 

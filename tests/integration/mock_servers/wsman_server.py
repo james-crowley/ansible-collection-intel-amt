@@ -2188,9 +2188,7 @@ def _alarm_occurrence_items(state: AmtState) -> list[str]:
     items: list[str] = []
     for occurrence in state.alarm_occurrences.values():
         interval = occurrence.get("Interval")
-        interval_xml = (
-            f'<r:Interval><p:Interval xmlns:p="{NS_CIM_COMMON}">{escape(str(interval))}</p:Interval></r:Interval>' if interval is not None else ""
-        )
+        interval_xml = f'<r:Interval><p:Interval xmlns:p="{NS_CIM_COMMON}">{escape(str(interval))}</p:Interval></r:Interval>' if interval is not None else ""
         items.append(
             f'<r:IPS_AlarmClockOccurrence xmlns:r="{IPS_ALARM_CLOCK_OCCURRENCE}">'
             f"<r:DeleteOnCompletion>{'true' if occurrence.get('DeleteOnCompletion') else 'false'}</r:DeleteOnCompletion>"

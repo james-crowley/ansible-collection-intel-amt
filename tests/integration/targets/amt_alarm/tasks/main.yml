@@ -679,7 +679,7 @@
           Without this, the refusal above would be satisfied just as well by a check
           that rejected every alarm.
 
-    - name: allow_past_start_time sends a past-dated alarm anyway
+    - name: Send a past-dated alarm anyway with allow_past_start_time
       james_crowley.intel_amt.amt_alarm:
         host: 127.0.0.1
         port: "{{ fastclock_info.port }}"

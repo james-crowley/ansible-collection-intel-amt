@@ -60,7 +60,8 @@ options:
     type: str
   start_time:
     description:
-      - When the machine should wake, as an ISO-8601 timestamp B(including a timezone):
+      - >-
+        When the machine should wake, as an ISO-8601 timestamp B(including a timezone) --
         V(2026-08-01T03:00:00Z) or V(2026-08-01T03:00:00-04:00).
       - >-
         A value with no timezone is B(rejected) with C(error_class=invalid_state). This is

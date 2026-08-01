@@ -412,7 +412,7 @@ def read_firmware_clock(wsman: WsmanClient, *, now: datetime | None = None) -> F
     fields ``None``.
     """
     try:
-        output, _ = wsman.invoke(CLASS_TIME_SYNC, METHOD_GET_LOW_ACCURACY_TIME_SYNCH)
+        output, _return_value = wsman.invoke(CLASS_TIME_SYNC, METHOD_GET_LOW_ACCURACY_TIME_SYNCH)
     except _DEGRADABLE_ERRORS:
         return None
     epoch_seconds = optional_int(output.get("Ta0"))
@@ -601,7 +601,7 @@ def add_alarm(
             "DeleteOnCompletion": delete_on_completion,
         },
     )
-    output, _ = wsman.invoke(CLASS_ALARM_SERVICE, METHOD_ADD_ALARM, {PARAM_ALARM_TEMPLATE: template})
+    output, _return_value = wsman.invoke(CLASS_ALARM_SERVICE, METHOD_ADD_ALARM, {PARAM_ALARM_TEMPLATE: template})
     return output
 
 
@@ -734,9 +734,7 @@ def plan(
     }
 
     matches = existing is not None and (
-        existing.start_time == desired["start_time"]
-        and existing.interval_minutes == interval_minutes
-        and existing.delete_on_completion == delete_on_completion
+        existing.start_time == desired["start_time"] and existing.interval_minutes == interval_minutes and existing.delete_on_completion == delete_on_completion
     )
     if matches:
         return AlarmPlan(operation=OPERATION_NONE, changed=False, existing=existing, desired=desired)

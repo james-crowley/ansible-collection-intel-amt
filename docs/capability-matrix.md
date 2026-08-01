@@ -178,7 +178,7 @@ This is the bulk of the collection's verification effort:
   were the two highest-consequence ones. `media_session.py` (the detached daemon that
   holds credentials across a fork) was **50%** and is now **81%**; `ider.py` (the SCSI
   state machine) was **75%** and is now **92%**.
-- **9/9 integration targets** (`amt_baremetal_install_role`, `amt_boot`,
+- **10/10 integration targets** (`amt_alarm`, `amt_baremetal_install_role`, `amt_boot`,
   `amt_event_log`, `amt_info`, `amt_info_hardware`, `amt_log_clear`, `amt_media`,
   `amt_power`, `amt_redirection` under `tests/integration/targets/`) run end-to-end against local,
   deterministic fixture servers: a mock WS-Man server (HTTP Digest, TLS with a
@@ -226,6 +226,70 @@ confidently and incorrectly. And an integration target whose directory name matc
 a role in `roles/` is resolved by `ansible-test` as that role — so a target named
 `amt_baremetal_install` ran the role's `validate.yml` and none of its own tasks, a
 test that could not fail because it never executed.
+
+### `amt_alarm` — Tier 2 only, and deliberately staying there for now
+
+**`amt_alarm` has never been exercised against real firmware, and no hardware
+qualification stage exists for it.** Unlike `amt_event_log` and `amt_log_clear` — which
+sat at Tier 2 for three releases because nobody had got round to a stage — this one is a
+decision, and the reasons are worth recording so nobody spends a lab session
+rediscovering them.
+
+**Why no stage.** Two reasons, and the first is not solved by patience:
+
+1. **Proving an alarm fires requires wall-clock time to pass.** The shortest honest test
+   is "set an alarm two minutes out, then poll until it fires" — by a wide margin the
+   slowest stage in the suite, and one whose failure mode ("it has not fired *yet*") is
+   indistinguishable from a genuine failure without waiting longer still. A stage that
+   cannot distinguish those two is a stage whose red result nobody can act on.
+2. **It only means anything with the machine powered off.** A running machine cannot tell
+   "fired immediately" from "sat forever" — both leave it running. So the test needs AMT
+   to answer WS-Man while the machine is genuinely off, which is exactly the stage-12
+   behaviour, and stage 12 established that on **`amt-lab-01` only**. A stage built on it
+   could only ever run on one machine, and a green result there would say nothing about
+   the other.
+
+**What Tier 2 does cover, and how far it goes.** The `AddAlarm` body spans three
+namespaces (`protocol-notes.md` §2.10.3), which is the class of mistake a fake transport
+shaped to the client's own output cannot catch. So the coverage is deliberately
+wire-level:
+
+- `tests/unit/mock_servers/test_wsman_server.py`'s `TestRealClientAlarmClock` and
+  `TestRealClientFirmwareClock` drive the collection's **own** client over a real TCP
+  socket, and assert on the **outgoing element tags** rather than only on the parsed
+  result — so a client that flattened any of the three namespaces fails there. The mock
+  reads every template property at its exact namespace, and three further tests post
+  hand-built bodies to assert *that strictness itself*, with a correctly-namespaced
+  positive control, because "the body was accepted" cannot otherwise distinguish a
+  correct client from a permissive server. That distinction is the same one recorded
+  under "Two limits of the tiers themselves" above.
+- `tests/integration/targets/amt_alarm` runs the real module against three mock
+  endpoints, including the idempotence case (set the same alarm twice, assert the second
+  run reports `changed=false`) against a server that really holds what the first run
+  wrote — a canned alarm list would report `changed=false` either way.
+
+**What is unresolved, and ships that way.** No source available to this project
+establishes what firmware does with a **past-dated** alarm — fire immediately, reject, or
+hold forever are all consistent with MeshCentral's error-message hint, go-wsman's
+single-entry return-value map, and the absence of any captured rejection. That question is
+recorded as unanswered in `protocol-notes.md` §2.10.8 rather than guessed at, and
+`amt_alarm` refuses a past-dated alarm itself, saying in the message that the refusal is
+this collection's rather than firmware's.
+
+**Two claims in §2.10 that only hardware can settle**, listed so a future lab session
+knows what to look for:
+
+| Claim | Currently rests on | What would settle it |
+|---|---|---|
+| A past-dated alarm's behaviour | Nothing. Recorded as unknown | One powered-off machine, one alarm dated an hour ago, and a wait |
+| `AddAlarm` refuses at five occurrences | go-wsman's prose on the method, with **no** return code named by any source | Six `AddAlarm` calls, and the `ReturnValue` the sixth actually returns |
+| Seconds must be `00` | A comment in MeshCentral's meshcmd and nothing else | One `AddAlarm` with `:30` seconds, and whether firmware accepts it |
+| `AMT_AlarmClockService` reports `NextAMTAlarmTime` | Nothing — the vendor's captured response **omits** it | One `Get` against firmware holding an alarm |
+
+Note the second and third rows describe constraints this collection currently **honours**
+without evidence that they exist. That is the safe direction to be wrong in — honouring a
+constraint firmware does not have costs a truncated seconds field and a client-side
+refusal — but it is being wrong, and it is recorded here rather than presented as fact.
 
 ### `amt_event_log` and `amt_log_clear` — now Tier 3 on real firmware
 

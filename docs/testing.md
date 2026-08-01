@@ -440,6 +440,23 @@ Being explicit, because the gap matters:
   could make the two disagree, and the bug lived entirely in the case where they do.
 - Real firmware differs across AMT generations and SKUs. Anything version
   dependent is unverified until step 1 runs on that generation.
+- **`amt_alarm` has never run against real firmware, and no hardware stage exists for
+  it — by decision, not by omission.** Proving an alarm fires needs wall-clock time to
+  pass, so the shortest honest stage is "set an alarm two minutes out and poll", whose
+  failure mode ("it has not fired *yet*") cannot be distinguished from a real failure
+  without waiting longer. It also only means anything with the machine powered off,
+  since a running machine cannot tell "fired immediately" from "sat forever" — and while
+  stage 12 has now shown AMT answering WS-Man while self-reporting off on **both**
+  machines, that self-report is still not independent confirmation of physical power-off
+  (Tier 4), so an alarm stage would inherit an unproven precondition on top of its own
+  cost. What the mock tier does cover is the **wire shape**, at the level that matters
+  for this module: the `AddAlarm` body spans three namespaces, so
+  `tests/unit/mock_servers/test_wsman_server.py` drives the real client over a real
+  socket and asserts on the outgoing element tags, and three further tests post
+  hand-built bodies to prove the mock's own namespace strictness rather than relying on
+  it. Four §2.10 claims this collection currently *honours* or reports without firmware
+  evidence are listed in [`capability-matrix.md`](capability-matrix.md)'s `amt_alarm`
+  section, so a future lab session knows exactly what to check.
 - **`amt_event_log` and `amt_log_clear` have now run against real hardware on both
   machines.** Stage 9 (read-only) and stage 10 (irreversible) first ran against
   `amt-lab-01`, AMT 16.1.30, on 2026-07-31 (pipeline 208) and both passed: stage 9's

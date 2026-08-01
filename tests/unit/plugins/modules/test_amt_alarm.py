@@ -59,10 +59,18 @@ def _set_module_args(args: dict) -> None:
     basic._ANSIBLE_PROFILE = "legacy"
 
 
+def _exit_json(*_args, **kwargs):
+    raise AnsibleExitJson(kwargs)
+
+
+def _fail_json(*_args, **kwargs):
+    raise AnsibleFailJson(kwargs)
+
+
 @pytest.fixture(autouse=True)
 def _patch_exit_and_fail(monkeypatch):
-    monkeypatch.setattr(basic.AnsibleModule, "exit_json", lambda *_a, **kw: (_ for _ in ()).throw(AnsibleExitJson(kw)))
-    monkeypatch.setattr(basic.AnsibleModule, "fail_json", lambda *_a, **kw: (_ for _ in ()).throw(AnsibleFailJson(kw)))
+    monkeypatch.setattr(basic.AnsibleModule, "exit_json", _exit_json)
+    monkeypatch.setattr(basic.AnsibleModule, "fail_json", _fail_json)
 
 
 class FakeAlarmEndpoint:
@@ -414,7 +422,8 @@ class TestCheckMode:
         args = {"state": "present", "name": "nightly", "start_time": _future(), "interval_minutes": 1440}
         preview = _run(monkeypatch, endpoint, args, check_mode=True)
         real = _run(monkeypatch, endpoint, args)
-        assert preview["changed"] == real["changed"] is True
+        assert preview["changed"] is True
+        assert real["changed"] is True
         assert preview["operation"]["alarm_operation"] == real["operation"]["alarm_operation"]
         assert preview["operation"]["desired"] == real["operation"]["desired"]
 
