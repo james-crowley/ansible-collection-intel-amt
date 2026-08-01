@@ -30,7 +30,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
      Once they age out, the flag can go back on and this can return to a live
      badge. A status-scoped circle-token is not an alternative -- GitHub push
      protection correctly classifies it as a secret. -->
-[![Galaxy](https://img.shields.io/badge/dynamic/json?label=galaxy&query=%24.highest_version.version&url=https%3A%2F%2Fgalaxy.ansible.com%2Fapi%2Fv3%2Fplugin%2Fansible%2Fcontent%2Fpublished%2Fcollections%2Findex%2Fjames_crowley%2Fintel_amt%2F&color=blue)](https://galaxy.ansible.com/ui/repo/published/james_crowley/intel_amt/) [![CI: CircleCI](https://img.shields.io/badge/CI-CircleCI-343434?logo=circleci&logoColor=white)](https://app.circleci.com/pipelines/github/james-crowley/ansible-collection-intel-amt) [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE) [![ansible-core](https://img.shields.io/badge/ansible--core-%3E%3D2.17-blue.svg)](https://docs.ansible.com/) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/) [![Status: pre-release](https://img.shields.io/badge/status-pre--release-orange.svg)](#project-status)
+[![Galaxy](https://img.shields.io/badge/dynamic/json?label=galaxy&query=%24.highest_version.version&url=https%3A%2F%2Fgalaxy.ansible.com%2Fapi%2Fv3%2Fplugin%2Fansible%2Fcontent%2Fpublished%2Fcollections%2Findex%2Fjames_crowley%2Fintel_amt%2F&color=blue)](https://galaxy.ansible.com/ui/repo/published/james_crowley/intel_amt/) [![CI: CircleCI](https://img.shields.io/badge/CI-CircleCI-343434?logo=circleci&logoColor=white)](https://app.circleci.com/pipelines/github/james-crowley/ansible-collection-intel-amt) [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE) [![ansible-core](https://img.shields.io/badge/ansible--core-%3E%3D2.17-blue.svg)](https://docs.ansible.com/) [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/) [![Status: stable](https://img.shields.io/badge/status-stable-brightgreen.svg)](#project-status)
 
 Out-of-band management of **Intel AMT / vPro** machines from Ansible — power
 control, one-time boot selection, redirection state, and **native IDE-R virtual
@@ -78,7 +78,15 @@ reference this implementation is built against.
 
 ## Project status
 
-**Pre-release, and hardware-qualified on both lab machines for all seven modules.**
+**1.0.0 — hardware-qualified on both lab machines for all seven modules.**
+
+**What 1.0 commits to, and what it does not.** From here the module interfaces follow
+semantic versioning: option names, return-value structure and `error_class` values will
+not change incompatibly inside 1.x. That is the promise. It is *not* a claim that every
+capability is proven on every machine — the evidence tiers below and in
+[`docs/capability-matrix.md`](docs/capability-matrix.md) say exactly what is, and the
+[Known limitations](#known-limitations) section collects what is not, in one place, so you
+do not have to reconstruct it from nine releases of changelog entries.
 `amt_info`, `amt_power`, `amt_boot`, `amt_redirection` and `amt_media`, plus the
 bare-metal install role, have been exercised end to end against real Intel AMT
 firmware, on a self-hosted CircleCI runner inside the lab network, through
@@ -186,6 +194,76 @@ AMT's own self-report, and two machines agreeing does not close that gap. See
 `wake_on_lan_capable` in 0.2.0 or 0.3.0, re-read it** — the value table behind it was
 wrong and the boolean was inverted on mains-powered hardware; see the `CHANGELOG` for
 0.3.1.
+
+## Known limitations
+
+Current as of 1.0.0, in one place rather than spread across nine releases of changelog
+entries. Each of these is a measured or reasoned limit, not a hedge.
+
+### Firmware refuses sleep and hibernate
+
+`amt_power` accepts `sleep-light` (CIM 3), `sleep-deep` (4) and `hibernate` (7), and the
+codes are correct per the DMTF / `go-wsman-messages` mapping — but **both lab machines
+refuse all three**, before the request reaches the platform (`outcome:
+firmware_refused`, `error_class: remote_operation`). Verified on AMT 16.1.30 and 19.0.5,
+three majors apart. This is not a claim that AMT never supports sleep; it is a measured
+result on this hardware family. Test your own firmware before building on these three.
+
+### No board serial from `baseboard`
+
+`amt.hardware.baseboard.serial_number` is `null` on both machines. Firmware returns the
+`CIM_Card.SerialNumber` element **present and empty** — established by shape census, not
+guessed — so `null` is the honest representation and no fix is warranted.
+`amt.hardware.chassis.serial_number` populates; read that instead. The practical cost is
+that the `system` subset cannot distinguish a board swap from a re-rack, which needs both
+serials.
+
+### `amt_media`: `validate_certs` is inert and `ca_path` is rejected
+
+The redirection plane implements exactly one trust mode — SHA-256 leaf pinning via
+`tls_fingerprint`, required whenever `use_tls: true`. `validate_certs` is accepted for
+option-shape parity with the other modules and **does nothing**; `ca_path` is **rejected
+outright** with `error_class: tls_validation` rather than silently ignored, specifically so
+a caller cannot end up believing a media session is chain-validated when nothing is
+checking it. This is a deliberate divergence, not an oversight: the redirection plane has
+no HTTP layer to hang chain validation from.
+
+### Capabilities this collection does not have
+
+Not gaps in quality — capabilities never built, tracked as issues so the roadmap is
+visible:
+
+| Missing | Issue |
+|---|---|
+| Network configuration (reads facts, cannot set them) | [#111](https://github.com/james-crowley/ansible-collection-intel-amt/issues/111) |
+| Scheduled wake / alarm clock | [#112](https://github.com/james-crowley/ansible-collection-intel-amt/issues/112) |
+| AMT account and ACL management | [#113](https://github.com/james-crowley/ansible-collection-intel-amt/issues/113) |
+| Provisioning / activation from factory state | [#114](https://github.com/james-crowley/ansible-collection-intel-amt/issues/114) |
+| Serial-over-LAN capture | [#115](https://github.com/james-crowley/ansible-collection-intel-amt/issues/115) |
+
+**Provisioning is the biggest practical barrier**: every module here assumes AMT is already
+configured with a known password, so a factory-state machine still needs a manual MEBx
+visit. An interactive **SOL console and KVM redirection are deliberately not planned** —
+both are interactive by nature and a poor fit for Ansible's execution model.
+
+### What hardware evidence cannot reach
+
+Recorded in full in [`docs/capability-matrix.md`](docs/capability-matrix.md) under Tier 4.
+The short version: a non-zero IDE-R write needs an operating system on the target that
+writes; whether a PXE exchange actually happened needs boot services this collection
+cannot observe; whether AMT's internal one-shot boot bit was consumed has no read path in
+AMT at all; and **independent confirmation that a machine is genuinely powered off** cannot
+come from CI — two machines both self-reporting `off` is the same kind of evidence, not
+independent evidence.
+
+### Two machines is repeatability, not a compatibility guarantee
+
+All hardware evidence comes from two Lenovo ThinkStation P3 Tiny units, AMT 16.1.30 and
+19.0.5. Two generations agreeing is meaningful and is why several claims moved up a tier —
+but they remain two SKUs from one vendor. No other firmware generation has been tested,
+including the Small Business Mode / no-TLS path.
+
+---
 
 ## Requirements
 
