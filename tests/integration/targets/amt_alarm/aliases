@@ -1,0 +1,6 @@
+# Drives the real amt_alarm module against the local mock WS-Man server, over a real
+# socket. No network access, no privilege escalation, and nothing destroyed except the
+# mock server's own in-memory alarm list -- which is the point: the idempotence assertion
+# is made against a mutation that really happened. See docs/testing.md.
+needs/file/tests/integration/mock_servers/wsman_server.py
+needs/file/tests/integration/mock_servers/run_wsman_mock.py

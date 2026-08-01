@@ -78,6 +78,7 @@ CONNECTION_ARGS = {
 #: parametrized test in this file silently vacuous.
 KNOWN_MODULES = frozenset(
     {
+        "amt_alarm",
         "amt_boot",
         "amt_event_log",
         "amt_info",
@@ -304,6 +305,51 @@ def _fake_wsman(**attributes) -> Mock:
     return wsman
 
 
+def _wire_alarm(monkeypatch, _tmp_path) -> dict:
+    """A mutating ``amt_alarm`` run: it must reach ``exit_json`` with a real receipt.
+
+    Wired as ``state=present`` rather than the read-only default deliberately. The
+    receipt for a mutation is the largest result document this module produces --
+    ``previous``, ``desired`` and ``observed`` all populated -- so it is the widest
+    surface for a credential to escape through, and a read-only scenario would leave
+    most of it unexercised.
+
+    ``start_time`` is far enough in the future that the module's past-date refusal
+    cannot fire and turn this into a failure-path test by accident.
+    """
+    alarm_module = DISCOVERED_MODULES["amt_alarm"]
+    client = _fake_wsman()
+    stored: dict[str, dict] = {}
+
+    def _enumerate(resource_class, **_kwargs):
+        return [
+            {
+                "InstanceID": name,
+                "ElementName": name,
+                "StartTime": {"Datetime": occurrence["start_time"]},
+                "Interval": {"Interval": occurrence["interval"]},
+                "DeleteOnCompletion": "true",
+            }
+            for name, occurrence in stored.items()
+        ]
+
+    def _invoke(resource_class, method_name, params=None, **_kwargs):
+        if method_name == "GetLowAccuracyTimeSynch":
+            return {"Ta0": "1893456000"}, 0  # 2030-01-01T00:00:00Z
+        template = params["AlarmTemplate"]
+        stored[template.properties["InstanceID"]] = {
+            "start_time": template.properties["StartTime"].properties["Datetime"],
+            "interval": template.properties["Interval"].properties["Interval"],
+        }
+        return {"ReturnValue": "0"}, 0
+
+    client.get.return_value = {"ElementName": "Intel(r) AMT Alarm Clock Service"}
+    client.enumerate.side_effect = _enumerate
+    client.invoke.side_effect = _invoke
+    monkeypatch.setattr(alarm_module, "build_wsman_client", lambda _params: client)
+    return {"state": "present", "name": "contract-test-alarm", "start_time": "2031-01-02T03:00:00Z"}
+
+
 def _wire_boot(monkeypatch, _tmp_path) -> dict:
     client = _fake_wsman()
     capabilities = {"ForcePXEBoot": "true", "ForceHardDriveBoot": "true", "ForceCDorDVDBoot": "true", "BIOSSetup": "true", "IDER": "true", "SOL": "true"}
@@ -404,6 +450,7 @@ def _wire_media(monkeypatch, tmp_path) -> dict:
 
 
 SUCCESS_SCENARIOS = (
+    ModuleScenario("amt_alarm", wire=_wire_alarm),
     ModuleScenario("amt_boot", extra_args={"device": "pxe", "action_token": "contract-test-token"}, wire=_wire_boot),
     ModuleScenario("amt_event_log", wire=_wire_event_log),
     ModuleScenario("amt_info", wire=_wire_info),

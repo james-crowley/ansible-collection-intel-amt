@@ -56,8 +56,15 @@ NS_ADDRESSING = "http://schemas.xmlsoap.org/ws/2004/08/addressing"
 NS_WSMAN = "http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd"
 NS_ENUMERATION = "http://schemas.xmlsoap.org/ws/2004/09/enumeration"
 
+#: The DMTF "common" namespace that wraps a CIM ``datetime`` value. Not one of the
+#: three class-resource bases above, and not derivable from a class name -- it is
+#: the namespace of the *inner* ``<Datetime>``/``<Interval>`` elements that a CIM
+#: datetime property is built from, per docs/protocol-notes.md s2.10.
+NS_CIM_COMMON = "http://schemas.dmtf.org/wbem/wscim/1/common"
+
 ACTION_GET = "http://schemas.xmlsoap.org/ws/2004/09/transfer/Get"
 ACTION_PUT = "http://schemas.xmlsoap.org/ws/2004/09/transfer/Put"
+ACTION_DELETE = "http://schemas.xmlsoap.org/ws/2004/09/transfer/Delete"
 ACTION_ENUMERATE = "http://schemas.xmlsoap.org/ws/2004/09/enumeration/Enumerate"
 ACTION_PULL = "http://schemas.xmlsoap.org/ws/2004/09/enumeration/Pull"
 
@@ -113,6 +120,34 @@ class EndpointReference:
             selector_el.set("Name", name)
             selector_el.text = value
         return [address, reference_parameters]
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddedInstance:
+    """A method parameter that is a nested property bag, not a scalar.
+
+    Some AMT methods take an **embedded instance** rather than flat scalars:
+    ``AMT_AlarmClockService.AddAlarm``'s only input is an ``AlarmTemplate`` whose
+    children are ``IPS_AlarmClockOccurrence`` properties, two of which
+    (``StartTime``, ``Interval``) are themselves wrappers around a
+    :data:`NS_CIM_COMMON` element. See docs/protocol-notes.md s2.10.
+
+    ``namespace`` governs this instance's **children**, not its own tag -- the tag
+    is named by whatever namespace the enclosing element used, exactly as
+    :class:`EndpointReference` returns children and lets the caller name the
+    wrapper. That is what makes the three-namespace ``AddAlarm`` body expressible
+    by nesting these: the outer parameter's tag is in the ``AMT_`` method
+    namespace, its children in the ``IPS_`` one, and their children in the DMTF
+    common one.
+
+    A property whose value is ``None`` is **omitted entirely**, matching
+    :meth:`WsmanClient._append_params`' existing rule for flat parameters and for
+    the same hardware-verified reason recorded there: firmware rejects an empty
+    element where it accepts an absent one.
+    """
+
+    namespace: str
+    properties: dict[str, Any]
 
 
 def build_selector_set(selectors: dict[str, str]) -> ET.Element:
@@ -351,6 +386,29 @@ class WsmanClient:
         )
         return self._single_instance(body_el)
 
+    def delete(self, resource_class: str, *, selectors: dict[str, str] | None = None) -> None:
+        """``Delete`` -- destroy the one instance ``selectors`` names. Never retried.
+
+        WS-Transfer ``Delete`` carries an **empty SOAP Body**; the instance is named
+        entirely by the ``SelectorSet`` header, which is why ``selectors`` is the only
+        input. A firmware that answers at all answers with an empty body too (the
+        vendor's captured ``DeleteResponse`` has ``<a:Body></a:Body>``), so there is
+        nothing to parse and nothing to return -- a caller that wants to know the
+        instance is gone must re-read, exactly as with every other mutation here.
+
+        Not retryable, for the ordinary mutation reason: a retry after a response was
+        lost would delete an instance a *different* caller had since recreated under
+        the same key.
+        """
+        self._execute(
+            action=ACTION_DELETE,
+            resource_uri_value=resource_uri(resource_class),
+            selectors=selectors,
+            body=None,
+            operation=f"Delete {resource_class}",
+            retryable=False,
+        )
+
     def enumerate(self, resource_class: str, *, selectors: dict[str, str] | None = None) -> list[dict[str, Any]]:
         """``Enumerate`` then ``Pull`` until exhausted. Safe to retry per request."""
         uri = resource_uri(resource_class)
@@ -437,6 +495,11 @@ class WsmanClient:
                 param_el = ET.SubElement(parent, f"{{{uri}}}{name}")
                 for child in value.build_elements():
                     param_el.append(child)
+            elif isinstance(value, EmbeddedInstance):
+                # The element is named in the *enclosing* namespace (`uri`); its
+                # children are named in the instance's own. See EmbeddedInstance.
+                param_el = ET.SubElement(parent, f"{{{uri}}}{name}")
+                self._append_params(param_el, value.namespace, value.properties)
             elif value is None:
                 # Omitted entirely, not emitted empty. Real AMT 16.1.30 rejects
                 # ChangeBootOrder with an empty <Source/> element:

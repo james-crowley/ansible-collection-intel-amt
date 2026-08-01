@@ -30,6 +30,7 @@ import shutil
 import socket
 import ssl
 import threading
+import time
 import uuid
 import warnings
 from typing import ClassVar
@@ -39,6 +40,8 @@ import pytest
 import requests
 from requests.auth import HTTPDigestAuth
 from wsman_server import (
+    ADD_ALARM_REFUSED_RETURN_VALUE,
+    AMT_ALARM_CLOCK_SERVICE,
     AMT_BOOT_CAPABILITIES,
     AMT_BOOT_SETTING_DATA,
     AMT_ETHERNET_PORT_SETTINGS,
@@ -63,14 +66,20 @@ from wsman_server import (
     DEFAULT_MESSAGE_LOG_RECORDS,
     EMPTY_MESSAGE_LOG_SLOT,
     ETHERNET_PORT_0_INSTANCE_ID,
+    IPS_ALARM_CLOCK_OCCURRENCE,
     MESSAGE_LOG_BATCH_SIZE,
     WsmanMockServer,
 )
 
-from ansible_collections.james_crowley.intel_amt.plugins.module_utils import message_log
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils import alarm, message_log
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.boot import discover_and_validate
-from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import ErrorClass, UnsupportedCapabilityError
-from ansible_collections.james_crowley.intel_amt.plugins.module_utils.wsman import WsmanClient
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import (
+    ErrorClass,
+    ProtocolError,
+    RemoteOperationError,
+    UnsupportedCapabilityError,
+)
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.wsman import NS_CIM_COMMON, WsmanClient
 
 NS_S = "http://www.w3.org/2003/05/soap-envelope"
 NS_WSEN = "http://schemas.xmlsoap.org/ws/2004/09/enumeration"
@@ -1664,6 +1673,29 @@ class _ActionCountingSession(requests.Session):
         return self.actions.count(action)
 
 
+class _AddAlarmBodyCapturingSession(requests.Session):
+    """Captures the ``AlarmTemplate`` element of the last ``AddAlarm`` the client sent.
+
+    Reading the bytes rather than the parsed result is the point. A client that put
+    every property in the method's own namespace still produces a well-formed body,
+    and the mock's strict per-namespace lookups would reject it -- but only an
+    assertion on the outgoing element tags says *which* namespaces went out, which is
+    what docs/protocol-notes.md 2.10 records and what a refactor could silently
+    change.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.template: ET.Element | None = None
+
+    def post(self, url, data=None, **kwargs):  # type: ignore[override]
+        root = ET.fromstring(data)  # noqa: S314 -- the client's own envelope, built in-process
+        found = root.find(f".//{{{AMT_ALARM_CLOCK_SERVICE}}}AlarmTemplate")
+        if found is not None:
+            self.template = found
+        return super().post(url, data=data, **kwargs)
+
+
 def _real_client(server: WsmanMockServer, session: requests.Session | None = None) -> WsmanClient:
     """The collection's own ``WsmanClient``, pointed at the mock over plaintext.
 
@@ -1987,3 +2019,341 @@ class TestRealClientMessageLogEmptySlots:
         assert read.empty_slots == 0
         assert len(read.records) == self._REAL_RECORDS
         assert read.batches == 3
+
+
+class TestRealClientAlarmClock:
+    """The alarm-clock classes, driven through the collection's own client.
+
+    Issue #112. Everything here goes over a real TCP socket through
+    ``WsmanClient``/``module_utils.alarm`` rather than through a fake transport,
+    because this is the half of the protocol a unit fake cannot check: the
+    ``AddAlarm`` body spans **three namespaces**, and a client that flattened any of
+    them into one would sail through a fake shaped to its own output. The mock reads
+    every property at its exact namespace (``_param_in``) for precisely that reason,
+    so a namespace mistake fails here rather than on hardware.
+    """
+
+    START_TIME = "2030-01-02T03:04:00Z"
+
+    @staticmethod
+    def _parsed(value: str):
+        return alarm.parse_start_time(value)
+
+    def test_the_add_alarm_body_is_accepted_and_the_occurrence_is_readable(self, server):
+        with _real_client(server) as client:
+            alarm.add_alarm(client, name="nightly", start_time=self._parsed(self.START_TIME), interval_minutes=1440, delete_on_completion=False)
+            alarms = alarm.list_alarms(client)
+
+        assert [occurrence.instance_id for occurrence in alarms] == ["nightly"]
+        assert alarms[0].element_name == "nightly"
+        assert alarms[0].start_time == self.START_TIME
+        assert alarms[0].interval == "P1DT0H0M"
+        assert alarms[0].interval_minutes == 1440
+        assert alarms[0].delete_on_completion is False
+
+    def test_the_wire_body_carries_the_three_documented_namespaces(self, server):
+        """Asserted on the bytes, not on the parsed result.
+
+        A client that put every property in the method's own namespace would still
+        produce a well-formed body, and the mock's strict lookups would reject it --
+        but only this assertion says *which* namespaces went out, which is the thing
+        docs/protocol-notes.md §2.10 records and the thing a future refactor could
+        silently change.
+        """
+        session = _AddAlarmBodyCapturingSession()
+        with _real_client(server, session=session) as client:
+            alarm.add_alarm(client, name="nightly", start_time=self._parsed(self.START_TIME), interval_minutes=1440)
+
+        template = session.template
+        assert template is not None
+        assert template.tag == f"{{{AMT_ALARM_CLOCK_SERVICE}}}AlarmTemplate"
+        assert {child.tag for child in template} == {
+            f"{{{IPS_ALARM_CLOCK_OCCURRENCE}}}{name}" for name in ("InstanceID", "ElementName", "StartTime", "Interval", "DeleteOnCompletion")
+        }
+        start_time = template.find(f"{{{IPS_ALARM_CLOCK_OCCURRENCE}}}StartTime")
+        assert [child.tag for child in start_time] == [f"{{{NS_CIM_COMMON}}}Datetime"]
+        assert start_time[0].text == self.START_TIME
+        interval = template.find(f"{{{IPS_ALARM_CLOCK_OCCURRENCE}}}Interval")
+        assert [child.tag for child in interval] == [f"{{{NS_CIM_COMMON}}}Interval"]
+        assert interval[0].text == "P1DT0H0M"
+
+    def test_the_occurrence_class_is_read_by_enumerate_not_get(self, server):
+        """``IPS_AlarmClockOccurrence`` is a collection; a ``Get`` cannot answer the question.
+
+        The action count is the control: it proves the read really was an
+        Enumerate/Pull pair and not a Get the mock happened to answer as well.
+        """
+        session = _ActionCountingSession()
+        with _real_client(server, session=session) as client:
+            alarm.add_alarm(client, name="nightly", start_time=self._parsed(self.START_TIME))
+            session.actions.clear()
+            alarm.list_alarms(client)
+
+        assert session.count("Enumerate") == 1
+        assert session.count("Pull") >= 1
+        assert session.count("Get") == 0
+
+    def test_delete_removes_the_instance_and_a_re_read_sees_it_gone(self, server):
+        with _real_client(server) as client:
+            alarm.add_alarm(client, name="nightly", start_time=self._parsed(self.START_TIME))
+            assert len(alarm.list_alarms(client)) == 1
+            alarm.delete_alarm(client, "nightly")
+            assert alarm.list_alarms(client) == []
+        # The mutation was real on the server side too, not only in the reader.
+        assert server.state.alarm_occurrences == {}
+
+    def test_deleting_an_absent_instance_faults_rather_than_succeeding_quietly(self, server):
+        """Why the module reads before deciding instead of deleting optimistically.
+
+        WS-Transfer has no "delete if present", and the instance is addressed by its
+        key -- so ``state=absent`` idempotence has to come from the read, and this is
+        the behaviour that makes that load-bearing rather than decorative.
+        """
+        with _real_client(server) as client, pytest.raises(ProtocolError):
+            alarm.delete_alarm(client, "never-existed")
+
+    def test_the_documented_occurrence_limit_is_enforced_on_the_wire(self, server):
+        """go-wsman-messages: ``AddAlarm`` "would fail if 5 instances or more ... exist".
+
+        The client's own pre-check refuses before sending, so this is the *other*
+        side: what happens if something sends anyway. The raw ReturnValue reaches the
+        caller unnamed, because no source names any ``AddAlarm`` code but 0.
+        """
+        with _real_client(server) as client:
+            for index in range(alarm.MAX_ALARM_OCCURRENCES):
+                alarm.add_alarm(client, name=f"a{index}", start_time=self._parsed(self.START_TIME))
+            with pytest.raises(RemoteOperationError) as excinfo:
+                alarm.add_alarm(client, name="sixth", start_time=self._parsed(self.START_TIME))
+
+        assert excinfo.value.return_value == ADD_ALARM_REFUSED_RETURN_VALUE
+        assert len(server.state.alarm_occurrences) == alarm.MAX_ALARM_OCCURRENCES
+
+    def test_a_duplicate_instance_id_is_refused_which_is_why_replace_deletes_first(self, server):
+        with _real_client(server) as client:
+            alarm.add_alarm(client, name="nightly", start_time=self._parsed(self.START_TIME))
+            with pytest.raises(RemoteOperationError):
+                alarm.add_alarm(client, name="nightly", start_time=self._parsed("2031-01-02T03:04:00Z"))
+            # Delete first, then the same key is claimable -- the module's replace path.
+            alarm.delete_alarm(client, "nightly")
+            alarm.add_alarm(client, name="nightly", start_time=self._parsed("2031-01-02T03:04:00Z"))
+            alarms = alarm.list_alarms(client)
+
+        assert alarms[0].start_time == "2031-01-02T03:04:00Z"
+
+    def test_the_occurrence_limit_knob_moves_the_boundary(self):
+        """The negative control for the limit test above.
+
+        Asserting only that the sixth add fails passes identically against a mock that
+        refused every add. Moving the knob to 1 and watching the *second* add fail is
+        what proves the boundary is the knob's.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.state.alarm_occurrence_limit = 1
+            with _real_client(srv) as client:
+                alarm.add_alarm(client, name="first", start_time=self._parsed(self.START_TIME))
+                with pytest.raises(RemoteOperationError):
+                    alarm.add_alarm(client, name="second", start_time=self._parsed(self.START_TIME))
+            assert list(srv.state.alarm_occurrences) == ["first"]
+
+    def test_a_one_shot_alarm_reports_a_zero_interval_not_an_absent_one(self, server):
+        with _real_client(server) as client:
+            alarm.add_alarm(client, name="one-shot", start_time=self._parsed(self.START_TIME), interval_minutes=0)
+            alarms = alarm.list_alarms(client)
+        assert alarms[0].interval == "P0DT0H0M"
+        assert alarms[0].interval_minutes == 0
+
+    def test_an_occurrence_firmware_reports_with_no_interval_at_all_decodes_to_none(self, server):
+        """MeshCentral's ``amt.js`` omits the element entirely for a one-shot alarm.
+
+        A client must cope with the property being missing, not merely with it being
+        ``P0DT0H0M`` -- and ``None`` must stay distinguishable from ``0``.
+        """
+        server.state.alarm_occurrences["legacy"] = {
+            "InstanceID": "legacy",
+            "ElementName": "legacy",
+            "StartTime": self.START_TIME,
+            "Interval": None,
+            "DeleteOnCompletion": True,
+        }
+        with _real_client(server) as client:
+            alarms = alarm.list_alarms(client)
+        assert alarms[0].interval is None
+        assert alarms[0].interval_minutes is None
+
+    def test_an_empty_alarm_list_is_a_successful_read_of_nothing(self, server):
+        with _real_client(server) as client:
+            assert alarm.list_alarms(client) == []
+
+    def test_the_service_get_omits_the_two_properties_the_vendor_capture_omits(self, server):
+        """Both are declared by go-wsman's struct and absent from real firmware's response.
+
+        Serving them would hide the thing the client has to cope with: a service
+        instance that says nothing about the alarms it holds.
+        """
+        with _real_client(server) as client:
+            service = alarm.get_service(client)
+        assert service["ElementName"] == "Intel(r) AMT Alarm Clock Service"
+        assert "NextAMTAlarmTime" not in service
+        assert "AMTAlarmClockInterval" not in service
+
+    def test_firmware_with_no_alarm_clock_degrades_to_unsupported_capability(self):
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.state.alarm_clock_present = False
+            with _real_client(srv) as client:
+                with pytest.raises(UnsupportedCapabilityError):
+                    alarm.list_alarms(client)
+                # The absence covers every verb, methods included -- otherwise firmware
+                # with no alarm clock would still accept AddAlarm.
+                with pytest.raises(ProtocolError):
+                    alarm.add_alarm(client, name="nightly", start_time=self._parsed(self.START_TIME))
+                assert alarm.get_service(client) == {}
+
+    def test_the_mock_rejects_a_wrongly_namespaced_add_alarm_body(self, server):
+        """The mock's own strictness, asserted directly rather than only relied upon.
+
+        Every other test in this class proves the *client* builds the body right, and
+        each does so by the body being accepted. None of them can distinguish "the client
+        got the namespaces right" from "the mock does not check" -- which is exactly the
+        defect ``_param``'s docstring records having been fixed once before, where a
+        parameter in the wrong namespace sailed through the mock and then failed schema
+        validation on real firmware.
+
+        So this posts a hand-built body whose occurrence properties are in the *method's*
+        namespace instead of ``IPS_AlarmClockOccurrence``'s -- valid XML, and the single
+        most plausible way to get this wrong -- and asserts the mock answers HTTP 400,
+        which is what §2.5 records real AMT 16.1.30 doing for a schema-invalid body.
+        """
+        wrong = (
+            f'<r:AddAlarm_INPUT xmlns:r="{AMT_ALARM_CLOCK_SERVICE}">'
+            "<r:AlarmTemplate>"
+            "<r:InstanceID>nightly</r:InstanceID>"
+            f'<r:StartTime><p:Datetime xmlns:p="{NS_CIM_COMMON}">2030-01-02T03:04:00Z</p:Datetime></r:StartTime>'
+            "<r:DeleteOnCompletion>true</r:DeleteOnCompletion>"
+            "</r:AlarmTemplate>"
+            "</r:AddAlarm_INPUT>"
+        )
+        response = _post(server, _envelope(f"{AMT_ALARM_CLOCK_SERVICE}/AddAlarm", AMT_ALARM_CLOCK_SERVICE, wrong))
+        assert response.status_code == 400
+        assert server.state.alarm_occurrences == {}
+
+    def test_the_mock_rejects_a_flat_datetime_too(self, server):
+        """The other plausible mistake: the DMTF common wrapper omitted.
+
+        ``<s:StartTime>2030-...Z</s:StartTime>`` is the shape the vendor's own placeholder
+        fixture uses, so it is not an unthinkable thing for an implementer to send -- but
+        it is not the shape either write path builds, and the mock must not accept it.
+        """
+        flat = (
+            f'<r:AddAlarm_INPUT xmlns:r="{AMT_ALARM_CLOCK_SERVICE}">'
+            f'<r:AlarmTemplate xmlns:s="{IPS_ALARM_CLOCK_OCCURRENCE}">'
+            "<s:InstanceID>nightly</s:InstanceID>"
+            "<s:StartTime>2030-01-02T03:04:00Z</s:StartTime>"
+            "<s:DeleteOnCompletion>true</s:DeleteOnCompletion>"
+            "</r:AlarmTemplate>"
+            "</r:AddAlarm_INPUT>"
+        )
+        response = _post(server, _envelope(f"{AMT_ALARM_CLOCK_SERVICE}/AddAlarm", AMT_ALARM_CLOCK_SERVICE, flat))
+        assert response.status_code == 400
+        assert server.state.alarm_occurrences == {}
+
+    def test_a_correctly_namespaced_hand_built_body_is_accepted(self, server):
+        """The positive control for the two rejections above.
+
+        Without it, both would be satisfied by a mock that answered 400 to every
+        hand-built AddAlarm regardless of its namespaces.
+        """
+        good = (
+            f'<r:AddAlarm_INPUT xmlns:r="{AMT_ALARM_CLOCK_SERVICE}">'
+            f'<r:AlarmTemplate xmlns:s="{IPS_ALARM_CLOCK_OCCURRENCE}">'
+            "<s:InstanceID>nightly</s:InstanceID>"
+            f'<s:StartTime><p:Datetime xmlns:p="{NS_CIM_COMMON}">2030-01-02T03:04:00Z</p:Datetime></s:StartTime>'
+            "<s:DeleteOnCompletion>true</s:DeleteOnCompletion>"
+            "</r:AlarmTemplate>"
+            "</r:AddAlarm_INPUT>"
+        )
+        response = _post(server, _envelope(f"{AMT_ALARM_CLOCK_SERVICE}/AddAlarm", AMT_ALARM_CLOCK_SERVICE, good))
+        assert response.status_code == 200
+        assert _find_text(ET.fromstring(response.content), "ReturnValue") == "0"  # noqa: S314 -- test fixture's own response
+        assert list(server.state.alarm_occurrences) == ["nightly"]
+
+    def test_the_amt10_enumerate_fault_mode_does_not_reach_the_ips_class(self):
+        """§2.7's finding names five ``AMT_``-prefixed classes and says so.
+
+        ``IPS_AlarmClockOccurrence`` is ``IPS_``-prefixed, so a client on AMT 10-era
+        firmware can still read its alarms. Sweeping it in would extend a hardware
+        finding past what it covers -- and would make the module unusable on a
+        generation where it should work.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.faults.enumerate_faults_for_amt_classes = True
+            with _real_client(srv) as client:
+                alarm.add_alarm(client, name="nightly", start_time=self._parsed(self.START_TIME))
+                assert [occurrence.instance_id for occurrence in alarm.list_alarms(client)] == ["nightly"]
+                # The service is AMT_-prefixed, so its Enumerate is 400 -- but the Get
+                # this collection actually uses still answers, which is the whole point
+                # of selective instance access.
+                assert alarm.get_service(client)["Name"] == "Intel(r) AMT Alarm Clock Service"
+
+
+class TestRealClientFirmwareClock:
+    """``AMT_TimeSynchronizationService`` through the real client. Issue #112."""
+
+    def test_reads_the_rtc_and_both_configuration_enumerations(self):
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.state.time_sync_ta0 = 1704586865
+            with _real_client(srv) as client:
+                clock = alarm.read_firmware_clock(client)
+
+        # The vendor's own captured Ta0, decoded.
+        assert clock.epoch_seconds == 1704586865
+        assert clock.utc == "2024-01-07T00:21:05Z"
+        assert clock.time_source == 0
+        assert clock.time_source_name == "bios_rtc"
+        assert clock.local_time_sync_enabled == 0
+        assert clock.local_time_sync_enabled_name == "default_true"
+
+    def test_skew_is_computed_against_the_controller_with_firmware_ahead_positive(self):
+        ahead = int(time.time()) + 3600
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.state.time_sync_ta0 = ahead
+            with _real_client(srv) as client:
+                clock = alarm.read_firmware_clock(client)
+        # Within a couple of seconds of an hour: the reference is the real wall clock.
+        assert 3595 <= clock.skew_seconds <= 3605
+
+    def test_an_undefined_enumeration_value_renders_unknown_with_its_raw_integer(self):
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.state.time_sync_time_source = 9
+            srv.state.time_sync_local_enabled = 7
+            with _real_client(srv) as client:
+                clock = alarm.read_firmware_clock(client)
+        assert clock.time_source_name == "unknown(9)"
+        assert clock.local_time_sync_enabled_name == "unknown(7)"
+
+    def test_a_response_with_no_ta0_is_firmware_would_not_say_not_a_1970_clock(self):
+        """A shape no source describes, served so the honest branch is reachable on the wire.
+
+        Reading it as ``0`` would refuse every alarm as past-dated while looking
+        entirely reasonable doing it.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.state.time_sync_ta0 = None
+            with _real_client(srv) as client:
+                assert alarm.read_firmware_clock(client) is None
+
+    def test_firmware_that_does_not_implement_the_service_degrades_to_none(self):
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.state.time_sync_present = False
+            with _real_client(srv) as client:
+                assert alarm.read_firmware_clock(client) is None
+
+    def test_the_default_mock_serves_a_clock_near_the_hosts_own(self):
+        """The negative control for every knob above.
+
+        Also the property the integration target depends on: a mock frozen in 2024
+        would refuse every near-future alarm a test wrote, and the failure would look
+        like a bug in the past-date check rather than in the fixture.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv, _real_client(srv) as client:
+            clock = alarm.read_firmware_clock(client)
+        assert abs(clock.skew_seconds) <= 5
