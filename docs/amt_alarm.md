@@ -333,9 +333,13 @@ Two reasons, and the first is not solved by waiting longer:
    a real failure without waiting longer still.
 2. **It only means anything with the machine powered off**, since a running machine cannot
    tell "fired immediately" from "sat forever". That needs AMT to answer WS-Man while
-   reporting itself off, which hardware stage 12 established on **`amt-lab-01` only**. A
-   stage built on that could only ever run on one machine, and a green result there would
-   say nothing about the other.
+   reporting itself off. Hardware stage 12 has now established that on **both** lab
+   machines, so this is no longer the one-machine limitation it was when this module was
+   written — but what stage 12 establishes is `off_confirmed_by_amt`, **AMT's own
+   self-report**, and independent confirmation of genuine physical power-off remains out
+   of reach from unattended CI (see the capability matrix, Tier 4). An alarm stage would
+   therefore rest on an unproven precondition, and a green result would not settle the
+   question it was built to answer.
 
 What does exist:
 

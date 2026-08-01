@@ -170,8 +170,10 @@ fires needs wall-clock time to pass, so the shortest honest test is "set an alar
 minutes out, then poll" — the slowest stage in the suite, whose failure mode ("it has
 not fired *yet*") is indistinguishable from a real failure without waiting longer
 still. And it only means anything with the machine powered **off**, since a running
-machine cannot tell "fired immediately" from "sat forever" — which needs the stage-12
-behaviour above, established on `amt-lab-01` only. So the module is covered by mock
+machine cannot tell "fired immediately" from "sat forever" — and while stage 12 above has
+now shown AMT answering WS-Man while self-reporting off on **both** machines, that
+self-report is still not independent confirmation of physical power-off, so an alarm stage
+would inherit an unproven precondition on top of its own cost. So the module is covered by mock
 coverage driven through the real client and by an integration target that includes the
 idempotence case, and **nothing about firmware's actual alarm behaviour is claimed**.
 One consequence ships unresolved and is documented rather than guessed at: no source

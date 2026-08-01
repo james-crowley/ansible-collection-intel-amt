@@ -33,7 +33,7 @@ description:
   - >-
     With O(state=query) (the default) the module is read-only and always reports
     C(changed=false).
-version_added: 0.8.0
+version_added: 1.1.0
 author:
   - Jim Crowley (@james-crowley)
 options:

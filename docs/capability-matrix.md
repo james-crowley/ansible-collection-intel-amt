@@ -245,9 +245,12 @@ rediscovering them.
 2. **It only means anything with the machine powered off.** A running machine cannot tell
    "fired immediately" from "sat forever" — both leave it running. So the test needs AMT
    to answer WS-Man while the machine is genuinely off, which is exactly the stage-12
-   behaviour, and stage 12 established that on **`amt-lab-01` only**. A stage built on it
-   could only ever run on one machine, and a green result there would say nothing about
-   the other.
+   behaviour. Stage 12 has now run on **both** machines, so this is no longer the
+   one-machine limitation it was when `amt_alarm` was written — but what it establishes is
+   `off_confirmed_by_amt`, **AMT's own self-report**, and Tier 4 records that independent
+   confirmation of genuine physical power-off is still missing and is not reachable from
+   unattended CI. An alarm stage would therefore rest on an unproven precondition, and a
+   green result would not settle the question it exists to answer.
 
 **What Tier 2 does cover, and how far it goes.** The `AddAlarm` body spans three
 namespaces (`protocol-notes.md` §2.10.3), which is the class of mistake a fake transport

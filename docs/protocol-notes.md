@@ -1288,8 +1288,12 @@ Two reasons, and the first is not solvable by patience:
    from a real failure without waiting longer still.
 2. **It only means anything with the machine powered off**, which requires AMT to answer
    WS-Man while reporting itself off. Stage 12 (`tests/hardware/qualify_wake_from_off.yml`)
-   established that on **`amt-lab-01` only**. A stage built on it would be a stage that can
-   only ever run on one machine, and a green result there would say nothing about the other.
+   has now established that on **both** lab machines, so this is no longer the one-machine
+   limitation it was when this section was first written. What it establishes is
+   `off_confirmed_by_amt`, **AMT's own self-report**; independent confirmation of genuine
+   physical power-off remains out of reach from unattended CI (`docs/capability-matrix.md`
+   Tier 4). An alarm stage would therefore rest on an unproven precondition, and a green
+   result would not settle what it was built to answer.
 
 So the wire shape is covered by mock coverage driven through the real client
 (`tests/unit/mock_servers/test_wsman_server.py`'s `TestRealClientAlarmClock` and
