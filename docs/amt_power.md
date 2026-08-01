@@ -34,30 +34,39 @@ to `hibernate`, so that reading can be trusted.
 ### Firmware and OS support
 
 **`sleep-light`, `sleep-deep` and `hibernate` carry the correct CIM codes (3, 4 and
-7), and on the one machine that has ever been asked, real firmware refused all
-three.** Hardware qualification stage 11 issued each action against `amt-lab-01`,
-AMT 16.1.30 (CircleCI pipeline 208, job `hardware-sleep-hibernate`, 2026-07-31), and
-every one came back `outcome: "firmware_refused"` / `error_class:
+7), and on both machines this collection has ever asked, real firmware refused all
+three — identically.** Hardware qualification stage 11 issued each action against
+`amt-lab-01`, AMT 16.1.30 (CircleCI pipeline 208, job `hardware-sleep-hibernate`,
+2026-07-31), and every one came back `outcome: "firmware_refused"` / `error_class:
 "remote_operation"` — AMT rejected the request itself, before it ever reached the
 platform. The machine was reported `on` before, during and after every attempt, and
-was left healthy. See [`capability-matrix.md`](capability-matrix.md) for the full
-result.
+was left healthy. Stage 11 ran again against `amt-lab-02`, AMT 19.0.5 (CircleCI
+pipeline 244, workflow `b7865873-40b2-43b5-825f-be5ebba704fc`, job
+`hardware-sleep-hibernate` 3170), with the same result on all three actions and the
+machine left `on` and healthy there too. This is the most
+consequential update to this section: the finding is no longer one machine's
+result, it reproduces across **two firmware generations three majors apart**, on
+the same hardware family. See [`capability-matrix.md`](capability-matrix.md) for
+the full result.
 
-**Read that precisely, not more broadly than it was measured.** This is one
-machine, one firmware version. It is not evidence that "AMT does not support
-sleep" in general — `amt-lab-02` (AMT 19.0.5) has never been asked, and the codes
-themselves are correct per the DMTF/`go-wsman-messages` mapping this collection
-implements. It is evidence that a caller targeting AMT 16.1.30, or anything
-provisioned similarly to it, should expect these three actions to fail rather than
-assume they will work because the module advertises them.
+**Read that precisely, not more broadly than it was measured.** This is two
+machines, two firmware generations. Two generations is **repeatability, not a
+compatibility guarantee** — these are two SKUs of one vendor's hardware family, not
+a survey of AMT implementations. It is not evidence that "AMT does not support
+sleep" in general — any generation outside AMT 16.1.30 and 19.0.5 has never been
+asked, and the codes themselves are correct per the DMTF/`go-wsman-messages`
+mapping this collection implements. It is evidence that a caller targeting either
+of these firmware versions, or anything provisioned similarly to them, should
+expect these three actions to fail rather than assume they will work because the
+module advertises them.
 
 They also depend on the **target operating system** supporting the corresponding
 ACPI state and on it being enabled in firmware. Where it is not, AMT answers with
 a non-zero return code, surfaced as `error_class=remote_operation` rather than
-being treated as success. The 2026-07-31 result above is exactly that failure
-mode, observed for real: on that machine, the request never got far enough for the
-target OS's own S1/S3/S4 support to matter at all. A powered-off machine cannot be
-put to sleep at all either; AMT rejects that rather than ignoring it.
+being treated as success. The results above are exactly that failure mode,
+observed for real on both machines: the request never got far enough on either one
+for the target OS's own S1/S3/S4 support to matter at all. A powered-off machine
+cannot be put to sleep at all either; AMT rejects that rather than ignoring it.
 
 A successful request only means AMT accepted it (`ReturnValue == 0`), not that the
 transition finished. This module polls a bounded number of times afterwards
@@ -198,12 +207,16 @@ turn a successful request into a reported failure — see
   collection implements them, on two firmware generations, and remain unverified on
   every other.
 - **`sleep-light`, `sleep-deep` and `hibernate` are selectable and firmware-tested —
-  on one machine, and firmware refused all three.** They were exposed as choices
-  after being implemented-but-unreachable for three releases. Stage 11 (2026-07-31,
-  pipeline 208) issued all three against `amt-lab-01`, AMT 16.1.30, for the first
-  time any hardware stage had issued any of them (stage 4 only ever covered `on`
-  and `off`), and firmware refused every one (`error_class=remote_operation`) before
-  the request reached the platform. That is a measured result on one firmware
-  version, not a general claim about AMT — `amt-lab-02` (AMT 19.0.5) has never been
-  asked. See the [Capability matrix](capability-matrix.md) for the full result and
-  scope.
+  on both machines this collection has ever asked, and firmware refused all three
+  on each.** They were exposed as choices after being implemented-but-unreachable
+  for three releases. Stage 11 (2026-07-31, pipeline 208) issued all three against
+  `amt-lab-01`, AMT 16.1.30, for the first time any hardware stage had issued any of
+  them (stage 4 only ever covered `on` and `off`), and firmware refused every one
+  (`error_class=remote_operation`) before the request reached the platform. Stage 11
+  ran again against `amt-lab-02`, AMT 19.0.5 (pipeline 244, workflow
+  `b7865873-40b2-43b5-825f-be5ebba704fc`, job `hardware-sleep-hibernate` 3170), with
+  the identical refusal on all three.
+  That is a measured result reproduced on two firmware generations three majors
+  apart, not a general claim about AMT — any generation outside these two has never
+  been asked, and two generations is repeatability, not a compatibility guarantee.
+  See the [Capability matrix](capability-matrix.md) for the full result and scope.

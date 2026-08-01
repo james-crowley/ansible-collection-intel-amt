@@ -8,17 +8,23 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 Clear the Intel AMT event log.
 
-> **Exercised against real firmware for the first time on 2026-07-31, on one machine.**
-> Hardware qualification stage 10 (`qualify_log_clear.yml`) ran, irreversibly, against
-> `amt-lab-01`, AMT 16.1.30 (CircleCI pipeline 208, job `hardware-log-clear` 2574), and
+> **Exercised against real firmware on both lab generations.** Hardware qualification
+> stage 10 (`qualify_log_clear.yml`) first ran, irreversibly, against `amt-lab-01`, AMT
+> 16.1.30 (CircleCI pipeline 208, job `hardware-log-clear` 2574, 2026-07-31), and
 > passed: 205 records archived to disk first, `ClearLog` reported `records_before: 205`
 > / `records_after: 0`, and an independent re-read afterwards confirmed the log empty
-> rather than trusting `ClearLog`'s own return value. `amt-lab-02` (AMT 19.0.5) has
-> never run this stage — see [`capability-matrix.md`](capability-matrix.md) Tier 3 for
-> the full result and Tier 4 for what a second machine would still add. The wire
-> protocol is, and was, also decoded per the sources recorded in
-> [`protocol-notes.md`](protocol-notes.md) §2.8 — a captured real-firmware response
-> fixture set and MeshCentral.
+> rather than trusting `ClearLog`'s own return value. Stage 10 has since also run
+> against `amt-lab-02`, AMT 19.0.5 (CircleCI pipeline 244, workflow
+> `b7865873-40b2-43b5-825f-be5ebba704fc`, job `hardware-log-clear` 3168), and
+> reproduced the identical sequence on its own 110 records: `records_before: 110` /
+> `records_after: 0`, with an independent
+> re-read confirming empty. That second run's independent `amt_event_log` re-read,
+> taken *immediately* after the clear, reported `empty_slots: 0` — see "A read after a
+> clear is trustworthy" below for what that does and does not say about padding. See
+> [`capability-matrix.md`](capability-matrix.md)
+> Tier 3 for the full result. The wire protocol is, and was, also decoded per the
+> sources recorded in [`protocol-notes.md`](protocol-notes.md) §2.8 — a captured
+> real-firmware response fixture set and MeshCentral.
 
 ## Purpose
 
@@ -187,10 +193,13 @@ success; that is the specific behaviour this module exists not to repeat.
 
 ## Limitations
 
-- **Verified against real firmware on one machine, one generation.** Stage 10
-  (2026-07-31, `amt-lab-01`, AMT 16.1.30) passed, including the independent re-read
-  that confirmed the log empty; `amt-lab-02` (AMT 19.0.5) has never run this stage.
-  See [`capability-matrix.md`](capability-matrix.md) Tier 3.
+- **Verified against real firmware on both lab generations.** Stage 10 passed against
+  `amt-lab-01` (AMT 16.1.30, 2026-07-31, pipeline 208) and again against `amt-lab-02`
+  (AMT 19.0.5, pipeline 244, workflow `b7865873-40b2-43b5-825f-be5ebba704fc`, job
+  `hardware-log-clear` 3168), including the independent re-read that confirmed the log
+  empty on each. Any generation outside these two remains untested — two generations
+  is repeatability, not a compatibility
+  guarantee. See [`capability-matrix.md`](capability-matrix.md) Tier 3.
 - The method name, its empty parameter list, and the container properties the receipt is
   built from are third-party-sourced. Each fact names its source in
   [`protocol-notes.md`](protocol-notes.md) §2.8. Firmware's own `Capabilities` array

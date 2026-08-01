@@ -1,0 +1,94 @@
+---
+# Documentation only -- no code changed. Stages 10, 11 and 12 have now run against the
+# second lab machine, closing the machine-2 gap the 9-12 first-run fragment
+# (hardware-stages-9-12-first-run.yml) left open. The sleep/hibernate result gets
+# `known_issues` again, for the same reason it did the first time: it supersedes that
+# earlier entry's one-machine scope with a two-generation one, and a user reaching for
+# `state=sleep-light` needs to see the stronger finding before trying it.
+known_issues:
+  - >-
+    plugins/modules/amt_power.py - B(supersedes) the 0.7.0 C(known_issues) entry that
+    scoped the C(sleep-light)/C(sleep-deep)/C(hibernate) firmware-refusal finding to
+    "the one machine that has ever been asked". That entry is no longer accurate and
+    cannot be edited where it was published, so it is superseded here rather than
+    silently left stale. Hardware qualification stage 11 has since run against
+    C(amt-lab-02) (AMT B(19.0.5), CircleCI pipeline B(244), workflow
+    C(b7865873-40b2-43b5-825f-be5ebba704fc), job C(hardware-sleep-hibernate)
+    B(3170)) as well, and every one of
+    V(sleep-light), V(sleep-deep) and V(hibernate) came back
+    C(error_class=remote_operation) / C(outcome=firmware_refused) there too, identically
+    to C(amt-lab-01) (AMT B(16.1.30)): AMT rejected each request itself, before it ever
+    reached the platform, and the machine was left C(on) and healthy. B(This is the most
+    significant update in this run): the finding is no longer one machine's result, it
+    reproduces across B(two firmware generations three majors apart) on the same
+    hardware family, which materially strengthens it. B(No code changed and none is
+    being changed here) -- the CIM codes (3, 4, 7) remain correct per the
+    DMTF/C(go-wsman-messages) mapping already verified in Tier 1 of
+    C(docs/capability-matrix.md), and this stays a firmware-acceptance finding, not an
+    encoding defect. B(Scope, stated precisely): two generations is repeatability, not a
+    compatibility guarantee -- these are two SKUs of one vendor's hardware family, not a
+    survey of AMT implementations, and any generation outside these two is still
+    untested. C(plugins/modules/amt_power.py)'s C(DOCUMENTATION) and
+    C(docs/amt_power.md) are both updated to say so where an operator reading the option
+    list will see it before trying one of these three states.
+
+minor_changes:
+  - >-
+    docs/capability-matrix.md - C(amt_log_clear) has now run against C(amt-lab-02) (AMT
+    19.0.5, CircleCI pipeline B(244), workflow C(b7865873-40b2-43b5-825f-be5ebba704fc),
+    job C(hardware-log-clear) B(3168)) and passed: the
+    same archive-then-clear-then-independently-reread sequence machine 1 ran, on its own
+    B(110) records (C(records_before: 110), C(records_after: 0), C(cleared: true),
+    C(return_value: 0)), with the independent re-read confirming
+    C(current_number_of_records: 0), C(records_read: 0),
+    C(stop_reason="no_record_exists"). Both remaining machine-2 Tier 4 gaps for stages
+    10-12 -- C(amt_log_clear) on machine 2, and sleep/hibernate on machine 2 -- are
+    removed; wake-from-off's Tier 4 entry is unchanged in substance, because two
+    machines self-reporting the same power state is not independent confirmation of
+    genuine physical power-off -- see the dedicated Tier 3 subsections and the note
+    below. B(Every Tier 3 row this run touches now cites the job that produced it),
+    not only the workflow: stage 9's read-only floor ran as job B(3158), and stages
+    10-12 as jobs B(3168)/B(3170)/B(3172) -- the standard already set for machine 1's
+    pipeline B(208) run, and the tracked complaint about Tier 3 rows citing no run ID
+    at all.
+  - >-
+    docs/capability-matrix.md - the C(SHA256SUMS) manifest for this run was B(checked),
+    not merely confirmed present. It exists in the artifacts of jobs 3168, 3170 and
+    3172; job 3170's artifact was downloaded and verified directly --
+    C(shasum -a 256 -c SHA256SUMS) reported
+    C(amt-lab-02-qualify_sleep_hibernate.json: OK). That is the property issue #90
+    exists to give -- a manifest verifying against the B(published bytes) -- stated at
+    that strength rather than inferred from "every hardware job now emits one".
+  - >-
+    docs/capability-matrix.md - a B(timing refinement) on the issue #105 padding
+    finding, from a second data point. Machine 2's own C(amt_log_clear) run re-read its
+    log B(immediately) after the clear and reported C(empty_slots: 0) -- no padding at
+    all -- unlike machine 1's read, which was taken B(later), after roughly 18 new
+    records had already refilled a log the same clear had emptied, and which reported
+    205 padding entries. Read together, the two data points suggest the zero-filled
+    padding correlates with the log B(refilling) since a clear, not with the clear by
+    itself. This is recorded as an observation from two data points, not a firmware
+    rule: whether AMT 19.0.5 pads a refilled log the way 16.1.30 does remains
+    unmeasured, and the fix already shipped in 0.7.1 (skip empty slots rather than
+    treat the first one as end-of-data) is unaffected either way.
+  - >-
+    docs/capability-matrix.md - wake-from-off (stage 12) has also now run against
+    C(amt-lab-02) (job C(hardware-wake-from-off) B(3172)), with the identical shape to
+    machine 1's result:
+    C(off_confirmed_by_amt) reporting C(off), B(3) reachability probes with B(0)
+    failures, C(wake_request_accepted: true), and C(restored_to) reporting C(on) again.
+    B(The remaining gap is deliberately left untouched by this run): C(off_confirmed_by_amt)
+    is AMT's own self-report, not independent confirmation of genuine physical
+    power-off, and C(operator_attestation) is C(null) on both machines' unattended runs
+    because nothing reachable from CI can supply it. Two machines agreeing is not
+    independent evidence -- both readings come from the same kind of source, AMT
+    reporting on itself over this collection's own read path -- so this claim is
+    exactly as open as it was after one machine, and the document says so explicitly
+    rather than letting "both generations" read as "fully proven".
+  - >-
+    docs/amt_event_log.md, docs/amt_log_clear.md, README.md, docs/testing.md,
+    tests/hardware/README.md - updated to carry the C(amt_log_clear) machine-2 result
+    and the padding-timing refinement above, and to correct stage-count and
+    machine-1-only language for stages 10-12 that these files carried. C(README.md)'s
+    hardware-defect count is also corrected from six to seven, matching the count
+    C(docs/capability-matrix.md) has carried since issue #105 was recorded.

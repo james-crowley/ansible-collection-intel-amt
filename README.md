@@ -78,21 +78,24 @@ reference this implementation is built against.
 
 ## Project status
 
-**Pre-release, and hardware-qualified — now for all seven modules, though not all on
-the same number of machines.** `amt_info`, `amt_power`, `amt_boot`, `amt_redirection`
-and `amt_media`, plus the bare-metal install role, have been exercised end to end
-against real Intel AMT firmware, on a self-hosted CircleCI runner inside the lab
-network, through **eight** qualification stages: read-only facts, an identity
-cross-check, check-mode plans, attended power on/off, IDE-R media attach and boot, a
-writable image, native one-time PXE, and an idempotent re-probe.
+**Pre-release, and hardware-qualified on both lab machines for all seven modules.**
+`amt_info`, `amt_power`, `amt_boot`, `amt_redirection` and `amt_media`, plus the
+bare-metal install role, have been exercised end to end against real Intel AMT
+firmware, on a self-hosted CircleCI runner inside the lab network, through
+**eight** qualification stages: read-only facts, an identity cross-check,
+check-mode plans, attended power on/off, IDE-R media attach and boot, a writable
+image, native one-time PXE, and an idempotent re-probe. `amt_event_log` and
+`amt_log_clear` reached the same two machines through four newer stages (9-12,
+below) rather than through those original eight — a different stage progression,
+not a lesser one; see below for what each stage found.
 
 The staged plan itself now runs to **twelve stages across eleven playbooks**
 (stage 2 is a human cross-check with no playbook of its own). Stages 9-12 have now
-run against real hardware once each — see below — but only on one of the two lab
-machines; see [`tests/hardware/README.md`](tests/hardware/README.md) for the full
-plan and [`tests/hardware/PREFLIGHT.md`](tests/hardware/PREFLIGHT.md) for the
-pre-flight brief required before approving stages 10-12: one is irreversible, and
-the other two can leave a machine needing a physical hand.
+run against real hardware on **both** lab machines — see below; see
+[`tests/hardware/README.md`](tests/hardware/README.md) for the full plan and
+[`tests/hardware/PREFLIGHT.md`](tests/hardware/PREFLIGHT.md) for the pre-flight
+brief required before approving stages 10-12: one is irreversible, and the other
+two can leave a machine needing a physical hand.
 
 All eight of the original stages have now completed on **`amt-lab-01`, AMT
 16.1.30** (2026-07-28) and on **`amt-lab-02`, AMT 19.0.5** (2026-07-29) — so power
@@ -104,35 +107,54 @@ facts fully populated there too, so the v0.2.0 facts no longer rest on one
 generation. They now rest on three generations' worth of evidence — named from a
 third party's AMT 10.0.56 dump, read back populated here on 16.1.30 and 19.0.5.
 
-**`amt_event_log` and `amt_log_clear` have now touched real AMT firmware, for the
-first time, on one machine.** Stage 9 (read-only, `amt_event_log`) and stage 10
-(irreversible, `amt_log_clear`) both ran against `amt-lab-01`, AMT 16.1.30 (CircleCI
-pipeline 208, 2026-07-31), and both passed: stage 9 read all 205 log records to
-completion with zero decode errors, confirming the 21-byte record layout against
-records a real ME actually wrote; stage 10 archived those same 205 records to disk,
-cleared the log, and independently re-read it to confirm empty rather than trusting
-`ClearLog`'s own return value. `amt-lab-02` (AMT 19.0.5) has never run either
-stage, so this is one machine's worth of evidence, not the two-generation coverage
-the other five modules have. See [`docs/amt_event_log.md`](docs/amt_event_log.md),
+**`amt_event_log` and `amt_log_clear` have now touched real AMT firmware on both
+machines.** Stage 9 (read-only, `amt_event_log`) and stage 10 (irreversible,
+`amt_log_clear`) first ran against `amt-lab-01`, AMT 16.1.30 (CircleCI pipeline 208,
+2026-07-31), and both passed: stage 9 read all 205 log records to completion with
+zero decode errors, confirming the 21-byte record layout against records a real ME
+actually wrote; stage 10 archived those same 205 records to disk, cleared the log,
+and independently re-read it to confirm empty rather than trusting `ClearLog`'s own
+return value. Stage 9 has since also run against `amt-lab-02`, AMT 19.0.5 (110
+records, pipeline 226), and a re-run against machine 1 on a log stage 10 had
+emptied **found a real defect** — `amt_event_log` was counting firmware's
+zero-filled empty record slots as records (issue #105, fixed in 0.7.1). Stage 10
+has since also run against `amt-lab-02` (CircleCI pipeline 244, workflow
+`b7865873-40b2-43b5-825f-be5ebba704fc`, job `hardware-log-clear` 3168) and
+reproduced the identical sequence on its own 110 records, so both modules now
+carry the two-generation coverage the
+other five modules have. See [`docs/amt_event_log.md`](docs/amt_event_log.md),
 [`docs/amt_log_clear.md`](docs/amt_log_clear.md), and Tier 3 of
 [`docs/capability-matrix.md`](docs/capability-matrix.md) for the full result.
 
-**Stage 11 found that AMT 16.1.30 refuses `amt_power`'s sleep and hibernate
-actions outright.** `sleep-light`, `sleep-deep` and `hibernate` are selectable and
-carry the correct CIM codes, but the first time any hardware stage issued any of
-them (2026-07-31, same run as above), firmware refused all three
-(`error_class=remote_operation`) before the request ever reached the platform. The
-machine was left `on` and healthy. That is a measured result on one machine, one
-firmware version — not a claim that AMT never supports sleep or hibernate. See
-[`docs/amt_power.md`](docs/amt_power.md) and the capability matrix.
+**Stage 11 found that real firmware refuses `amt_power`'s sleep and hibernate
+actions outright — on both machines.** `sleep-light`, `sleep-deep` and `hibernate`
+are selectable and carry the correct CIM codes, but the first time any hardware
+stage issued any of them (2026-07-31, `amt-lab-01`, AMT 16.1.30, same run as
+above), firmware refused all three (`error_class=remote_operation`) before the
+request ever reached the platform. The machine was left `on` and healthy. Stage 11
+ran again against `amt-lab-02`, AMT 19.0.5 (pipeline 244, workflow
+`b7865873-40b2-43b5-825f-be5ebba704fc`, job `hardware-sleep-hibernate` 3170), with
+the identical refusal on all three, and that machine was left `on` and healthy
+too. This is the most consequential
+update in this run: the finding is no longer one machine's result, it reproduces
+across **two firmware generations three majors apart** — that materially
+strengthens it, though two generations is still repeatability, not a
+compatibility guarantee, and not a claim that AMT never supports sleep or
+hibernate in general. See [`docs/amt_power.md`](docs/amt_power.md) and the
+capability matrix.
 
 **Stage 12 found AMT answering WS-Man, and accepting a wake request, while
-reporting itself powered off.** Also 2026-07-31, on the same machine: 3 reachability
-probes while AMT self-reported `off`, 0 failures, a wake request accepted, and the
-machine restored to `on`. This strengthens the previous position considerably, but
-`off_confirmed_by_amt` is AMT's own self-report, not independent confirmation of
-genuine physical power-off — nothing reachable from unattended CI can supply that.
-See Tier 4 of the capability matrix for exactly what remains open.
+reporting itself powered off — on both machines.** First on `amt-lab-01`
+(2026-07-31): 3 reachability probes while AMT self-reported `off`, 0 failures, a
+wake request accepted, and the machine restored to `on`. Then on `amt-lab-02`
+(pipeline 244, workflow `b7865873-40b2-43b5-825f-be5ebba704fc`, job
+`hardware-wake-from-off` 3172), identically: 3 probes, 0 failures, wake accepted,
+restored to `on`. This strengthens the previous position
+considerably, but `off_confirmed_by_amt` is AMT's own self-report, not independent
+confirmation of genuine physical power-off — nothing reachable from unattended CI
+can supply that, on either machine. Two machines agreeing does not close that gap;
+it is exactly as open as it was with one. See Tier 4 of the capability matrix for
+exactly what remains open.
 
 The 0.5.0 hardware/asset inventory has now been read from both machines too: all
 six `CIM_` classes answered on 16.1.30 and 19.0.5, so serial number, model,
@@ -143,20 +165,23 @@ serial populates, and a decoded label being *returned* still never establishes
 what it *means* — the value tables stay sourced from Intel's own toolkit and the
 DMTF schema, with the raw integer reported alongside every name.
 
-That qualification found six real defects that the unit and mock-integration
+That qualification found seven real defects that the unit and mock-integration
 tiers could not have found, including one that made IDE-R and BIOS boot
-impossible against real firmware. See [`docs/capability-matrix.md`](docs/capability-matrix.md)
-for exactly what is verified, on which machine, what is only mock-tested, and what
-remains unproven — the distinction matters and is kept current.
+impossible against real firmware, and one where firmware's own record count
+disagreed with what this collection was counting (issue #105). See
+[`docs/capability-matrix.md`](docs/capability-matrix.md) for exactly what is
+verified, on which machine, what is only mock-tested, and what remains unproven —
+the distinction matters and is kept current.
 
 Still pre-1.0: a genuinely non-zero IDE-R **write** has not been observed, because
 that needs an operating system on the target that writes. And one thing worth knowing
 before you rely on remote power-on — both lab machines report
 `wake_on_lan_capable: true` (their `LinkPolicy` carries `14`, "available on Sx AC"),
-and stage 12 (above) measured that `amt-lab-01` does answer WS-Man and accept a wake
-request while it self-reports off. What is still **not** measured, on either
-machine, is *independent* confirmation that the machine was genuinely, physically
-off at the time — `off_confirmed_by_amt` is AMT's own self-report. See
+and stage 12 (above) measured that **both** `amt-lab-01` and `amt-lab-02` answer
+WS-Man and accept a wake request while each self-reports off. What is still
+**not** measured, on either machine, is *independent* confirmation that the
+machine was genuinely, physically off at the time — `off_confirmed_by_amt` is
+AMT's own self-report, and two machines agreeing does not close that gap. See
 [`docs/capability-matrix.md`](docs/capability-matrix.md) Tier 4. **If you used
 `wake_on_lan_capable` in 0.2.0 or 0.3.0, re-read it** — the value table behind it was
 wrong and the boolean was inverted on mains-powered hardware; see the `CHANGELOG` for
