@@ -382,6 +382,20 @@ stage 1's playbook (`qualify_readonly.yml`).
     [`PREFLIGHT.md`](../tests/hardware/PREFLIGHT.md) for exactly what a run of this
     stage does and does not establish.
 
+**There is no stage 13, and `amt_network` is the reason.** That module writes the
+management interface's own addressing and link policy, and every stage above has a
+worst case recoverable at the machine with a power button, a KVM console or an AC
+unplug. A bad network write does not: it leaves AMT unreachable over the network
+entirely, and recovery needs MEBx (`Ctrl+P` at boot, physical keyboard and monitor)
+with the **MEBx password**, which is a different credential from the AMT admin
+password these playbooks use — possibly followed by a full re-provision, which
+invalidates the pinned TLS fingerprint in the inventory. A wrong `LinkPolicy` is
+worse in one specific way: a stage could pass, be signed off, and strand the machine
+hours later, the next time the host sleeps. So the module is mock-tested only, and
+[`PREFLIGHT.md`](../tests/hardware/PREFLIGHT.md) carries a brief in the same shape as
+stages 10-12's so a human can decide later. That brief is explicitly a **proposal**:
+no playbook, no approval job, nothing in `.circleci/config.yml` refers to it.
+
 **Stages 9-12 have each run against real hardware on machine 1** (pipeline 208,
 2026-07-31) — see "What the recorded qualifications ran on" above. All four passed:
 stage 9 read the log to completion with zero decode errors; stage 10 archived, cleared

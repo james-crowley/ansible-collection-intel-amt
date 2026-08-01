@@ -65,11 +65,12 @@ from wsman_server import (
     ETHERNET_PORT_0_INSTANCE_ID,
     MESSAGE_LOG_BATCH_SIZE,
     WsmanMockServer,
+    _default_ethernet_port_settings,
 )
 
-from ansible_collections.james_crowley.intel_amt.plugins.module_utils import message_log
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils import message_log, network
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.boot import discover_and_validate
-from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import ErrorClass, UnsupportedCapabilityError
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.errors import ErrorClass, ProtocolError, UnsupportedCapabilityError
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.wsman import WsmanClient
 
 NS_S = "http://www.w3.org/2003/05/soap-envelope"
@@ -432,7 +433,7 @@ class TestEthernetPortSettingsAndSystemState:
     def test_link_policy_is_settable_so_a_test_can_take_away_wake_capability(self, server):
         # S0 AC + S0 DC and no Sx value: link maintained only while the host is
         # running, which is the shape that makes `wake_on_lan_capable` false.
-        server.state.ethernet_link_policy = [1, 16]
+        server.state.ethernet_settings["LinkPolicy"] = [1, 16]
         resp = _post(server, _get_xml(AMT_ETHERNET_PORT_SETTINGS, self.ETHERNET_SELECTOR))
         root = ET.fromstring(resp.content)  # noqa: S314
         assert _find_all_text(root, "LinkPolicy") == ["1", "16"]
@@ -1987,3 +1988,299 @@ class TestRealClientMessageLogEmptySlots:
         assert read.empty_slots == 0
         assert len(read.records) == self._REAL_RECORDS
         assert read.batches == 3
+
+
+class TestRealClientNetworkWritePath:
+    """The ``amt_network`` write path against the mock, driven through the real client.
+
+    Every test here goes through ``module_utils/network.py`` on top of the real
+    ``WsmanClient`` over a real socket, for the reason issue #92 established: this
+    repository holds two implementations of one protocol, and a hand-rolled
+    ``requests.post`` proves what the mock puts on the wire while saying nothing
+    about what the client does with it. A write path in particular is only worth
+    testing end to end -- the interesting failures (a read-only property echoed
+    back, a static address sent alongside DHCP, a Put whose selector addresses
+    nothing) all live in the *body the client builds*, which a mock-side test
+    cannot see.
+
+    Both new fault knobs are exercised here rather than merely wired: issue #92
+    closed a family of mock knobs that were read nowhere, and a knob that is only
+    ever its own default is indistinguishable from one that does not work. Each
+    has a negative control in the same test or its neighbour, so an assertion
+    cannot pass by the knob having no effect at all.
+    """
+
+    @staticmethod
+    def _plan(client, **options):
+        ethernet, general = network.read_network_state(client)
+        supplied = dict.fromkeys((*network.ETHERNET_OPTION_TO_PROPERTY, *network.GENERAL_OPTION_TO_PROPERTY))
+        supplied.update(options)
+        return network.plan_network_change(
+            ethernet_instance=ethernet,
+            general_instance=general,
+            options=supplied,
+            host="127.0.0.1",
+            allow_self_disconnect=options.pop("_allow_self_disconnect", True),
+            allow_wake_capability_loss=options.pop("_allow_wake_capability_loss", True),
+        )
+
+    def test_a_general_settings_put_is_observed_by_a_later_get_through_the_client(self):
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            with _real_client(srv) as client:
+                plan = self._plan(client, hostname="renamed-by-test", ping_response_enabled=False)
+                result = network.apply_network_change(client, plan)
+
+        assert result.indeterminate is False
+        assert result.unapplied == ()
+        decoded = network.decode_general(result.general_observed)
+        assert decoded["hostname"] == "renamed-by-test"
+        assert decoded["ping_response_enabled"] is False
+
+    def test_an_ethernet_put_replaces_the_instance_and_firmware_keeps_the_read_only_properties(self):
+        """A ``Put`` replaces; the MAC is not forgotten because the client did not send it.
+
+        This is the property that makes the client's read-modify-write obligatory
+        *and* makes stripping the read-only fields safe. Both halves are asserted:
+        the written value moved, and the MAC the client never sent came back.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            with _real_client(srv) as client:
+                plan = self._plan(client, primary_dns="192.0.2.99")
+                assert "MACAddress" not in plan.ethernet_put, "the client must strip the read-only MAC before Put"
+                result = network.apply_network_change(client, plan)
+
+        decoded = network.decode_ethernet(result.ethernet_observed)
+        assert decoded["primary_dns"] == "192.0.2.99"
+        assert decoded["mac_address"] == "00:00:5e:00:53:01"
+
+    def test_a_link_policy_put_survives_the_round_trip_as_a_repeated_element(self):
+        """Three integers out, three integers back -- not one comma-joined string.
+
+        ``LinkPolicy`` is the only array-valued property this module writes, and the
+        wire shape is a repeated plain element (``responses/amt/ethernetport/put.xml``).
+        A client that emitted ``<LinkPolicy>1,14,224</LinkPolicy>`` would satisfy a
+        mock that stringified everything; this asserts the decoded integers.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            with _real_client(srv) as client:
+                plan = self._plan(client, link_policy=["s0_ac", "sx_ac", "sx_dc"])
+                result = network.apply_network_change(client, plan)
+
+        decoded = network.decode_ethernet(result.ethernet_observed)
+        assert decoded["link_policy"] == [1, 14, 224]
+        assert decoded["link_policy_names"] == ["s0_ac", "sx_ac", "sx_dc"]
+        assert decoded["wake_on_lan_capable"] is True
+
+    def test_taking_the_last_sx_value_away_is_observable_as_lost_wake_capability(self):
+        """The one change that strands an endpoint without disconnecting you now.
+
+        Written, confirmed, and then read back through the *same* decoder
+        ``amt_info`` publishes -- so this is also the end-to-end check that the
+        write-side table and the read-side table agree on which values mean Sx. A
+        table that had them crossed would write 16 for "sx_ac" and this would come
+        back ``wake_on_lan_capable: true``.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            with _real_client(srv) as client:
+                before = network.decode_ethernet(network.read_network_state(client)[0])
+                assert before["wake_on_lan_capable"] is True
+                plan = self._plan(client, link_policy=["s0_ac", "s0_dc"])
+                assert plan.wake_capability_loss is True
+                result = network.apply_network_change(client, plan)
+
+        decoded = network.decode_ethernet(result.ethernet_observed)
+        assert decoded["link_policy"] == [1, 16]
+        assert decoded["wake_on_lan_capable"] is False
+
+    def test_switching_to_dhcp_drops_the_static_addressing_on_the_wire(self):
+        """``reject_static_addressing_with_dhcp`` armed, and the client survives it.
+
+        The knob faults a Put that sets ``DHCPEnabled=true`` while still carrying
+        ``IPAddress``/``SubnetMask``/``DefaultGateway``/``PrimaryDNS``/``SecondaryDNS``.
+        The client's body drops all five (firmware: settable "in static mode only"),
+        so the write goes through with the knob armed -- which is what makes this a
+        test of the client rather than of the mock.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.faults.reject_static_addressing_with_dhcp = True
+            with _real_client(srv) as client:
+                plan = self._plan(client, dhcp_enabled=True)
+                for name in network.ETHERNET_STATIC_ADDRESS_FIELDS:
+                    assert name not in plan.ethernet_put
+                result = network.apply_network_change(client, plan)
+
+        assert result.indeterminate is False
+        assert network.decode_ethernet(result.ethernet_observed)["dhcp_enabled"] is True
+
+    def test_the_dhcp_contradiction_knob_really_faults_when_the_contradiction_is_sent(self):
+        """The knob's positive control: without it, the test above proves nothing.
+
+        Bypasses ``network.py``'s body construction and sends the contradiction
+        deliberately, so the knob is shown to fault rather than being inert. If this
+        passed as a 200 the previous test would be satisfied by a mock that never
+        checked anything.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.faults.reject_static_addressing_with_dhcp = True
+            with _real_client(srv) as client:
+                body = {
+                    "InstanceID": ETHERNET_PORT_0_INSTANCE_ID,
+                    "DHCPEnabled": True,
+                    "IPAddress": "192.0.2.10",
+                    "SubnetMask": "255.255.255.0",
+                }
+                with pytest.raises(ProtocolError) as excinfo:
+                    client.put("AMT_EthernetPortSettings", body, selectors=network.ETHERNET_PORT_0_SELECTOR)
+        # WS-Management binds SOAP faults to HTTP 500, and this collection's client
+        # classifies every non-2xx as `protocol` with the body carried through as
+        # `diagnostic` (wsman._handle_response) -- so the reason text is there, not
+        # in the message. Asserting on it is what proves the mock refused for the
+        # stated reason rather than for some unrelated 500.
+        assert "DHCPEnabled=true cannot be combined with static addressing" in excinfo.value.diagnostic
+
+        # Negative control on the knob itself: disarmed, the identical body is accepted.
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            assert srv.faults.reject_static_addressing_with_dhcp is False
+            with _real_client(srv) as client:
+                client.put("AMT_EthernetPortSettings", body, selectors=network.ETHERNET_PORT_0_SELECTOR)
+
+    def test_the_read_only_rejection_knob_faults_an_echoed_get_and_passes_the_clients_body(self):
+        """``reject_ethernet_readonly_properties`` armed, both directions.
+
+        The naive read-modify-write -- Get, change one field, Put the whole thing --
+        is refused, and the body ``network.py`` actually builds is accepted. That
+        pairing is the only thing that proves the delete-list is doing work: a
+        client with an empty delete-list would fail the second half here while
+        passing every other test in this class.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.faults.reject_ethernet_readonly_properties = True
+            with _real_client(srv) as client:
+                naive = dict(client.get("AMT_EthernetPortSettings", selectors=network.ETHERNET_PORT_0_SELECTOR))
+                naive["PrimaryDNS"] = "192.0.2.99"
+                with pytest.raises(ProtocolError) as excinfo:
+                    client.put("AMT_EthernetPortSettings", naive, selectors=network.ETHERNET_PORT_0_SELECTOR)
+                assert "read-only field(s) present" in excinfo.value.diagnostic
+                assert "MACAddress" in excinfo.value.diagnostic
+
+                plan = self._plan(client, primary_dns="192.0.2.99")
+                result = network.apply_network_change(client, plan)
+
+        assert result.indeterminate is False
+        assert network.decode_ethernet(result.ethernet_observed)["primary_dns"] == "192.0.2.99"
+
+    def test_the_general_read_only_rejection_knob_works_the_same_way(self):
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.faults.reject_general_readonly_properties = True
+            with _real_client(srv) as client:
+                naive = dict(client.get("AMT_GeneralSettings"))
+                naive["HostName"] = "renamed-by-test"
+                with pytest.raises(ProtocolError) as excinfo:
+                    client.put("AMT_GeneralSettings", naive)
+                assert "DigestRealm" in excinfo.value.diagnostic
+
+                plan = self._plan(client, hostname="renamed-by-test")
+                result = network.apply_network_change(client, plan)
+
+        assert network.decode_general(result.general_observed)["hostname"] == "renamed-by-test"
+
+    def test_a_silently_discarded_put_is_reported_unapplied_rather_than_as_success(self):
+        """``silently_discard_put_for``: HTTP 200, no effect. The case a re-read exists for.
+
+        This is not a fault the transport can classify -- the Put succeeded -- so a
+        client that trusted the 200 would report ``changed: true`` for a write that
+        did nothing. Only the confirming read can catch it, and this is what proves
+        the confirming read is load-bearing rather than decorative.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.faults.silently_discard_put_for.add(AMT_GENERAL_SETTINGS)
+            with _real_client(srv) as client:
+                plan = self._plan(client, hostname="renamed-by-test")
+                result = network.apply_network_change(client, plan)
+
+        assert result.indeterminate is False, "a successful confirming read is a verdict, not an absence of one"
+        (unapplied,) = result.unapplied
+        assert unapplied.property_name == "HostName"
+        err = network.unapplied_error(result, endpoint="127.0.0.1:0")
+        assert err.error_class == ErrorClass.UNSUPPORTED_CAPABILITY
+
+    def test_the_discard_knob_is_per_class_so_one_can_apply_while_the_other_refuses(self):
+        """Keyed by resource URI, and it has to be: that is what tells the two apart.
+
+        A single global switch could not distinguish "this firmware will not write
+        that property" from "the Put never arrived at all", because both classes
+        would fail together.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.faults.silently_discard_put_for.add(AMT_GENERAL_SETTINGS)
+            with _real_client(srv) as client:
+                plan = self._plan(client, hostname="renamed-by-test", primary_dns="192.0.2.99")
+                result = network.apply_network_change(client, plan)
+
+        assert [change.property_name for change in result.unapplied] == ["HostName"]
+        assert network.decode_ethernet(result.ethernet_observed)["primary_dns"] == "192.0.2.99"
+
+    def test_an_ethernet_put_without_the_instance_selector_is_refused(self):
+        """The indexed class needs its selector on the Put, exactly as on the Get.
+
+        The vendor overrides the generic selector-less Put specifically to add it
+        (``pkg/wsman/amt/ethernetport/settings.go``). A mock that accepted an
+        unaddressed write would let a client that forgot the selector pass here and
+        fail on firmware.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            with _real_client(srv) as client:
+                body = dict(_default_ethernet_port_settings())
+                for name in network.ETHERNET_READ_ONLY_FIELDS:
+                    body.pop(name, None)
+                with pytest.raises(ProtocolError) as unaddressed:
+                    client.put("AMT_EthernetPortSettings", body)
+                assert "requires a SelectorSet" in unaddressed.value.diagnostic
+
+                with pytest.raises(ProtocolError) as wrong_instance:
+                    client.put("AMT_EthernetPortSettings", body, selectors={"InstanceID": "Intel(r) AMT Ethernet Port Settings 1"})
+                assert "No instance matches selector" in wrong_instance.value.diagnostic
+
+    def test_a_general_settings_put_needs_no_selector_because_the_vendor_sends_none(self):
+        """The other half of the asymmetry, asserted rather than assumed.
+
+        go-wsman-messages' ``general`` package does not override
+        ``WSManService.Put()``, and the generic Put emits no ``SelectorSet``
+        (``internal/message/base.go``). So an unaddressed Put here must succeed --
+        and this collection's own hardware-verified *read* of this class is
+        selector-less too.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            with _real_client(srv) as client:
+                plan = self._plan(client, hostname="renamed-by-test")
+                network.apply_network_change(client, plan)
+                observed = client.get("AMT_GeneralSettings")
+        assert observed["HostName"] == "renamed-by-test"
+
+    def test_an_absent_ethernet_port_refuses_the_write_as_well_as_the_read(self):
+        """A class that does not exist cannot be written either.
+
+        Faulting only the read would let a write "succeed" against firmware that
+        has no such interface -- the same mistake ``HARDWARE_PRESENCE_ATTR``'s
+        comment records for the Get/Enumerate pair.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            srv.state.ethernet_port_present = False
+            with _real_client(srv) as client:
+                with pytest.raises(ProtocolError):
+                    client.put("AMT_EthernetPortSettings", {"DHCPEnabled": True}, selectors=network.ETHERNET_PORT_0_SELECTOR)
+
+    def test_the_default_instance_is_static_with_every_read_only_property_present(self):
+        """The fixture shape the tests above depend on, pinned.
+
+        A mock that started in DHCP mode, or that omitted the read-only properties,
+        would make several assertions above pass by absence of the thing they test.
+        """
+        with WsmanMockServer(username=FAKE_USERNAME, password=FAKE_PASSWORD) as srv:
+            with _real_client(srv) as client:
+                instance = client.get("AMT_EthernetPortSettings", selectors=network.ETHERNET_PORT_0_SELECTOR)
+        assert instance["DHCPEnabled"] == "false"
+        for name in network.ETHERNET_STATIC_ADDRESS_FIELDS:
+            assert instance[name], f"{name} must be populated for the DHCP-switch tests to mean anything"
+        for name in network.ETHERNET_READ_ONLY_FIELDS:
+            assert name in instance, f"{name} must be served so a client under test has to strip it"

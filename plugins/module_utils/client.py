@@ -71,6 +71,9 @@ from ansible_collections.james_crowley.intel_amt.plugins.module_utils.models imp
     optional_str,
     truthy,
 )
+from ansible_collections.james_crowley.intel_amt.plugins.module_utils.network import (
+    ETHERNET_PORT_0_SELECTOR,
+)
 from ansible_collections.james_crowley.intel_amt.plugins.module_utils.wsman import (
     EndpointReference,
     WsmanClient,
@@ -95,7 +98,14 @@ _MANAGED_SYSTEM_SELECTOR = {"Name": "ManagedSystem"}
 #: not assume they exist, and a missing instance degrades rather than failing.
 #: A ``Get`` with this exact selector is mandatory -- ``Enumerate`` on
 #: ``AMT_``-prefixed classes is HTTP 400 on AMT 10 (docs/protocol-notes.md s2.7).
-_ETHERNET_PORT_0_SELECTOR = {"InstanceID": "Intel(r) AMT Ethernet Port Settings 0"}
+#:
+#: Imported from :mod:`network` rather than declared here, so the read path and
+#: the write path address the same instance by construction. It was a private
+#: copy in this file until ``amt_network`` needed the same string: two copies of
+#: a selector can drift, and this collection already has a
+#: table-in-two-places incident on this exact class (``docs/capability-matrix.md``,
+#: ``LinkPolicy``).
+_ETHERNET_PORT_0_SELECTOR = ETHERNET_PORT_0_SELECTOR
 
 
 class PowerAction(str, Enum):
