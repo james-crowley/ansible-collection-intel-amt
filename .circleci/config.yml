@@ -257,7 +257,7 @@ commands:
             . .venv/bin/activate
             python --version
             python -m pip install --upgrade pip
-            python -m pip install "ansible-core~=2.18.18" -r requirements.txt
+            python -m pip install "ansible-core~=2.18.20" -r requirements.txt
             ansible --version
       - run:
           name: Install the collection from this checkout
